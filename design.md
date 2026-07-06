@@ -22,7 +22,7 @@ AYScript 是 AY Engine 的**游戏逻辑脚本子系统**。作者编写 **Logia
 | 扩展名 | `.phoskia` | `.logia` |
 | 编译器命名空间 | `ayt::shader::phoskia` | `ayt::script::logia` |
 | 用户可见 | 材质块、uniform、vertex/fragment | component 块、生命周期、引擎 API |
-| 隐藏的后端 | GLSL / bgfx `.sc` | **Lua 5.4** |
+| 隐藏的后端 | GLSL / bgfx `.sc` | **Lua 5.5** |
 | 元数据 | 着色器语义、类型系统 | **AYReflect** TypeRegistry |
 | 所属模块 | AYShader | AYScript |
 
@@ -68,7 +68,7 @@ AYScript 是 AY Engine 的**游戏逻辑脚本子系统**。作者编写 **Logia
 | **AYEntity** | `ScriptComponent`、实体/组件查询；C++ 侧生命周期钩子 |
 | **AYReflect** | 类型/字段/组件元数据；Logia 语义分析的数据源 |
 | **AYGameLoop** | 驱动 `ScriptSubSystem::update` |
-| **Lua 5.4 + sol2** | **仅实现层**；不出现在公开文档与示例中 |
+| **Lua 5.5 + sol2** | **仅实现层**；不出现在公开文档与示例中 |
 
 ### 1.5 明确不做（v1）
 
@@ -374,11 +374,12 @@ AYScript/
 
 ### Phase S1 — Lua 后端与运行时
 
-- [ ] `LuaCodegen`：AST → Lua 源码
-- [ ] `LogiaRuntimeBridge`：sol2 加载、调用生命周期
-- [ ] 对接 `ScriptComponent` + `ScriptSubSystem`
-- [ ] 端到端：`.logia` 修改 Transform.position
-- [ ] 单元测试：Codegen + Runtime
+- [x] `LuaCodegen`：AST → Lua 源码（`include/logia/AYLuaCodegen.h`）
+- [x] `LogiaRuntimeBridge`：sol2 加载、调用生命周期（`AYScriptRuntimeBridge`）
+- [x] `ScriptSubSystem`：ISubSystem 占位实现（首个 ISubSystem 样板）
+- [x] 单元测试：`Test_LogiaCodegen`、`Test_LogiaRuntime`
+- [ ] 对接 `ScriptComponent`（等 AYEntity 准备好，S2 末/S3）
+- [ ] 端到端：`.logia` 修改真实 Transform（依赖 AYEntity ScriptComponent 接入）
 
 ### Phase S2 — Reflect 语义（核心）
 
@@ -406,7 +407,7 @@ AYScript/
 
 | 依赖 | 用途 |
 |------|------|
-| Lua 5.4 | Logia 后端 VM（隐藏） |
+| Lua 5.5 | Logia 后端 VM（隐藏） |
 | sol2 | C++ ↔ Lua 绑定 |
 | AYReflect | 语义分析、类型/组件注册 |
 | AYEntity | ScriptComponent |
@@ -434,6 +435,9 @@ AYScript/
 |------|------|
 | 2026-07-06 | **路线 A 定型**：Logia DSL → Lua 后端；废弃多语言 codegen 方案 |
 | 2026-07-06 | 语言命名：**Logia**（`.logia`），与 Phoskia 成对 |
+| 2026-07-06 | **S0 完成**：Lexer/Parser/AST/错误聚合 + 6 个单测 |
+| 2026-07-06 | **S1 完成**：LuaCodegen + LogiaRuntimeBridge（sol2 3.5.0 + Lua 5.5.0）；ScriptSubSystem 首个 ISubSystem 样板；Codegen 9 + Runtime 9 个单测。注意：实际后端是 Lua **5.5**（vcpkg 安装），原计划 5.4 |
+| 2026-07-06 | Phase S2 待开始：AYReflect 类型校验接入 SemanticAnalyzer |
 
 ---
 
