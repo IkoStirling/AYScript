@@ -1,0 +1,21 @@
+component PlayerController {
+    export var speed: float = 5.0
+    export var jump_force: float = 8.0
+
+    var transform: Transform
+
+    on_start(entity: Entity) {
+        transform = entity.get_component(Transform)
+    }
+
+    on_update(dt: float) {
+        if input.is_pressed("jump") {
+            transform.position.y += jump_force * dt
+        }
+        transform.position.x += speed * dt
+    }
+
+    on_destroy() {
+        log.info("PlayerController destroyed")
+    }
+}
