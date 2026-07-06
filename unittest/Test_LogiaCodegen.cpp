@@ -154,7 +154,8 @@ component Foo {
 }
 
 TEST_CASE(codegen_compound_assignment_chain) {
-    // `a.b.c += 1` should lower with a __tmp temporary.
+    // `a.b.c = expr` lowers to a __tmp temporary that holds the
+    // chain prefix; the leaf field is then assigned via the temporary.
     const char* src = R"(
 component Foo {
     on_update(dt: float) {
@@ -162,17 +163,18 @@ component Foo {
     }
 }
 )";
-    // Note: Logia doesn't actually have a += op in the parser yet — S0
-    // supports '=' plus arithmetic. We test the equivalent: assignment
-    // with compound RHS expansion. Codegen lowers to:
-    //   local __tmp_<n> = a.b
-    //   __tmp_<n>.c = a.b.c + 1
+    // Note: Logia S0 has no `+=` token; this is a plain '=' whose RHS
+    // re-reads a.b.c. Codegen lowers to:
+    //   local __tmp_lhs_N = a.b
+    //   __tmp_lhs_N.c = (a.b.c + 1)
+    // The RHS uses the *original* chain on the read side; emitExpr wraps
+    // the BinaryExpr in parens.
     std::string lua = compileToLua(src);
     CHECK_FALSE(lua.empty());
     CHECK(contains(lua, "__tmp_"));
-    // emitExpr wraps BinaryExpr in parens, so the RHS becomes
-    // "(a.b.c + 1)" rather than "a.b.c + 1". Match the wrapped form.
-    CHECK(containsFlat(lua, "= a.b.c + (a.b.c + 1)"));
+    CHECK(contains(lua, "local __tmp_"));
+    CHECK(contains(lua, " = a.b"));                  // prefix capture
+    CHECK(containsFlat(lua, "= (a.b.c + 1)"));      // RHS is parenthesized
 }
 
 TEST_CASE(codegen_assignment_to_identifier) {
