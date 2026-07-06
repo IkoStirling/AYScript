@@ -9,8 +9,8 @@
 #define SOL_SAFE_NUMERICS   1
 #include <sol/sol.hpp>
 
-#include "AYLog/AYChannel.h"
-#include "AYLog/AYLogger.h"
+#include "AYChannel.h"
+#include "AYLogger.h"
 
 #include <unordered_map>
 
@@ -213,8 +213,11 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
         float dt = arg2 ? *static_cast<float*>(arg2) : 0.0f;
         r = fn.call(scriptName, dt);
     } else if (methodName == "on_start") {
-        // on_start(self, entity) — entity as lightuserdata.
-        r = fn.call(scriptName, sol::lightuserdata(arg1));
+        // on_start(self, entity) — entity passed as lightuserdata. sol2 5.5
+        // accepts a raw void* and pushes it via lua_pushlightuserdata; no
+        // explicit sol::lightuserdata(...) wrapper required (the type was
+        // non-constructible from void* in this version).
+        r = fn.call(scriptName, arg1);
     } else {
         // on_destroy(self) — no extra args.
         r = fn.call(scriptName);

@@ -2,7 +2,7 @@
 
 #include "AYScriptSubSystem.h"
 
-#include "AYLog/AYLogger.h"
+#include "AYLogger.h"
 
 namespace ayt::script
 {
