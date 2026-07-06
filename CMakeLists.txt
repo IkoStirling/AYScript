@@ -28,7 +28,7 @@ target_include_directories(AYScript PUBLIC
 # Public link only exposes AYLog — sol2/lua stay PRIVATE so consumers
 # don't accidentally include sol.hpp.
 target_link_libraries(AYScript
-    PUBLIC  AYLog
+    PUBLIC  AYLog AYGameLoop
     PRIVATE sol2::sol2 ${LUA_LIBRARIES}
 )
 
