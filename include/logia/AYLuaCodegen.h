@@ -26,11 +26,16 @@ class LuaCodegen {
 public:
     explicit LuaCodegen(LuaCodegenOptions options = {});
 
+    // Non-copyable: the codegen holds accumulators (_out, _indent,
+    // _tmpCounter, _errors) that would silently double-emit if copied.
+    LuaCodegen(const LuaCodegen&) = delete;
+    LuaCodegen& operator=(const LuaCodegen&) = delete;
+
     // Generate Lua source from a successfully-parsed Program.
     // Caller should pass a non-null program; the parser's errors are
     // separate from codegen's — codegen assumes the AST is structurally OK
     // and only fails when an AST node cannot be lowered to Lua.
-    LuaCodegenResult generate(const Program& program);
+    [[nodiscard]] LuaCodegenResult generate(const Program& program);
 
 private:
     void emitComponent(const ComponentDecl& component);

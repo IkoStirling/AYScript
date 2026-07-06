@@ -2,6 +2,7 @@
 
 #include "logia/AYLuaCodegen.h"
 
+#include <cstdio>
 #include <sstream>
 #include <utility>
 

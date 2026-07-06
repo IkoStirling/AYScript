@@ -30,7 +30,7 @@ public:
     // Build the sol::state and register the engine API. Safe to call once.
     bool initialize();
     void shutdown();
-    bool isInitialized() const;
+    [[nodiscard]] bool isInitialized() const;
 
     // Compile and load a Logia source string under a logical script name.
     // The compiled module table is cached by scriptName so subsequent
@@ -43,7 +43,7 @@ public:
                     std::vector<logia::CompilerError>& errors);
 
     // Look up a previously-loaded script.
-    bool hasScript(const std::string& scriptName) const;
+    [[nodiscard]] bool hasScript(const std::string& scriptName) const;
 
     // Invoke a lifecycle method on the named script.
     //

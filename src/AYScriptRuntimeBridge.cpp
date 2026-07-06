@@ -196,12 +196,6 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
     }
 
     sol::table M = it->second;
-    sol::object fnObj = M[methodName];
-    if (fnObj.get_type() != sol::type::function &&
-        fnObj.get_type() != sol::type::table) {
-        return false;
-    }
-
     sol::protected_function fn = M[methodName];
     if (!fn.valid()) {
         return false;
