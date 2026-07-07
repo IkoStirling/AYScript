@@ -1,5 +1,5 @@
 #pragma once
-// AYScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1)
+// AYScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1+)
 
 #include <memory>
 #include <string>
@@ -50,22 +50,34 @@ public:
     //   methodName must be "on_start" / "on_update" / "on_destroy" —
     //   matching the names emitted by LuaCodegen.
     //
-    //   arg1 — pointer to the receiver object (ScriptComponent* in real
-    //   usage; any opaque pointer in tests). Passed to Lua as lightuserdata
-    //   so the script can stash it for later use.
+    //   receiver — pointer to the ScriptComponent instance. Passed to
+    //   Lua as lightuserdata so the script's `self` parameter receives
+    //   the actual component (was: a placeholder scriptName string in
+    //   S1). Pass nullptr in tests that don't care about the receiver.
+    //   Typed as void* so AYScript doesn't need to include
+    //   AYScriptComponent.h (which has a static-init side effect that
+    //   requires World to be fully defined). The adapter casts.
     //
-    //   arg2 — for "on_update", points to a float (deltaTime); for other
-    //   methods, ignored. May be nullptr to pass nil/0.
+    //   arg2 — for "on_start", points to the owning Entity*; for
+    //   "on_update", points to a float (deltaTime); for "on_destroy",
+    //   ignored. May be nullptr to pass nil.
     //
     // Returns false if the script/method is missing or the Lua call raised
     // a Lua error (which is then logged).
     bool callLifecycle(const std::string& scriptName,
                        const std::string& methodName,
-                       void* arg1 = nullptr,
+                       void* receiver = nullptr,
                        void* arg2 = nullptr);
 
     // Internal access for tests.
     void* implHandle();
+
+    // Test hook: read a top-level Lua string global by name. Returns
+    // empty string if the global is missing or not a string. The
+    // implementation forwards to the underlying sol::state. Tests
+    // use this to verify that a Lua script wrote to a known global
+    // (e.g. `__test_witness`).
+    std::string getLuaGlobalString(const char* name) const;
 
 private:
     struct Impl;

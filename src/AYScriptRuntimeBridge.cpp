@@ -1,5 +1,12 @@
 // AYScriptRuntimeBridge.cpp - sol2-backed runtime for compiled Logia
 
+// Windows headers (transitively included via AYScriptComponent.h →
+// AYCore.h) pollute `min` / `max` macros via <windows.h>. Define
+// NOMINMAX before any system header is processed.
+#ifndef NOMINMAX
+#define NOMINMAX 1
+#endif
+
 #include "AYScriptRuntimeBridge.h"
 
 #include "logia/AYLogia.h"
@@ -88,6 +95,14 @@ struct LogiaRuntimeBridge::Impl {
         inputTbl["is_pressed"]      = &mockIsPressed;
         inputTbl["is_just_pressed"] = &mockIsJustPressed;
         lua["input"] = inputTbl;
+
+        // Test-only witness: scripts can assign a string here to make
+        // observable side effects for unit tests. Production code
+        // never touches this; it exists solely so the LogiaAdapter
+        // tests can verify that a lifecycle method actually ran and
+        // that the receiver/self mapping is correct without parsing
+        // AYLog output.
+        lua["__test_witness"] = std::string{};
     }
 };
 
@@ -187,7 +202,7 @@ bool LogiaRuntimeBridge::hasScript(const std::string& scriptName) const
 
 bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
                                        const std::string& methodName,
-                                       void* arg1,
+                                       void* receiver,
                                        void* arg2)
 {
     auto it = _impl->scripts.find(scriptName);
@@ -201,20 +216,21 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
         return false;
     }
 
+    // `receiver` is the ScriptComponent*. S2 changed the Lua `self`
+    // argument from the scriptName string (S1 placeholder) to the
+    // actual receiver pointer — sol2 5.5+ pushes a raw typed pointer
+    // through lua_pushlightuserdata without an explicit wrapper.
     sol::protected_function_result r;
     if (methodName == "on_update") {
         // on_update(self, dt) — second param from arg2 pointer.
         float dt = arg2 ? *static_cast<float*>(arg2) : 0.0f;
-        r = fn.call(scriptName, dt);
+        r = fn.call(receiver, dt);
     } else if (methodName == "on_start") {
-        // on_start(self, entity) — entity passed as lightuserdata. sol2 5.5
-        // accepts a raw void* and pushes it via lua_pushlightuserdata; no
-        // explicit sol::lightuserdata(...) wrapper required (the type was
-        // non-constructible from void* in this version).
-        r = fn.call(scriptName, arg1);
+        // on_start(self, entity) — entity passed as lightuserdata.
+        r = fn.call(receiver, arg2);
     } else {
         // on_destroy(self) — no extra args.
-        r = fn.call(scriptName);
+        r = fn.call(receiver);
     }
 
     if (!r.valid()) {
@@ -229,6 +245,16 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
 void* LogiaRuntimeBridge::implHandle()
 {
     return _impl.get();
+}
+
+std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
+{
+    if (_impl == nullptr || name == nullptr) return {};
+    sol::object obj = _impl->lua[name];
+    if (obj.is<std::string>()) {
+        return obj.as<std::string>();
+    }
+    return {};
 }
 
 } // namespace ayt::script

@@ -31,6 +31,10 @@ struct SourceLocation {
     int column = 0;
 };
 
+// Forward declaration so LogiaDiagnostic can name CompilerError as a
+// return type. The full definition follows.
+struct CompilerError;
+
 struct LogiaDiagnostic {
     DiagnosticSeverity severity = DiagnosticSeverity::Error;
     ErrorCode errorCode = ErrorCode::UnexpectedToken;
@@ -39,6 +43,11 @@ struct LogiaDiagnostic {
     std::string hint;
 
     std::string toHumanString() const;
+
+    // Project to legacy CompilerError (drops file + hint, keeps code /
+    // message / line / column). Defined out-of-line below so the
+    // `CompilerError` type is fully visible.
+    CompilerError toCompilerError() const;
 };
 
 struct CompilerError {
@@ -53,6 +62,12 @@ struct CompilerError {
 
     std::string toString() const;
 };
+
+// Out-of-line definition after both types are complete.
+inline CompilerError LogiaDiagnostic::toCompilerError() const
+{
+    return CompilerError(errorCode, message, location.line, location.column);
+}
 
 class CompilerErrorReporter {
 public:

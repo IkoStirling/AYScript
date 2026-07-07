@@ -3,6 +3,9 @@
 #include "logia/AYLogia.h"
 #include "logia/AYLexer.h"
 #include "logia/AYParser.h"
+#include "logia/AYSemanticAnalyzer.h"
+
+#include <algorithm>
 
 namespace ayt::script::logia
 {
@@ -35,8 +38,29 @@ CompileResult Compiler::compile(const std::string& source)
     Parser parser(tokens);
     result.program = parser.parse();
     result.errors = parser.errors();
-    result.success = !parser.hasErrors() && result.program != nullptr;
-    (void)_options;
+    const bool parserOk = !parser.hasErrors() && result.program != nullptr;
+
+    // S2: run semantic analysis on the parsed AST.
+    if (parserOk) {
+        SemanticAnalyzer sem(SemanticOptions{
+            _options.useCompileTimeTypes,
+            _options.fileName.c_str()
+        });
+        SemanticResult semRes = sem.analyze(*result.program);
+        for (auto& d : semRes.diagnostics) {
+            result.diagnostics.push_back(d);
+            if (d.severity == DiagnosticSeverity::Error) {
+                result.errors.push_back(d.toCompilerError());
+            }
+        }
+    }
+
+    result.success = parserOk &&
+        std::none_of(result.diagnostics.begin(),
+                     result.diagnostics.end(),
+                     [](const LogiaDiagnostic& d) {
+                         return d.severity == DiagnosticSeverity::Error;
+                     });
     return result;
 }
 

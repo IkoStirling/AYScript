@@ -1,11 +1,17 @@
 #pragma once
-// AYAst.h - AST node definitions for Logia (S0)
+// AYAst.h - AST node definitions for Logia (S0) + type-attachment slots (S2)
 
 #include "AYToken.h"
 #include <memory>
 #include <string>
 #include <variant>
 #include <vector>
+
+namespace ayt::reflect
+{
+class ITypeInfo;
+class IFieldInfo;
+} // namespace ayt::reflect
 
 namespace ayt::script::logia
 {
@@ -27,6 +33,18 @@ using StmtPtr = std::unique_ptr<Stmt>;
 class Expr {
 public:
     virtual ~Expr() = default;
+
+    // ---- S2: SemanticAnalyzer stamps these fields in place ----
+    // `resolvedType` is the static type of this expression after lookup
+    // (nullptr means unresolved — codegen keeps S1 behavior in that case).
+    // `resolvedField` is set on the leaf MemberExpr when the chain resolves
+    // against a registered type.
+    // `resolvedDecl` is set on IdentifierExpr pointing to the VarDeclStmt* /
+    // Param* that introduced the name into scope (opaque to avoid extra
+    // includes here).
+    const ayt::reflect::ITypeInfo*   resolvedType  = nullptr;
+    const ayt::reflect::IFieldInfo*  resolvedField = nullptr;
+    const void*                      resolvedDecl  = nullptr;
 };
 
 class BinaryExpr : public Expr {
@@ -105,6 +123,11 @@ public:
     std::string name;
     std::string typeName;
     ExprPtr initializer;
+
+    // ---- S2: SemanticAnalyzer resolves `typeName` to a registered type. ----
+    // nullptr when unresolved (built-in or unregistered — analyzer reports
+    // an error in the latter case before stamping null).
+    const ayt::reflect::ITypeInfo* resolvedType = nullptr;
 };
 
 class ReturnStmt : public Stmt {

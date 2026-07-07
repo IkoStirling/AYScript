@@ -82,8 +82,10 @@ component Logger {
     CHECK(errors.empty());
 
     // Should not throw — log.info routes to AYLog.
+    // S2: receiver is opaque void* (ScriptComponent* in real usage).
+    // Pass nullptr since this test doesn't observe the receiver.
     CHECK(bridge.callLifecycle("Logger", "on_start",
-                               /*arg1*/ reinterpret_cast<void*>(0x1000),
+                               /*receiver*/ nullptr,
                                /*arg2*/ nullptr));
 }
 
@@ -102,7 +104,7 @@ component Stepper {
 
     float dt = 0.016f;
     CHECK(bridge.callLifecycle("Stepper", "on_update",
-                               /*arg1*/ nullptr,
+                               /*receiver*/ nullptr,
                                /*arg2*/ &dt));
 }
 
@@ -161,7 +163,9 @@ component JumpOnJump {
     float dt = 1.0f;
     // Mock returns true for "jump" → the if-branch fires and log.info
     // prints "branched-in". The call should succeed.
-    CHECK(bridge.callLifecycle("JumpOnJump", "on_update", nullptr, &dt));
+    CHECK(bridge.callLifecycle("JumpOnJump", "on_update",
+                               /*receiver*/ nullptr,
+                               /*arg2*/ &dt));
 }
 
 TEST_CASE(runtime_reload_replaces_script) {

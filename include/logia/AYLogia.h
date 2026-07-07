@@ -12,11 +12,13 @@ namespace ayt::script::logia
 
 struct CompileOptions {
     std::string fileName;
+    bool useCompileTimeTypes = false;
 };
 
 struct CompileResult {
     bool success = false;
-    std::vector<CompilerError> errors;
+    std::vector<CompilerError> errors;          // legacy (S1) — parser + semantic errors
+    std::vector<LogiaDiagnostic> diagnostics;   // S2 — full diagnostics w/ severity
     std::unique_ptr<Program> program;
 };
 
