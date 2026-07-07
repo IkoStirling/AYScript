@@ -1,19 +1,21 @@
 #pragma once
-// AYSemanticAnalyzer.h - Logia semantic analyzer (S2)
+// AYSemanticAnalyzer.h - Logia semantic analyzer (S2.5)
 //
-// Walks a parsed Logia `Program` and resolves type names against
-// AYReflect's TypeRegistry. Stamps `Expr::resolvedType` /
-// `VarDeclStmt::resolvedType` in place so downstream consumers
-// (LuaCodegen, future type-directed optimizations) can read them.
+// S2.5 redesign: `self` is the canonical way to access the bound
+// ScriptComponent. The analyzer resolves:
+//   - `script Name`           — must match a registered ScriptComponent subclass
+//   - `var x: T`              — T is a known type (builtin or AYReflect-registered)
+//   - `self.field` / `self.field.subfield` — must resolve against AYReflect fields
 //
-// Hard errors (compile fails):
-//   - Unknown type name on a var declaration or parameter
+// Hard errors:
+//   - Unknown type name on a var declaration
+//   - Unknown script name (must match a ScriptComponent subclass)
 //   - Reference to an undeclared identifier
-//   - `get_component(<unknown>)`
+//   - Lifecycle function declared with parameters
 //
 // Soft warnings (compile passes):
-//   - Member access on a registered type where the field doesn't exist
-//   - Calls to identifiers not in scope / not ambient
+//   - Member access where the field doesn't exist on a registered type
+//   - Undeclared identifier read (Lua-style implicit global)
 
 #include "AYAst.h"
 #include "AYCompilerError.h"
@@ -35,13 +37,7 @@ namespace ayt::script::logia
 {
 
 struct SemanticOptions {
-    // Toggle compile-time metadata table lookup. When false (default),
-    // the analyzer only queries the runtime AYReflect TypeRegistry.
-    // When true, `AY_SCRIPT_USE_COMPILE_TIME_TYPES` must also be defined
-    // at compile time (set by the AYScript CMakeLists option).
     bool useCompileTimeTypes = false;
-
-    // File name used in diagnostic locations. May be empty.
     const char* fileName = "";
 };
 
@@ -74,55 +70,56 @@ public:
     SemanticAnalyzer(const SemanticAnalyzer&) = delete;
     SemanticAnalyzer& operator=(const SemanticAnalyzer&) = delete;
 
-    // Walks `program`, stamps Expr/VarDeclStmt fields. Returns the
-    // diagnostic list. The result.success / error semantics are decided
-    // by the caller (`Compiler::compile`); this function always returns
-    // whatever it observed.
     [[nodiscard]] SemanticResult analyze(Program& program);
 
-    // Inject a custom registry. Defaults to the global AYReflect
-    // TypeRegistry singleton. Used by tests to provide deterministic
-    // type lookups without depending on AYEntity static-init ordering.
+    // Inject a custom registry (test hook).
     void setTypeProvider(ayt::reflect::ITypeRegistry* reg);
 
 private:
-    void analyzeComponent(ComponentDecl& c);
+    void analyzeScript(ScriptDecl& s);
     void analyzeVarDecl(VarDeclStmt& v);
     void analyzeLifecycle(LifecycleFuncDecl& fn);
     void analyzeStmt(Stmt& s);
     void analyzeExpr(Expr& e);
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);
-    void analyzeCallExpr(CallExpr& c);
     void analyzeIdentifierExpr(IdentifierExpr& id);
 
-    // Resolve a type name (string from VarDeclStmt.typeName) to an
-    // ITypeInfo*. Returns nullptr on miss. Errors are reported via
-    // `report()` for non-built-in names that miss.
+    // Resolve a type name (string) to an ITypeInfo*. Returns nullptr on
+    // miss. Built-in types (int/float/bool/string/Entity) return nullptr
+    // (no ITypeInfo*) but the caller treats them as valid.
     const ayt::reflect::ITypeInfo* resolveTypeName(const std::string& name,
                                                    int line, int column);
 
+    // Resolve a script name (string) to an ITypeInfo* of the bound
+    // ScriptComponent subclass. Returns nullptr on miss. The script's
+    // own `self` field gets this type via `currentSelfType` during
+    // member analysis.
+    const ayt::reflect::ITypeInfo* resolveScriptName(const std::string& name,
+                                                     int line, int column);
+
     void report(LogiaDiagnostic d);
 
-    static bool isBuiltIn(const std::string& name);
+    static bool isBuiltInType(const std::string& name);
     static bool isAmbientIdentifier(const std::string& name);
-    static const char* builtinTypeName(const std::string& name); // "int"/"float"/etc. or nullptr
 
     SemanticOptions _options;
 
-    // Default registry (process-wide). The default ctor captures this once
-    // and reuses it; `setTypeProvider` overrides it.
-    ayt::reflect::ITypeRegistry* _registry = nullptr;
-    ayt::reflect::TypeRegistryImpl* _registryImpl = nullptr;
-    bool _ownsRegistry = false;
+    ayt::reflect::ITypeRegistry*       _registry     = nullptr;
+    ayt::reflect::TypeRegistryImpl*    _registryImpl = nullptr;
 
     std::vector<LogiaDiagnostic> _diagnostics;
 
-    // Per-component symbol table: name -> (type info, decl ptr).
+    // Per-component scope: name → (type, decl).
     struct ScopeEntry {
         const ayt::reflect::ITypeInfo* type = nullptr;
         const void* decl = nullptr;
     };
     std::unordered_map<std::string, ScopeEntry> _scope;
+
+    // Type of the currently-analyzed `self` (the ScriptComponent
+    // subclass matching the script's name). nullptr if no current
+    // script (shouldn't happen inside analyzeScript).
+    const ayt::reflect::ITypeInfo* _currentSelfType = nullptr;
 
     const std::string _fileName;
 };

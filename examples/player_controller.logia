@@ -1,18 +1,30 @@
-component PlayerController {
-    export var speed: float = 5.0
-    export var jump_force: float = 8.0
+// Logia script for the PlayerController ScriptComponent (S2.5 model).
+//
+// This file references fields (`speed`, `jump_force`, `position`) that
+// must be declared on the C++ side via AY_PROPERTY:
+//   class PlayerController : public ScriptComponent {
+//       AY_PROPERTY(float, speed, kAttrSerialize)
+//       AY_PROPERTY(float, jump_force, kAttrSerialize)
+//       AY_PROPERTY(math::FVector3, position, ...)
+//   };
+//   AY_FINALIZE_REGISTRATION_METADATA(PlayerController)
+//
+// Logia `var` is for script-internal Lua state only (pure local); C++
+// fields are declared on the C++ side and accessed through `self`.
 
-    var transform: Transform
+script PlayerController {
+    var tick_counter: int = 0
 
-    on_start(entity: Entity) {
-        transform = entity.get_component(Transform)
+    on_start() {
+        tick_counter = 0
     }
 
     on_update(dt: float) {
+        tick_counter = tick_counter + 1
         if input.is_pressed("jump") {
-            transform.position.y += jump_force * dt
+            self.position.y = self.position.y + self.jump_force * dt
         }
-        transform.position.x += speed * dt
+        self.position.x = self.position.x + self.speed * dt
     }
 
     on_destroy() {

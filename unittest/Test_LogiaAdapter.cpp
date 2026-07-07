@@ -82,9 +82,10 @@ TEST_CASE(adapter_maps_onStart_to_on_start) {
     LogiaRuntimeBridge bridge;
     LogiaScriptBridgeAdapter adapter(&bridge);
 
+    // S2.5: `script` keyword; lifecycle functions take no params.
     const char* src = R"(
-component Logger {
-    on_start(entity: Entity) {
+script Logger {
+    on_start() {
         __test_witness = "on_start_called"
     }
 }
@@ -104,13 +105,9 @@ TEST_CASE(adapter_maps_onUpdate_to_on_update_passes_dt) {
     LogiaRuntimeBridge bridge;
     LogiaScriptBridgeAdapter adapter(&bridge);
 
-    // Verifies that the dt arg is forwarded: we store a fixed marker
-    // string. (S0/S1 don't expose `dt` as a value we can read from
-    // outside Lua without string concat — full type-aware Lua-side
-    // access is S3 work.)
     const char* src = R"(
-component Stepper {
-    on_update(dt: float) {
+script Stepper {
+    on_update() {
         __test_witness = "on_update_called"
     }
 }
@@ -129,7 +126,7 @@ TEST_CASE(adapter_maps_onDestroy_to_on_destroy) {
     LogiaScriptBridgeAdapter adapter(&bridge);
 
     const char* src = R"(
-component Cleaner {
+script Cleaner {
     on_destroy() {
         __test_witness = "destroyed"
     }
@@ -149,8 +146,8 @@ TEST_CASE(adapter_passes_script_component_as_self) {
     LogiaScriptBridgeAdapter adapter(&bridge);
 
     const char* src = R"(
-component SelfProbe {
-    on_start(entity: Entity) {
+script SelfProbe {
+    on_start() {
         __test_witness = type(self)
     }
 }
@@ -170,7 +167,7 @@ TEST_CASE(adapter_unknown_method_returns_false) {
     LogiaScriptBridgeAdapter adapter(&bridge);
 
     const char* src = R"(
-component NoMethods {
+script NoMethods {
 }
 )";
     CHECK(loadFromSource(bridge, "NoMethods", src));
@@ -187,7 +184,7 @@ TEST_CASE(adapter_hasScript_delegates) {
     CHECK_FALSE(adapter.hasScript("Foo"));
 
     const char* src = R"(
-component Foo {
+script Foo {
 }
 )";
     CHECK(loadFromSource(bridge, "Foo", src));

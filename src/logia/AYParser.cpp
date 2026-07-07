@@ -1,4 +1,8 @@
 // AYParser.cpp
+//
+// S2.5 redesign (2026-07-07): `component` → `script`, `export` removed,
+// lifecycle functions take no parameters, `get_component(...)` is no
+// longer parsed (it was an S0-S2 path that S2.5 replaces with `self`).
 
 #include "logia/AYParser.h"
 #include <stdexcept>
@@ -11,31 +15,31 @@ Parser::Parser(const std::vector<Token>& tokens)
 
 std::unique_ptr<Program> Parser::parse()
 {
-    std::vector<std::unique_ptr<ComponentDecl>> components;
+    std::vector<std::unique_ptr<ScriptDecl>> scripts;
     while (!isAtEnd()) {
         const size_t before = static_cast<size_t>(_current);
-        if (check(TokenType::Component)) {
-            if (auto component = parseComponentDecl()) {
-                components.push_back(std::move(component));
+        if (check(TokenType::Script)) {
+            if (auto script = parseScriptDecl()) {
+                scripts.push_back(std::move(script));
             } else {
                 synchronize();
             }
         } else {
-            error("Expected 'component' declaration");
+            error("Expected 'script' declaration");
             synchronize();
         }
         if (static_cast<size_t>(_current) == before) {
             advance();
         }
     }
-    return std::make_unique<Program>(std::move(components));
+    return std::make_unique<Program>(std::move(scripts));
 }
 
-std::unique_ptr<ComponentDecl> Parser::parseComponentDecl()
+std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
 {
-    consume(TokenType::Component, "Expected 'component'");
-    const Token name = consumeIdentifier("Expected component name");
-    consume(TokenType::LeftBrace, "Expected '{' before component body");
+    consume(TokenType::Script, "Expected 'script'");
+    const Token name = consumeIdentifier("Expected script name");
+    consume(TokenType::LeftBrace, "Expected '{' before script body");
 
     std::vector<StmtPtr> members;
     while (!check(TokenType::RightBrace) && !isAtEnd()) {
@@ -50,21 +54,15 @@ std::unique_ptr<ComponentDecl> Parser::parseComponentDecl()
         }
     }
 
-    consume(TokenType::RightBrace, "Expected '}' after component body");
-    return std::make_unique<ComponentDecl>(name.lexeme, std::move(members));
+    consume(TokenType::RightBrace, "Expected '}' after script body");
+    return std::make_unique<ScriptDecl>(name.lexeme, std::move(members));
 }
 
 std::unique_ptr<Stmt> Parser::parseMember()
 {
-    if (match(TokenType::Export)) {
-        if (!check(TokenType::Var)) {
-            error("Expected 'var' after 'export'");
-            return nullptr;
-        }
-        return parseVarDecl(true);
-    }
+    // S2.5: `export var` is gone — `var` is always a pure local.
     if (check(TokenType::Var)) {
-        return parseVarDecl(false);
+        return parseVarDecl();
     }
     if (match(TokenType::OnStart)) {
         return parseLifecycleFunc(LifecycleKind::OnStart);
@@ -76,11 +74,11 @@ std::unique_ptr<Stmt> Parser::parseMember()
         return parseLifecycleFunc(LifecycleKind::OnDestroy);
     }
 
-    error("Expected component member (var or lifecycle function)");
+    error("Expected script member (var or lifecycle function)");
     return nullptr;
 }
 
-std::unique_ptr<Stmt> Parser::parseVarDecl(bool exported)
+std::unique_ptr<Stmt> Parser::parseVarDecl()
 {
     consume(TokenType::Var, "Expected 'var'");
     const Token name = consumeIdentifier("Expected variable name");
@@ -92,23 +90,29 @@ std::unique_ptr<Stmt> Parser::parseVarDecl(bool exported)
         initializer = parseExpression();
     }
     match(TokenType::Semicolon);
-    return std::make_unique<VarDeclStmt>(exported, name.lexeme, typeName.lexeme, std::move(initializer));
+    // S2.5: no `exported` flag — `var` is always a pure Lua local.
+    return std::make_unique<VarDeclStmt>(name.lexeme, typeName.lexeme, std::move(initializer));
 }
 
 std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind)
 {
     consume(TokenType::LeftParen, "Expected '(' after lifecycle function name");
-    std::vector<Param> params;
+
+    // S2.5: lifecycle functions take no parameters. The parser still
+    // parses a non-empty parameter list (so SemanticAnalyzer can
+    // emit a soft warning for old-style code) but codegen ignores
+    // the params — only `self` reaches Lua.
+    std::vector<Param> legacyParams;
     if (!check(TokenType::RightParen)) {
-        params = parseParamList();
+        legacyParams = parseParamList();
     }
-    consume(TokenType::RightParen, "Expected ')' after parameters");
+    consume(TokenType::RightParen, "Expected ')' after parameter list");
 
     consume(TokenType::LeftBrace, "Expected '{' before function body");
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after function body");
 
-    return std::make_unique<LifecycleFuncDecl>(kind, std::move(params), std::move(body));
+    return std::make_unique<LifecycleFuncDecl>(kind, std::move(legacyParams), std::move(body));
 }
 
 std::vector<Param> Parser::parseParamList()
@@ -132,7 +136,7 @@ std::unique_ptr<Stmt> Parser::parseStatement()
         return parseIfStmt();
     }
     if (check(TokenType::Var)) {
-        return parseVarDecl(false);
+        return parseVarDecl();
     }
 
     auto expr = parseExpression();
@@ -410,9 +414,8 @@ void Parser::synchronize()
 {
     while (!isAtEnd()) {
         switch (current().type) {
-        case TokenType::Component:
+        case TokenType::Script:
         case TokenType::Var:
-        case TokenType::Export:
         case TokenType::OnStart:
         case TokenType::OnUpdate:
         case TokenType::OnDestroy:

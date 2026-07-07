@@ -8,9 +8,8 @@ namespace ayt::script::logia
 {
 
 enum class TokenType : uint8_t {
-    Component,
+    Script,         // S2.5: was Component. Top-level `script Name { ... }`.
     Var,
-    Export,
     OnStart,
     OnUpdate,
     OnDestroy,

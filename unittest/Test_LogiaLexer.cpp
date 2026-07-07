@@ -1,4 +1,4 @@
-// Logia lexer unit tests (S0)
+// Logia lexer unit tests (S0/S2.5)
 
 #include "AYScript.h"
 #include "AYTest.h"
@@ -7,11 +7,12 @@ using namespace ayt::script::logia;
 
 TEST_SUITE(LogiaLexerTests)
 
-TEST_CASE(keyword_component) {
+TEST_CASE(keyword_script) {
+    // S2.5: `component` keyword renamed to `script`.
     std::vector<Token> tokens;
-    tokenize("component", tokens);
+    tokenize("script", tokens);
     CHECK(tokens.size() == 2u);
-    CHECK(tokens[0].type == TokenType::Component);
+    CHECK(tokens[0].type == TokenType::Script);
     CHECK(tokens[1].type == TokenType::EndOfFile);
 }
 
@@ -34,9 +35,19 @@ TEST_CASE(compound_assignment) {
 
 TEST_CASE(line_comment_skipped) {
     std::vector<Token> tokens;
-    tokenize("// comment\ncomponent", tokens);
+    tokenize("// comment\nscript", tokens);
     CHECK(tokens.size() == 2u);
-    CHECK(tokens[0].type == TokenType::Component);
+    CHECK(tokens[0].type == TokenType::Script);
+}
+
+TEST_CASE(export_is_identifier_not_keyword) {
+    // S2.5: `export` is no longer a keyword. It now tokenizes as an
+    // Identifier (the parser will reject it as a syntax error).
+    std::vector<Token> tokens;
+    tokenize("export", tokens);
+    CHECK(tokens.size() == 2u);
+    CHECK(tokens[0].type == TokenType::Identifier);
+    CHECK(tokens[0].lexeme == "export");
 }
 
 // String literal escape sequences

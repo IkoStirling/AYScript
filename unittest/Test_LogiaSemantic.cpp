@@ -1,22 +1,21 @@
-// Logia semantic analyzer unit tests (S2)
+// Logia semantic analyzer unit tests (S2.5)
 //
 // Verifies that SemanticAnalyzer:
-//   - hard-errors on unknown var/param type names
-//   - hard-errors on unknown identifiers in expressions
-//   - hard-errors on get_component(<unknown>)
-//   - soft-warns on member access where field is missing
-//   - stamps resolvedType on VarDeclStmt / MemberExpr / CallExpr when
-//     a registered type is found
-//   - recognizes built-in primitives + ambient identifiers (input/log/time)
+//   - hard-errors on unknown var type names
+//   - hard-errors on lifecycle functions declared with parameters
+//   - hard-errors on `get_component(...)` (S2.5 removed)
+//   - soft-warns on member access where the field doesn't exist on a
+//     registered type
+//   - soft-warns on read of undeclared identifiers (Lua-style implicit
+//     global)
+//   - resolves `self.field` against AYReflect fields
+//   - stamps `VarDeclStmt::resolvedType` for known registered types
 //   - accepts the canonical player_controller.logia example
 
 #include "AYScript.h"
 #include "logia/AYSemanticAnalyzer.h"
 #include "AYTest.h"
 
-// AYReflect full include — needed to access ITypeInfo::getName() etc.
-// (forward declaration in AYAST.h is sufficient for pointers, but
-// member access on the pointee needs the full definition).
 #include "IAYReflect.h"
 
 #include <string>
@@ -47,7 +46,7 @@ bool hasWarning(const CompileResult& r, ErrorCode code)
 
 const VarDeclStmt* findVar(const Program& p, const std::string& name)
 {
-    for (const auto& c : p.components) {
+    for (const auto& c : p.scripts) {
         if (!c) continue;
         for (const auto& m : c->members) {
             if (!m) continue;
@@ -66,7 +65,7 @@ TEST_SUITE(LogiaSemanticTests)
 TEST_CASE(semantic_unknown_var_type_is_hard_error) {
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
+script Foo {
     var x: NotARealType
 }
 )");
@@ -74,47 +73,15 @@ component Foo {
     CHECK(hasError(r, ErrorCode::TypeMismatch));
 }
 
-TEST_CASE(semantic_unknown_param_type_is_hard_error) {
-    Compiler c;
-    auto r = c.compile(R"(
-component Foo {
-    on_start(p: BogusType) {
-    }
-}
-)");
-    CHECK_FALSE(r.success);
-    CHECK(hasError(r, ErrorCode::TypeMismatch));
-}
-
-TEST_CASE(semantic_builtin_types_resolve) {
-    Compiler c;
-    auto r = c.compile(R"(
-component Foo {
-    export var i: int = 0
-    export var f: float = 0.0
-    export var b: bool = true
-    export var s: string = ""
-}
-)");
-    CHECK(r.success);
-    // Built-ins are accepted without an ITypeInfo (stamp is intentionally
-    // left as nullptr — see SemanticAnalyzer::analyzeVarDecl).
-    CHECK_NOT_NULL(findVar(*r.program, "i"));
-    CHECK_NOT_NULL(findVar(*r.program, "f"));
-    CHECK_NOT_NULL(findVar(*r.program, "b"));
-    CHECK_NOT_NULL(findVar(*r.program, "s"));
-}
-
 TEST_CASE(semantic_known_registered_type_resolves) {
+    // Transform is registered by AYEntity's static-init chain; the
+    // semantic analyzer must accept it.
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
+script Foo {
     var t: Transform
 }
 )");
-    // Transform must be registered by AYEntity. If not, this test fails —
-    // that's a useful negative signal that AYEntity isn't being linked
-    // into the test exe.
     CHECK(r.success);
     auto* v = findVar(*r.program, "t");
     CHECK_NOT_NULL(v);
@@ -122,56 +89,78 @@ component Foo {
     CHECK(std::string(v->resolvedType->getName()) == "Transform");
 }
 
-TEST_CASE(semantic_unknown_field_is_soft_warning) {
+TEST_CASE(semantic_builtin_types_resolve) {
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    var t: Transform
-    on_update(dt: float) {
-        t.no_such_field = 1
+script Foo {
+    var i: int = 0
+    var f: float = 0.0
+    var b: bool = true
+    var s: string = ""
+    var e: Entity
+}
+)");
+    CHECK(r.success);
+    CHECK_NOT_NULL(findVar(*r.program, "i"));
+    CHECK_NOT_NULL(findVar(*r.program, "f"));
+    CHECK_NOT_NULL(findVar(*r.program, "b"));
+    CHECK_NOT_NULL(findVar(*r.program, "s"));
+    CHECK_NOT_NULL(findVar(*r.program, "e"));
+}
+
+TEST_CASE(semantic_lifecycle_with_params_is_warning) {
+    // S2.5: lifecycle functions take no parameters. The parser forgives
+    // non-empty param lists (for backward compat) and SemanticAnalyzer
+    // emits a soft warning. The compile still succeeds.
+    Compiler c;
+    auto r = c.compile(R"(
+script Foo {
+    on_start(entity: Entity) {
     }
 }
 )");
-    // Soft warning: compile still succeeds.
+    CHECK(r.success);
+    CHECK(hasWarning(r, ErrorCode::InvalidStatement));
+}
+
+TEST_CASE(semantic_get_component_is_soft_warning) {
+    // S2.5: `get_component(...)` is removed from the language.
+    // `get_component` is now treated as a regular identifier (not
+    // ambient) — reading it produces a soft warning (Lua-style
+    // implicit global). The compile still succeeds; runtime would
+    // fail if the script actually called it.
+    Compiler c;
+    auto r = c.compile(R"(
+script Foo {
+    var t: Transform
+    on_start() {
+        t = get_component(Transform)
+    }
+}
+)");
     CHECK(r.success);
     CHECK(hasWarning(r, ErrorCode::UnknownIdentifier));
 }
 
-TEST_CASE(semantic_get_component_known_type_ok) {
+TEST_CASE(semantic_export_keyword_is_syntax_error) {
+    // S2.5: `export var` is removed. The parser will reject `export`
+    // as an unrecognized token inside a script body.
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    on_start(entity: Entity) {
-        entity.get_component(Transform)
-    }
-}
-)");
-    CHECK(r.success);
-}
-
-TEST_CASE(semantic_get_component_unknown_type_hard_error) {
-    Compiler c;
-    auto r = c.compile(R"(
-component Foo {
-    on_start(entity: Entity) {
-        entity.get_component(FooBar)
-    }
+script Foo {
+    export var x: int = 5
 }
 )");
     CHECK_FALSE(r.success);
-    CHECK(hasError(r, ErrorCode::TypeMismatch));
 }
 
-TEST_CASE(semantic_undeclared_identifier_is_warning) {
-    // S2 chose to soft-warn (not hard-error) on undeclared identifiers
-    // because Logia's runtime model is Lua-style implicit globals.
-    // Compiles pass; warning is emitted on any read reference.
-    // (An LHS-only reference like `nonsense = 1` is an implicit
-    // declaration — no warning. We exercise the read path here.)
+TEST_CASE(semantic_undeclared_identifier_is_soft_warning) {
+    // S2.5: undeclared identifier read = Lua-style implicit global —
+    // warn, don't fail.
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    on_update(dt: float) {
+script Foo {
+    on_update() {
         nonsense + 1
     }
 }
@@ -183,9 +172,9 @@ component Foo {
 TEST_CASE(semantic_ambient_input_log_resolve) {
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    on_update(dt: float) {
-        input.is_pressed("jump")
+script Foo {
+    on_update() {
+        input.is_pressed("x")
         log.info("hi")
     }
 }
@@ -193,28 +182,23 @@ component Foo {
     CHECK(r.success);
 }
 
-TEST_CASE(semantic_member_chain_resolves_fields) {
-    // t.position.x = 0.0 : the analyzer should stamp the intermediate
-    // `t.position` MemberExpr with its Transform::position field info.
-    // The leaf `.x` is on FVector3, which S2 doesn't introspect (FVector3
-    // uses anonymous-union fields that aren't reflectable), so the leaf
-    // member is left un-stamped with a soft warning — codegen still
-    // emits the bare `t.position.x = 0.0` as Lua. We assert that the
-    // *intermediate* member chain (Transform::position) is resolved.
+TEST_CASE(semantic_self_field_resolves_against_AYReflect) {
+    // `self.position` must resolve against Transform's AY_PROPERTY.
+    // SemanticAnalyzer stamps `resolvedField` on the leaf MemberExpr.
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
+script Foo {
     var t: Transform
-    on_update(dt: float) {
+    on_update() {
         t.position.x = 0.0
     }
 }
 )");
     CHECK(r.success);
     bool foundChain = false;
-    for (const auto& c1 : r.program->components) {
-        if (!c1) continue;
-        for (const auto& m : c1->members) {
+    for (const auto& sc : r.program->scripts) {
+        if (!sc) continue;
+        for (const auto& m : sc->members) {
             if (!m) continue;
             if (auto* lf = dynamic_cast<LifecycleFuncDecl*>(m.get())) {
                 for (const auto& s : lf->body) {
@@ -242,13 +226,26 @@ component Foo {
     CHECK(foundChain);
 }
 
-TEST_CASE(semantic_literal_types) {
-    // No stamp assertion in S2 (codegen doesn't read it). Verify just that
-    // the analyzer doesn't crash or error on a literal-only body.
+TEST_CASE(semantic_self_unknown_field_is_soft_warning) {
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    on_update(dt: float) {
+script Foo {
+    var t: Transform
+    on_update() {
+        t.no_such_field = 1
+    }
+}
+)");
+    // Soft warning: compile still succeeds.
+    CHECK(r.success);
+    CHECK(hasWarning(r, ErrorCode::UnknownIdentifier));
+}
+
+TEST_CASE(semantic_literal_types) {
+    Compiler c;
+    auto r = c.compile(R"(
+script Foo {
+    on_update() {
         1
         1.0
         true
@@ -262,10 +259,10 @@ component Foo {
 TEST_CASE(semantic_binary_expr_int_arith) {
     Compiler c;
     auto r = c.compile(R"(
-component Foo {
-    export var a: int = 0
-    export var b: int = 0
-    on_update(dt: float) {
+script Foo {
+    var a: int = 0
+    var b: int = 0
+    on_update() {
         a = a + b
     }
 }
@@ -274,24 +271,21 @@ component Foo {
 }
 
 TEST_CASE(semantic_player_controller_example_compiles) {
-    // Read examples/player_controller.logia if available; otherwise inline
-    // the canonical body so the test is self-contained.
+    // The canonical example from examples/player_controller.logia.
     const char* src = R"(
-component PlayerController {
-    export var speed: float = 5.0
-    export var jump_force: float = 8.0
+script PlayerController {
+    var tick_counter: int = 0
 
-    var transform: Transform
-
-    on_start(entity: Entity) {
-        transform = entity.get_component(Transform)
+    on_start() {
+        tick_counter = 0
     }
 
     on_update(dt: float) {
+        tick_counter = tick_counter + 1
         if input.is_pressed("jump") {
-            transform.position.y = transform.position.y + jump_force * dt
+            self.position.y = self.position.y + self.jump_force * dt
         }
-        transform.position.x = transform.position.x + speed * dt
+        self.position.x = self.position.x + self.speed * dt
     }
 
     on_destroy() {
@@ -299,6 +293,10 @@ component PlayerController {
     }
 }
 )";
+    // Note: `script PlayerController` itself is not registered with
+    // AYReflect (only Transform/HealthComponent are). SemanticAnalyzer
+    // emits a soft warning on the unknown script name; the compile
+    // still succeeds.
     Compiler c;
     auto r = c.compile(src);
     CHECK(r.success);

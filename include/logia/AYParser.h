@@ -21,9 +21,9 @@ public:
     bool hasErrors() const { return _reporter.hasErrors(); }
 
 private:
-    std::unique_ptr<ComponentDecl> parseComponentDecl();
+    std::unique_ptr<ScriptDecl> parseScriptDecl();
     std::unique_ptr<Stmt> parseMember();
-    std::unique_ptr<Stmt> parseVarDecl(bool exported);
+    std::unique_ptr<Stmt> parseVarDecl();
     std::unique_ptr<Stmt> parseLifecycleFunc(LifecycleKind kind);
     std::unique_ptr<Stmt> parseStatement();
     std::vector<Param> parseParamList();

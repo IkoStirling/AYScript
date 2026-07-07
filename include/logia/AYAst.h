@@ -1,5 +1,11 @@
 #pragma once
-// AYAst.h - AST node definitions for Logia (S0) + type-attachment slots (S2)
+// AYAst.h - AST node definitions for Logia (S0/S1/S2) + S2.5 redesign
+//
+// S2.5 redesign (2026-07-07): `component` keyword renamed to `script`,
+// `export` keyword removed, `ComponentDecl` renamed to `ScriptDecl`,
+// `VarDeclStmt::exported` field removed. Logia `var` is now always a
+// pure Lua local; C++ fields are declared on the ScriptComponent
+// subclass via AY_PROPERTY and accessed through `self.field`.
 
 #include "AYToken.h"
 #include <memory>
@@ -24,7 +30,7 @@ enum class LifecycleKind {
 
 class Expr;
 class Stmt;
-class ComponentDecl;
+class ScriptDecl;
 class Program;
 
 using ExprPtr = std::unique_ptr<Expr>;
@@ -114,12 +120,13 @@ public:
 
 class VarDeclStmt : public Stmt {
 public:
-    VarDeclStmt(bool exported, std::string name, std::string typeName, ExprPtr initializer)
-        : exported(exported),
-          name(std::move(name)),
+    // S2.5: `export` keyword removed. Logia `var` is always a pure
+    // Lua local. C++ fields are declared via AY_PROPERTY on the
+    // ScriptComponent subclass and accessed via `self.field`.
+    VarDeclStmt(std::string name, std::string typeName, ExprPtr initializer)
+        : name(std::move(name)),
           typeName(std::move(typeName)),
           initializer(std::move(initializer)) {}
-    bool exported = false;
     std::string name;
     std::string typeName;
     ExprPtr initializer;
@@ -154,16 +161,21 @@ struct Param {
 
 class LifecycleFuncDecl : public Stmt {
 public:
+    // S2.5: lifecycle functions take no parameters. The parser
+    // records the original parameter list (so SemanticAnalyzer can
+    // emit a soft warning for old-style `on_start(entity: Entity)` /
+    // `on_update(dt: float)` code) but emits the Lua function with
+    // just `(self)` — the params don't reach Lua.
     LifecycleFuncDecl(LifecycleKind kind, std::vector<Param> params, std::vector<StmtPtr> body)
         : kind(kind), params(std::move(params)), body(std::move(body)) {}
     LifecycleKind kind;
-    std::vector<Param> params;
+    std::vector<Param> params;   // S2.5: diagnostic only, not emitted
     std::vector<StmtPtr> body;
 };
 
-class ComponentDecl {
+class ScriptDecl {
 public:
-    ComponentDecl(std::string name, std::vector<StmtPtr> members)
+    ScriptDecl(std::string name, std::vector<StmtPtr> members)
         : name(std::move(name)), members(std::move(members)) {}
     std::string name;
     std::vector<StmtPtr> members;
@@ -171,9 +183,9 @@ public:
 
 class Program {
 public:
-    explicit Program(std::vector<std::unique_ptr<ComponentDecl>> components)
-        : components(std::move(components)) {}
-    std::vector<std::unique_ptr<ComponentDecl>> components;
+    explicit Program(std::vector<std::unique_ptr<ScriptDecl>> scripts)
+        : scripts(std::move(scripts)) {}
+    std::vector<std::unique_ptr<ScriptDecl>> scripts;
 };
 
 const char* lifecycleKindName(LifecycleKind kind);

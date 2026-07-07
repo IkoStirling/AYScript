@@ -133,10 +133,11 @@ Token Lexer::makeToken(std::vector<Token>& out, TokenType type, int length)
 
 TokenType Lexer::identifierType(const std::string& lexeme)
 {
+    // S2.5 redesign: `component` → `script`, `export` removed (C++ AY_PROPERTY
+    // is now the single source of truth for which fields are exposed).
     static const std::unordered_map<std::string, TokenType> keywords = {
-        {"component", TokenType::Component},
+        {"script", TokenType::Script},
         {"var", TokenType::Var},
-        {"export", TokenType::Export},
         {"on_start", TokenType::OnStart},
         {"on_update", TokenType::OnUpdate},
         {"on_destroy", TokenType::OnDestroy},

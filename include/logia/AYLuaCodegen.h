@@ -1,5 +1,11 @@
 #pragma once
-// AYLuaCodegen.h - AST → Lua source generator for Logia (S1)
+// AYLuaCodegen.h - AST → Lua source generator for Logia (S1) + S2.5
+//
+// S2.5 redesign: `component` → `script`, `export var` removed, all `var`
+// are local Lua variables. The generated Lua module exposes `M.on_*`
+// functions that receive `self` (lightuserdata) as the first argument.
+// Field access on `self` is left as bare Lua member syntax — S3 will
+// route it through AYReflect-backed accessors.
 
 #include "AYAst.h"
 #include "AYCompilerError.h"
@@ -38,9 +44,8 @@ public:
     [[nodiscard]] LuaCodegenResult generate(const Program& program);
 
 private:
-    void emitComponent(const ComponentDecl& component);
-    void emitExportedVar(const VarDeclStmt& var);
-    void emitPrivateVar(const VarDeclStmt& var);
+    void emitScript(const ScriptDecl& script);
+    void emitLocalVar(const VarDeclStmt& var);
     void emitLifecycleFunc(const LifecycleFuncDecl& func);
 
     void emitBlock(const std::vector<StmtPtr>& body);
