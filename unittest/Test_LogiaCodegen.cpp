@@ -200,9 +200,16 @@ component Foo {
 )";
     std::string lua = compileToLua(src);
     CHECK_FALSE(lua.empty());
-    CHECK(containsFlat(lua, "log.info(\\\"hello"));
-    CHECK(containsFlat(lua, "\\\"world\\\""));
-    CHECK(containsFlat(lua, "\\n\\\")"));
+    // Source literal: hello "world"<LF>
+    // Codegen escapeString lowers to: "hello \"world\"\n"
+    //   - inner '"' becomes \" (so output contains the literal 2-char
+    //     sequence backslash-quote)
+    //   - '\n' (LF byte) becomes \n (backslash + 'n')
+    // flatten() collapses whitespace but does not touch \ or " — the
+    // assertion needles must use the post-escape form.
+    CHECK(containsFlat(lua, "log.info(\"hello"));
+    CHECK(containsFlat(lua, "\\\"world\\\""));      // \" world \"
+    CHECK(containsFlat(lua, "\\n\")"));            // \n ")
 }
 
 TEST_CASE(codegen_full_player_controller) {
