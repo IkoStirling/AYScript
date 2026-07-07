@@ -190,12 +190,6 @@ component Foo {
     CHECK(containsFlat(lua, "speed = (speed + 1)"));
 }
 
-// DISABLED: depends on S0 Lexer supporting string escape sequences
-// (\", \\, \n). The current Lexer terminates the string at the first
-// raw '"' inside the literal, so the source below fails to parse and
-// compileToLua returns empty. Re-enable once Lexer string handling is
-// fixed (tracked separately).
-#if 0
 TEST_CASE(codegen_string_literal_escape) {
     const char* src = R"(
 component Foo {
@@ -210,7 +204,6 @@ component Foo {
     CHECK(containsFlat(lua, "\\\"world\\\""));
     CHECK(containsFlat(lua, "\\n\\\")"));
 }
-#endif
 
 TEST_CASE(codegen_full_player_controller) {
     // The canonical example from examples/player_controller.logia.

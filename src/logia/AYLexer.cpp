@@ -192,22 +192,90 @@ Token Lexer::identifier(std::vector<Token>& out)
 
 Token Lexer::stringLiteral(std::vector<Token>& out)
 {
+    std::string value;
+    value.reserve(16);
+
     while (peek() != '"' && !isAtEnd()) {
-        if (peek() == '\n') {
+        char c = peek();
+
+        if (c == '\\') {
+            // Escape sequence
+            advance();  // consume '\'
+            if (isAtEnd()) break;
+            char esc = peek();
+            switch (esc) {
+            case '"':  value += '"';  advance(); break;
+            case '\\': value += '\\'; advance(); break;
+            case 'n':  value += '\n'; advance(); break;
+            case 'r':  value += '\r'; advance(); break;
+            case 't':  value += '\t'; advance(); break;
+            case '0':  value += '\0'; advance(); break;
+            case '\n':
+                // Line continuation: '\' + newline → discard both
+                advance();
+                _line++;
+                _column = 0;
+                break;
+            case 'x': {
+                // \xHH — exactly two hex digits required
+                advance();
+                if (isAtEnd() ||
+                    !std::isxdigit(static_cast<unsigned char>(peek()))) {
+                    // Malformed: drop the 'x', keep raw chars
+                    value += 'x';
+                    break;
+                }
+                int hi = peek();
+                advance();
+                if (isAtEnd() ||
+                    !std::isxdigit(static_cast<unsigned char>(peek()))) {
+                    // Only one hex digit — keep as-is
+                    value += static_cast<char>(hi);
+                    break;
+                }
+                int lo = peek();
+                advance();
+                auto hexVal = [](int d) -> int {
+                    if (d >= '0' && d <= '9') return d - '0';
+                    if (d >= 'a' && d <= 'f') return 10 + (d - 'a');
+                    return 10 + (d - 'A');
+                };
+                value += static_cast<char>((hexVal(hi) << 4) | hexVal(lo));
+                break;
+            }
+            default:
+                // Unknown escape: keep the character literally
+                value += esc;
+                advance();
+                break;
+            }
+            continue;
+        }
+
+        if (c == '\n') {
+            // Unescaped newline inside a string literal — keep as-is in the
+            // value but advance the line counter so subsequent error
+            // messages have correct locations.
+            value += '\n';
             _line++;
             _column = 0;
+        } else {
+            value += c;
         }
         advance();
     }
 
     if (isAtEnd()) {
+        // Unterminated string — emit Unknown token covering the span we read
         return makeToken(out, TokenType::Unknown, _current - _start);
     }
 
+    // Consume closing '"'
     advance();
+
     Token token;
     token.type = TokenType::StringLiteral;
-    token.lexeme = _source.substr(_start + 1, static_cast<size_t>(_current - _start - 2));
+    token.lexeme = std::move(value);
     token.line = _line;
     token.column = _column - static_cast<int>(token.lexeme.length()) - 2 + 1;
     out.push_back(token);
