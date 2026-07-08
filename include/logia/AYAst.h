@@ -179,6 +179,14 @@ public:
         : name(std::move(name)), members(std::move(members)) {}
     std::string name;
     std::vector<StmtPtr> members;
+
+    // LG-05 / S3.3: stamped by SemanticAnalyzer for codegen. The
+    // AYReflect-registered type name matching `name` — used to
+    // emit `ayt_reflect_*_field(self, "<hostTypeName>", "<f>")`
+    // for `self.field` reads/writes. Empty when the script's name
+    // did not resolve (codegen falls back to bare `self.<field>`
+    // access, same as S2.5).
+    std::string hostTypeName;
 };
 
 class Program {

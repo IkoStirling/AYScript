@@ -269,6 +269,16 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
 
     _currentSelfType = selfType;
 
+    // LG-05 / S3.3: stamp the host type name on the ScriptDecl so
+    // LuaCodegen can emit `ayt_reflect_*_field(self, "<name>", "<f>")`
+    // for `self.field` reads/writes. Only set when the script name
+    // resolved in AYReflect — otherwise codegen keeps the S2.5 bare
+    // `self.<field>` form (a no-op at runtime) so unknown hosts do
+    // not crash the reflect path.
+    if (selfType) {
+        s.hostTypeName = std::string(selfType->getName());
+    }
+
     // Inject `self` into the script's scope so `self.field` resolves.
     ScopeEntry e;
     e.type = selfType;

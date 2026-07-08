@@ -19,7 +19,15 @@
 #include "AYChannel.h"
 #include "AYLogger.h"
 
+// LG-05 / S3.3: AYReflect introspection for `self.field` runtime
+// reads/writes. lua_State* comes from sol2 via its bundled
+// compat layer, so the lua_pushinteger/pop helpers below are
+// visible without an extra `<lua.h>` include.
+#include "IAYReflect.h"
+#include "AYReflect.h"  // full TypeRegistryImpl definition
+
 #include <unordered_map>
+#include <cstring>
 
 namespace ayt::script
 {
@@ -43,6 +51,159 @@ bool mockIsPressed(const std::string& key)
 bool mockIsJustPressed(const std::string& /*key*/)
 {
     return false;
+}
+
+// ------------------------------------------------------------
+// LG-05 / S3.3 — AYReflect-backed self.field read/write
+// ------------------------------------------------------------
+// Logia codegen routes `self.field` accesses through these plain
+// `lua_CFunction` globals. Lua passes `self` as lightuserdata
+// (= ScriptComponent*) plus two string args: the host type name
+// (= the `script Name { … }` declaration) and the field name.
+// The bridge looks up the IFieldInfo in AYReflect's TypeRegistry
+// and reads/writes through the field's stored offset.
+//
+// Name-keyed instead of typeid-keyed because the codegen only
+// knows the host *name* (a string). Lifetime: IFieldInfo* lives
+// in the registry which is process-scope; fieldCache() below
+// retains pointers indefinitely but they never get freed.
+// ------------------------------------------------------------
+
+struct FieldKey {
+    std::string typeName;
+    std::string fieldName;
+    bool operator==(const FieldKey& o) const {
+        return typeName == o.typeName && fieldName == o.fieldName;
+    }
+};
+struct FieldKeyHash {
+    size_t operator()(const FieldKey& k) const {
+        return std::hash<std::string>{}(k.typeName) ^
+               (std::hash<std::string>{}(k.fieldName) << 1);
+    }
+};
+std::unordered_map<FieldKey, const ayt::reflect::IFieldInfo*, FieldKeyHash>& fieldCache()
+{
+    static std::unordered_map<FieldKey, const ayt::reflect::IFieldInfo*, FieldKeyHash> c;
+    return c;
+}
+
+const ayt::reflect::IFieldInfo* lookupField(const std::string& typeName,
+                                            const std::string& fieldName)
+{
+    FieldKey k{typeName, fieldName};
+    auto& cache = fieldCache();
+    auto it = cache.find(k);
+    if (it != cache.end()) return it->second;
+    auto* typeInfo = ayt::reflect::TypeRegistryImpl::instance().findType(typeName.c_str());
+    if (!typeInfo) return nullptr;
+    auto* field = typeInfo->findField(fieldName.c_str());
+    if (!field) return nullptr;
+    cache[k] = field;
+    return field;
+}
+
+// Push a primitive (int/float/bool/double/int64) onto the Lua
+// stack from a `void*` field pointer. Caller is responsible for
+// the type tag — returns 1 on success, 0 on miss. Used only by
+// `ayt_reflect_get_field_c` below.
+int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void* fieldPtr)
+{
+    auto* type = field->getType();
+    if (!type) return 0;
+    const char* tname = type->getName();
+    if (!tname) return 0;
+    auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
+    if (eq("int") || eq("Int32")) {
+        lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int32_t*>(fieldPtr)));
+        return 1;
+    }
+    if (eq("float") || eq("Float32")) {
+        lua_pushnumber(L, static_cast<lua_Number>(*static_cast<float*>(fieldPtr)));
+        return 1;
+    }
+    if (eq("bool") || eq("Bool")) {
+        lua_pushboolean(L, *static_cast<bool*>(fieldPtr));
+        return 1;
+    }
+    if (eq("double") || eq("Float64")) {
+        lua_pushnumber(L, static_cast<lua_Number>(*static_cast<double*>(fieldPtr)));
+        return 1;
+    }
+    if (eq("Int64")) {
+        lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int64_t*>(fieldPtr)));
+        return 1;
+    }
+    return 0;
+}
+
+int ayt_reflect_get_field_c(lua_State* L)
+{
+    if (!lua_islightuserdata(L, 1) || !lua_isstring(L, 2) || !lua_isstring(L, 3)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    void* selfPtr = lua_touserdata(L, 1);
+    std::string typeName = lua_tostring(L, 2);
+    std::string fieldName = lua_tostring(L, 3);
+
+    auto* field = lookupField(typeName, fieldName);
+    if (!field || selfPtr == nullptr) {
+        lua_pushnil(L);
+        return 1;
+    }
+    void* fieldPtr = field->get(selfPtr);
+    if (pushFieldPrimitive(L, field, fieldPtr) == 0) {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+int ayt_reflect_set_field_c(lua_State* L)
+{
+    if (!lua_islightuserdata(L, 1) || !lua_isstring(L, 2) || !lua_isstring(L, 3)) {
+        return 0;
+    }
+    void* selfPtr = lua_touserdata(L, 1);
+    std::string typeName = lua_tostring(L, 2);
+    std::string fieldName = lua_tostring(L, 3);
+
+    auto* field = lookupField(typeName, fieldName);
+    if (!field || selfPtr == nullptr) {
+        ayt::log::error("ayt_reflect_set_field: %s.%s (no field or null self)",
+                        typeName.c_str(), fieldName.c_str());
+        return 0;
+    }
+    void* fieldPtr = field->get(selfPtr);
+    auto* type = field->getType();
+    if (!type) return 0;
+    const char* tname = type->getName();
+    if (!tname) return 0;
+    auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
+
+    if (eq("int") || eq("Int32")) {
+        *static_cast<int32_t*>(fieldPtr) = static_cast<int32_t>(lua_tointeger(L, 4));
+        return 0;
+    }
+    if (eq("float") || eq("Float32")) {
+        *static_cast<float*>(fieldPtr) = static_cast<float>(lua_tonumber(L, 4));
+        return 0;
+    }
+    if (eq("bool") || eq("Bool")) {
+        *static_cast<bool*>(fieldPtr) = (lua_toboolean(L, 4) != 0);
+        return 0;
+    }
+    if (eq("double") || eq("Float64")) {
+        *static_cast<double*>(fieldPtr) = static_cast<double>(lua_tonumber(L, 4));
+        return 0;
+    }
+    if (eq("Int64")) {
+        *static_cast<int64_t*>(fieldPtr) = static_cast<int64_t>(lua_tointeger(L, 4));
+        return 0;
+    }
+    ayt::log::error("ayt_reflect_set_field: %s.%s unsupported type %s",
+                    typeName.c_str(), fieldName.c_str(), tname);
+    return 0;
 }
 
 } // namespace
@@ -95,6 +256,17 @@ struct LogiaRuntimeBridge::Impl {
         inputTbl["is_pressed"]      = &mockIsPressed;
         inputTbl["is_just_pressed"] = &mockIsJustPressed;
         lua["input"] = inputTbl;
+
+        // LG-05 / S3.3: AYReflect-backed self.field read/write.
+        // Registered as plain lua_CFunction entries (raw
+        // lua_register) so generated Logia can call them as
+        // `ayt_reflect_get_field(self, "Type", "field")`. The first
+        // arg is the receiver lightuserdata (= the
+        // ScriptComponent* pass-through from callLifecycle), the
+        // next two args are string type/field names resolved
+        // against AYReflect's TypeRegistry at runtime.
+        lua_register(lua, "ayt_reflect_get_field", &ayt_reflect_get_field_c);
+        lua_register(lua, "ayt_reflect_set_field", &ayt_reflect_set_field_c);
 
         // Test-only witness: scripts can assign a string here to make
         // observable side effects for unit tests. Production code

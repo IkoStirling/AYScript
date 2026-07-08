@@ -8,6 +8,12 @@
 
 #include "logia/AYLuaCodegen.h"
 
+// LG-05 / S3.3: full ITypeInfo definition so we can call
+// getFieldCount() on the resolved leaf type of `self.<field>`
+// and decide between the reflect-call rewrite and the legacy
+// bare-member codegen.
+#include "IAYReflect.h"
+
 #include <cstdio>
 #include <sstream>
 #include <utility>
@@ -91,6 +97,10 @@ LuaCodegenResult LuaCodegen::generate(const Program& program)
 
 void LuaCodegen::emitScript(const ScriptDecl& script)
 {
+    // LG-05 / S3.3: record the host type name for `self.<field>`
+    // reflect-call rewrites. Scope is per-script — reset on exit.
+    _currentHostTypeName = script.hostTypeName;
+
     // Var declarations first (locals). Lifecycle functions come next.
     for (const auto& member : script.members) {
         if (auto* var = dynamic_cast<VarDeclStmt*>(member.get())) {
@@ -223,6 +233,62 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
             op == TokenType::PlusEqual || op == TokenType::MinusEqual ||
             op == TokenType::StarEqual || op == TokenType::SlashEqual) {
 
+            // LG-05 / S3.3 — AYReflect-backed write for the
+            // single-hop `self.<primitiveField>` pattern. Direct
+            // assignment / compound assignment both lower to
+            // explicit reflect reads + write so the runtime always
+            // sees exactly one set call (no temp-around-lightuserdata
+            // trap). Chained struct access (self.position.x += ...,
+            // etc.) keeps the legacy compound-assign lowering which
+            // is a runtime no-op for LG-05 scope.
+            if (op == TokenType::Equal
+                && isSingleHopSelfFieldExpr(*bin->left)) {
+                std::string rhs = emitExpr(*bin->right);
+                indent();
+                _out += "ayt_reflect_set_field(self, \"";
+                _out += _currentHostTypeName;
+                _out += "\", \"";
+                _out += singleHopSelfFieldName(*bin->left);
+                _out += "\", ";
+                _out += rhs;
+                _out += ")\n";
+                return;
+            }
+            if (isSingleHopSelfFieldExpr(*bin->left)
+                && (op == TokenType::PlusEqual || op == TokenType::MinusEqual
+                    || op == TokenType::StarEqual || op == TokenType::SlashEqual)) {
+                // self.field <op>= rhs  →
+                //   local __tmp = ayt_reflect_get_field(self, "T", "f") <op> rhs
+                //   ayt_reflect_set_field(self, "T", "f", __tmp)
+                std::string cur = "ayt_reflect_get_field(self, \"";
+                cur += _currentHostTypeName;
+                cur += "\", \"";
+                cur += singleHopSelfFieldName(*bin->left);
+                cur += "\")";
+                std::string opName = tokenOpName(op);
+                std::string rhs = emitExpr(*bin->right);
+                std::string tmp = freshTmp("compound");
+                indent();
+                _out += "local ";
+                _out += tmp;
+                _out += " = ";
+                _out += cur;
+                _out += " ";
+                _out += opName.substr(0, opName.size() - 1);  // strip trailing '='
+                _out += " ";
+                _out += rhs;
+                _out += "\n";
+                indent();
+                _out += "ayt_reflect_set_field(self, \"";
+                _out += _currentHostTypeName;
+                _out += "\", \"";
+                _out += singleHopSelfFieldName(*bin->left);
+                _out += "\", ";
+                _out += tmp;
+                _out += ")\n";
+                return;
+            }
+
             std::string rhs;
             if (op == TokenType::Equal) {
                 rhs = emitExpr(*bin->right);
@@ -296,6 +362,29 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* m = dynamic_cast<const MemberExpr*>(&expr)) {
+        // LG-05 / S3.3 — AYReflect-backed read: single-hop
+        // `self.<primitiveField>` rewrites to the bridge's
+        // reflect call. The `resolvedField` stamp comes from
+        // SemanticAnalyzer; we additionally require the leaf type
+        // to have no fields of its own (primitives like int/float/
+        // bool). Struct members are out of S3.3 scope — kept as
+        // bare Lua member access which becomes a runtime no-op
+        // on the lightuserdata (matches S2.5 behavior).
+        if (auto* objId = dynamic_cast<const IdentifierExpr*>(m->object.get())) {
+            if (objId->name == "self"
+                && !_currentHostTypeName.empty()
+                && m->resolvedField != nullptr
+                && m->resolvedType != nullptr
+                && m->resolvedType->getFieldCount() == 0) {
+                std::string out;
+                out += "ayt_reflect_get_field(self, \"";
+                out += _currentHostTypeName;
+                out += "\", \"";
+                out += m->member;
+                out += "\")";
+                return out;
+            }
+        }
         std::string obj = emitExpr(*m->object);
         std::string out;
         out += obj;
@@ -389,6 +478,38 @@ std::string LuaCodegen::emitAssignmentTarget(const Expr& target)
     out += ".";
     out += rev.back();
     return out;
+}
+
+// ============================================================
+// LG-05 / S3.3 helpers
+// ------------------------------------------------------------
+// isSingleHopSelfFieldExpr / singleHopSelfFieldName probe the AST
+// shape directly and never touch `_currentHostTypeName`, so they
+// behave identically whether or not the script name resolved in
+// AYReflect. The reflect-call rewrite in emitMemberExpr /
+// emitExprStmt gates on `_currentHostTypeName` non-empty — here we
+// just ask "is this a one-hop self.<primitiveField>?" and let the
+// callers decide.
+// ============================================================
+
+bool LuaCodegen::isSingleHopSelfFieldExpr(const Expr& e)
+{
+    auto* m = dynamic_cast<const MemberExpr*>(&e);
+    if (!m) return false;
+    auto* objId = dynamic_cast<const IdentifierExpr*>(m->object.get());
+    if (!objId || objId->name != "self") return false;
+    if (m->resolvedField == nullptr) return false;
+    if (m->resolvedType == nullptr) return false;
+    // Primitive leaf only (int/float/bool/etc.). Chained struct
+    // subfield access keeps the legacy compound-assign lowering,
+    // which is a runtime no-op for S3.3 (out of scope).
+    return m->resolvedType->getFieldCount() == 0;
+}
+
+std::string LuaCodegen::singleHopSelfFieldName(const Expr& e)
+{
+    auto* m = dynamic_cast<const MemberExpr*>(&e);
+    return m ? m->member : std::string();
 }
 
 std::string LuaCodegen::emitCompoundRhs(const Expr& target,

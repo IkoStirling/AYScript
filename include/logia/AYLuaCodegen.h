@@ -67,6 +67,14 @@ private:
     void emitReturnStmt(const ReturnStmt& stmt);
     void emitExprStmt(const ExprStmt& stmt);
 
+    // LG-05 / S3.3 helpers — return true if `e` is a single-hop
+    // `self.<primitiveField>` leaf whose resolved type has no fields
+    // of its own. Returns the leaf field name via out-param on the
+    // second helper. Used by emitExprStmt to decide between the
+    // legacy compound-assign lowering and a direct reflect call.
+    static bool isSingleHopSelfFieldExpr(const Expr& e);
+    static std::string singleHopSelfFieldName(const Expr& e);
+
     // Helpers
     void line(const std::string& s = {});
     void indent();
@@ -81,6 +89,13 @@ private:
     // and chained member assignment lowering.
     int _tmpCounter = 0;
     std::string freshTmp(const std::string& hint = "");
+
+    // LG-05 / S3.3 — AYReflect host type name stamped by the most
+    // recent `emitScript` call (read from `script.hostTypeName`).
+    // Empty when the script name did not resolve in AYReflect;
+    // codegen then skips the reflect-call rewrite and keeps S2.5
+    // bare member access (a runtime no-op, matches existing tests).
+    std::string _currentHostTypeName;
 
     std::vector<CompilerError> _errors;
 };
