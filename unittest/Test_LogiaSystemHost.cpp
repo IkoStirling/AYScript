@@ -36,6 +36,7 @@
 
 #include <string>
 #include <vector>
+#include <memory>
 
 using namespace ayt::script::logia;
 
@@ -188,9 +189,9 @@ script MovementSystem {
     }
 }
 )";
-    ayt::script::ScriptSubSystem sub;
-    CHECK(sub.initialize());
-    auto& bridge = sub.bridge();  // shared with the subsystem
+    auto sub = std::make_unique<ayt::script::ScriptSubSystem>();
+    CHECK(sub->initialize());
+    auto& bridge = sub->bridge();  // shared with the subsystem
 
     std::vector<ayt::script::logia::CompilerError> errs;
     bool loaded = bridge.loadScript("MovementSystem", src, errs);
@@ -216,17 +217,17 @@ script MovementSystem {
                                         static_cast<void*>(sys), &dt);
         CHECK(ok);
     }
-    sub.update(0.016f);
-    sub.update(0.016f);
-    sub.update(0.016f);
+    sub->update(0.016f);
+    sub->update(0.016f);
+    sub->update(0.016f);
 
     // The Lua on_update ran 3 times after the manual call (which
     // already brought n to 1) → counter == "4". Verify BEFORE
-    // sub.shutdown() — shutdown destroys the sol::state and all Lua
-    // globals become unreadable.
+    // shutdown — shutdown marks the Lua VM inactive and globals
+    // become unreadable.
     std::string counter = bridge.getLuaGlobalString("__lg04_counter");
     CHECK(counter == "4");
-    sub.shutdown();
+    sub->shutdown();
     world.shutdown();
 }
 

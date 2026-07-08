@@ -29,6 +29,7 @@
 #include <AYWorld.h>
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -193,32 +194,32 @@ TEST_CASE(ambient_script_sub_system_publishes_dt_to_bridge) {
     world.initialize();
     world.registerSystem<TimeWitnessSystem>(/* priority */ 200);
 
-    ScriptSubSystem sys;
-    CHECK(sys.initialize());
+    auto sys = std::make_unique<ScriptSubSystem>();
+    CHECK(sys->initialize());
 
     std::vector<CompilerError> errors;
-    CHECK(loadFromSource(sys.bridge(), "TimeWitness", kTimeWitness, errors));
+    CHECK(loadFromSource(sys->bridge(), "TimeWitness", kTimeWitness, errors));
     CHECK(errors.empty());
 
     // Pre-tick: nothing has been pushed into the bridge yet.
-    CHECK(sys.bridge().currentDelta()==0.0f);
+    CHECK(sys->bridge().currentDelta()==0.0f);
 
-    sys.update(0.016f);
+    sys->update(0.016f);
 
     // After update(): bridge ambient state was published by
     // tickAmbient(dt) BEFORE the lifecycle dispatch — and the
     // TimeWitness.on_update ran and stashed its observations into
     // __witness_delta / __witness_total.
-    CHECK(sys.bridge().currentDelta()==0.016f);
-    CHECK(std::fabs(sys.bridge().totalElapsed() - 0.016f) < 1e-5f);
+    CHECK(sys->bridge().currentDelta()==0.016f);
+    CHECK(std::fabs(sys->bridge().totalElapsed() - 0.016f) < 1e-5f);
     double witnessDelta = -1.0;
     double witnessTotal = -1.0;
-    CHECK(sys.bridge().tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
-    CHECK(sys.bridge().tryGetLuaGlobalNumber("__witness_total", witnessTotal));
+    CHECK(sys->bridge().tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
+    CHECK(sys->bridge().tryGetLuaGlobalNumber("__witness_total", witnessTotal));
     CHECK(nearEqual(witnessDelta, 0.016));
     CHECK(nearEqual(witnessTotal, 0.016));
 
-    sys.shutdown();
+    sys->shutdown();
     world.shutdown();
 }
 

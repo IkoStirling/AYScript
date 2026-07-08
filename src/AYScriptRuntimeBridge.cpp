@@ -317,20 +317,31 @@ struct LogiaRuntimeBridge::Impl {
     std::size_t _compileMisses = 0;
 
     bool initialized = false;
+    // False after shutdown(); the existing sol::state is left in place
+    // until ~Impl or ensureLua() on the next loadScript/initialize.
+    // Avoids eager sol::state{} replacement on shutdown's stack frame.
+    bool _luaLive = false;
 
     Impl()
     {
-        // Open only the safe subset of Lua standard libraries.
-        // Deliberately excluded: package, io, os, debug, coroutine, ffi.
+        ensureLua();
+        initialized = true;
+    }
+
+    void ensureLua()
+    {
+        if (_luaLive) {
+            return;
+        }
+        lua = sol::state{};
         lua.open_libraries(
             sol::lib::base,
             sol::lib::string,
             sol::lib::table,
             sol::lib::math,
             sol::lib::utf8);
-
         registerEngineApi();
-        initialized = true;
+        _luaLive = true;
     }
 
     void registerEngineApi()
@@ -419,6 +430,7 @@ LogiaRuntimeBridge::~LogiaRuntimeBridge() = default;
 
 bool LogiaRuntimeBridge::initialize()
 {
+    _impl->ensureLua();
     if (_impl->initialized) return true;
     _impl->initialized = true;
     return true;
@@ -434,12 +446,13 @@ void LogiaRuntimeBridge::shutdown()
     _impl->_compileCache.clear();
     _impl->_compileHits   = 0;
     _impl->_compileMisses = 0;
-    _impl->lua = sol::state{};  // reset state (releases everything)
-    _impl->lua.open_libraries(
-        sol::lib::base, sol::lib::string, sol::lib::table,
-        sol::lib::math, sol::lib::utf8);
-    _impl->registerEngineApi();
-    _impl->initialized = true;
+    _impl->_currentDelta  = 0.0f;
+    _impl->_totalElapsed  = 0.0f;
+    _impl->initialized    = false;
+    // Mark the VM inactive without constructing a replacement here.
+    // ensureLua() recreates on the next loadScript/initialize path;
+    // ~Impl destroys the existing sol::state once at process teardown.
+    _impl->_luaLive = false;
 }
 
 bool LogiaRuntimeBridge::isInitialized() const
@@ -468,6 +481,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
                                     const logia::LogiaHostContext& ctx,
                                     std::vector<logia::CompilerError>& errors)
 {
+    _impl->ensureLua();
     errors.clear();
 
     // S3.6: cache lookup. The Lua-state piece (safe_script +
@@ -678,6 +692,9 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
                                        void* receiver,
                                        void* arg2)
 {
+    if (!_impl || !_impl->_luaLive) {
+        return false;
+    }
     auto it = _impl->scripts.find(scriptName);
     if (it == _impl->scripts.end()) {
         return false;
@@ -721,7 +738,7 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
 
 void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
 {
-    if (!_impl) return;
+    if (!_impl || !_impl->_luaLive) return;
     if (scaledDelta < 0.0f) scaledDelta = 0.0f;
     _impl->_currentDelta = scaledDelta;
     _impl->_totalElapsed += scaledDelta;
@@ -764,7 +781,7 @@ void* LogiaRuntimeBridge::implHandle()
 
 std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
 {
-    if (_impl == nullptr || name == nullptr) return {};
+    if (_impl == nullptr || name == nullptr || !_impl->_luaLive) return {};
     sol::object obj = _impl->lua[name];
     if (obj.is<std::string>()) {
         return obj.as<std::string>();
@@ -774,7 +791,7 @@ std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
 
 bool LogiaRuntimeBridge::tryGetLuaGlobalNumber(const char* name, double& out) const
 {
-    if (_impl == nullptr || name == nullptr) return false;
+    if (_impl == nullptr || name == nullptr || !_impl->_luaLive) return false;
     sol::object obj = _impl->lua[name];
     if (!obj.valid()) return false;
     if (obj.get_type() == sol::type::number) {

@@ -792,7 +792,7 @@ AYScript/
 - [x] **S3.5** 真实 AYTime 绑定 + 可注入 input 后端（替换 mock）
 - [x] **S3.6** 编译缓存（LG-06a）— 见下锁定决策
 - [x] **S3.7a** 热重载 API（LG-06b part A，pure memory）— 见下锁定决策
-- [ ] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
+- [x] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
 - [ ] **S3.8** Editor / CLI Tool host（LG-07）
 - [ ] **S3.9** CLI：`ays-logia compile`（可选）
 - [ ] **S3.10** System host `self.field` 端到端验证（可选）
@@ -829,7 +829,7 @@ AYScript/
 
 **S3.7 (LG-06b) 锁定决策**：
 
-> **实现状态（2026-07-08）**：✅ **S3.7a 已交付**（commit 紧随本文档更新）；`reloadScript` API 落地 + 6 个 unittests 全绿。S3.7b FileWatcher 仍待做。
+> **实现状态（2026-07-08）**：✅ **S3.7a + S3.7b 已交付**。`reloadScript` API + `ScriptSubSystem` FileWatcher 协调器 + `Test_LogiaHotReload*.cpp`。
 
 **分两阶段交付（强制）**：
 
@@ -871,7 +871,7 @@ AYScript/
 3. 同源码 reload → compile cache **hit**（S3.6 计数可观测）。
 4. （S3.7b）scratch 目录 + FileWatcher 集成测 **独立** `TEST_CASE`，失败不阻塞 CI 时可 `#ifdef AYSCRIPT_HOTRELOAD_OS_TEST`。
 
-**Next session:** §13 Prompt **S3.7b**（FileWatcher 集成，仅在 S3.7a 全绿后启动）。
+**Next session:** §13 Prompt **S3.8**（Tool host LG-07）。
 
 ### Phase S4 — 语法扩展
 
@@ -925,7 +925,8 @@ AYScript/
 | 2026-07-08 | **S3.5 完成**：ambient `time.*` / `input.*` 真实化。`LogiaRuntimeBridge::tickAmbient(dt)` 由 `ScriptSubSystem::update` / `fixedUpdate` 在 dispatch 前调用一次，`time.delta` = 最近 publish、`time.total` = 累加 scaled 流逝；负 dt clamp 到 0。`input.is_pressed` / `input.is_just_pressed` 改走可注入 `LogiaRuntimeBridge::InputProvider*`：默认 = 文件局部 `MockInputProvider`（保留 S1 jump-only 行为），`setInputProvider(p)` / `nullptr` 回退走均不崩。**未**接真实 `AYInput`（`AYInput/` 仅 `.git`，目录空）/ `AYDevice` 输入轮询——记入 §6.5 TODO。`unittest/Test_LogiaAmbient.cpp`（9 用例）+ `examples/player_controller.logia` 现在可在 ScriptSubSystem tick 内用 `time.delta` 而非依赖旧的全局 mock。 |
 | 2026-07-08 | **S3.6 完成（LG-06a）**：每 `LogiaRuntimeBridge` 实例独占内存编译缓存。缓存 key = `hash(source) ^ hash(LogiaHostContext) ^ kLogiaPipelineVersion`（splitmix64-style 三重混合）；host context 必须入 key（Component vs System 同源不同诊断）+ pipeline version 必须入 key（codegen 形状变化 bump 常量，强制全量失效）。只缓存 **编译结果**（`generatedLua` + `compileOk`），sol::state 运行产物每次仍跑（shutdown 同生同灭）。失败也缓存：同一坏源重复 loadScript → hit + non-empty errors，跳过 Lex/Parser/Semantic。新公开 API：`loadScript(name, src, ctx, errs)` 4-arg 重载 + 三个观测接口 `compileCacheHitCount/MissCount/Counters/clearCompileCache`。3-arg 重载委派到 `defaultLogiaHostContext()`，S2.5 / S3.0 / S3.5 caller 零修改。`unittest/Test_LogiaCompileCache.cpp`（8 用例）。**未做**磁盘持久化、TTL、cache size 上限——spec optional，先跑内存版本，等 S3.7 文件路径策略定了再决定是否叠加磁盘。 |
 | 2026-07-08 | **§5.7 Script exposure 设计**：字段/方法暴露策略、`FieldAttribute` vs C++ access、R1–R4 backlog。**S3.7 设计锁定 + 失败复盘**：分两阶段 S3.7a（reload API）/ S3.7b（AYIO FileWatcher）；实现尝试 segfault 回滚，代码未合并。 |
-| 2026-07-08 | **S3.7a 完成（LG-06b part A）**：纯内存 `LogiaRuntimeBridge::reloadScript(name, src[, ctx], errs)` 落地。3-arg 委派到 `defaultLogiaHostContext()`，4-arg 与 `loadScript` 4-arg 对称共享同一 S3.6 cache key。**失败策略**（核心）：reload 入口先 snapshot `sol::table prior`（sol::table 是廉价 handle 副本），委派到 `loadScript`，若 loadScript 失败（它自己 `erase` 了 `_impl->scripts[name]`）就**回填** prior → `hasScript(name) == true` 跨失败 reload 保持，旧模块继续跑。`unittest/Test_LogiaHotReload.cpp`（6 用例，filesystem-free）：reload 新源改 witness / 坏源保持旧模块 / 同源 reload 命中 S3.6 缓存 / reload 后 lifecycle 见新 body / 3-arg 走 default ctx / reload 之前未加载的 script 走 loadScript 路径。**未做** FileWatcher、`reloadScriptFromFile`、`ScriptSubSystem` 任何改动、CMake link AYIO——全部推到 S3.7b。 |
+| 2026-07-08 | **S3.7a 完成（LG-06b part A）**：纯内存 `LogiaRuntimeBridge::reloadScript(name, src[, ctx], errs)` 落地。3-arg 委派到 `defaultLogiaHostContext()`，4-arg 与 `loadScript` 4-arg 对称共享同一 S3.6 cache key。**失败策略**（核心）：reload 入口先 snapshot `sol::table prior`（sol::table 是廉价 handle 副本），委派到 `loadScript`，若 loadScript 失败（它自己 `erase` 了 `_impl->scripts[name]`）就**回填** prior → `hasScript(name) == true` 跨失败 reload 保持，旧模块继续跑。`unittest/Test_LogiaHotReload.cpp`（6 用例，filesystem-free）。 |
+| 2026-07-08 | **S3.7b 完成（LG-06b part B）**：`ScriptSubSystem` + `AYScriptHotReload.cpp` 接 `ayt::io::FileWatcher`（AYIO PRIVATE link）。`setHotReloadEnabled` / `watchScriptPath` / `unwatchScriptPath` / `bindAndLoadFromFile` / `hotReloadApplyCount`；`update`/`fixedUpdate` 最前 `pollAndApplyReloads`（100ms debounce）；`shutdown()` 与 `~ScriptSubSystem()` 先 `stopHotReload()`。`unittest/Test_LogiaHotReloadWatcher.cpp`（5 用例）。 |
 
 ---
 

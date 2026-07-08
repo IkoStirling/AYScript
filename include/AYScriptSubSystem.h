@@ -109,7 +109,44 @@ public:
     // pointer is just the same object AYEntity will see.
     LogiaScriptBridgeAdapter* adapter() { return _adapter.get(); }
 
+    // === S3.7b — hot reload coordinator (AYIO FileWatcher) ===
+
+    // Enable/disable filesystem watch + automatic reloadScript on
+    // .logia changes. Default off. When enabled, every path
+    // registered via watchScriptPath / bindAndLoadFromFile is
+    // watched; pollAndApplyReloads runs at the start of update().
+    void setHotReloadEnabled(bool enabled);
+    [[nodiscard]] bool isHotReloadEnabled() const;
+
+    // Register a on-disk .logia path for hot reload under
+    // `scriptName`. `filePath` is normalized via ayt::io::path.
+    // Returns false if the path is invalid for OS watch setup.
+    bool watchScriptPath(const std::string& scriptName,
+                         const std::string& filePath);
+
+    bool watchScriptPath(const std::string& scriptName,
+                         const std::string& filePath,
+                         const logia::LogiaHostContext& ctx);
+
+    bool unwatchScriptPath(const std::string& filePath);
+
+    // Read `filePath`, bindAndLoad, then register the path for
+    // hot reload (Component host / default LogiaHostContext).
+    bool bindAndLoadFromFile(ayt::entity::ScriptComponent& component,
+                             const std::string& filePath,
+                             std::vector<logia::CompilerError>& errors);
+
+    // Number of successful reloadScript calls applied by the watcher
+    // coordinator (observability for tests).
+    [[nodiscard]] std::size_t hotReloadApplyCount() const;
+
 private:
+    void stopHotReload();
+    void pollAndApplyReloads();
+
+    struct HotReloadState;
+    std::unique_ptr<HotReloadState> _hotReload;
+
     LogiaRuntimeBridge _bridge;
     // Owning — non-copyable because the adapter holds a raw
     // pointer to _bridge above. Single ownership keeps the

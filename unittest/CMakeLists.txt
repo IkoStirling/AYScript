@@ -9,6 +9,7 @@ target_link_libraries(${TEST_NAME} PRIVATE
     AYTest
     AYEntity
     AYReflect
+    AYIO
 )
 
 add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})

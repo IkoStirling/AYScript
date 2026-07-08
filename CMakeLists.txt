@@ -43,7 +43,7 @@ target_include_directories(AYScript PUBLIC
 # include sol.hpp.
 target_link_libraries(AYScript
     PUBLIC  AYLog AYGameLoop AYEntity AYReflect
-    PRIVATE sol2::sol2 ${LUA_LIBRARIES}
+    PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO
 )
 
 # Enable sol2 type & numeric safety checks.

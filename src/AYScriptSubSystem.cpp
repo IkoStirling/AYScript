@@ -5,6 +5,8 @@
 #include "AYScriptBridgeAdapter.h"
 #include "AYLogger.h"
 
+#include "AYIO.h"
+
 // S3.1 (LG-04) and S3.4: drive Logia scripts (System + Component hosts)
 // from the per-tick subsystem. World owns ISystem and Entity lists; we
 // dispatch.
@@ -12,17 +14,29 @@
 #include <AYEntityImpl.h>
 #include <components/AYScriptComponent.h>
 
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+
 namespace ayt::script
 {
 
 namespace
 {
 
+constexpr int64_t kHotReloadDebounceMs = 100;
+
+int64_t steadyClockMs()
+{
+    using clock = std::chrono::steady_clock;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               clock::now().time_since_epoch())
+        .count();
+}
+
 // S3.1 (LG-04): walk the world's systems and invoke the Logia
 // on_update for any system whose name matches a loaded Logia script.
-// `systemPtr` is passed as lightuserdata `self` — System host scripts
-// can read AYReflect fields on it (S3.1 keeps S2.5's
-// self-as-lightuserdata convention).
 void tickLogiaSystems(LogiaRuntimeBridge& bridge, float dt)
 {
     auto& world = ayt::entity::World::instance();
@@ -32,23 +46,41 @@ void tickLogiaSystems(LogiaRuntimeBridge& bridge, float dt)
         if (!name || !*name) continue;
         if (!bridge.hasScript(name)) continue;
         ayt::entity::ISystem* sys = world.findSystemByName(name);
-        if (!sys) continue;  // raced with shutdown — skip
+        if (!sys) continue;
         bridge.callLifecycle(name, "on_update", static_cast<void*>(sys), &dt);
     }
 }
 
 } // namespace
 
+// S3.7b — hot reload state (pimpl-style, kept in this TU only).
+struct ScriptSubSystem::HotReloadState {
+    struct Entry {
+        std::string scriptName;
+        std::string normalizedPath;
+        logia::LogiaHostContext ctx;
+        bool pendingReload = false;
+        int64_t debounceStartMs = 0;
+    };
+
+    std::unique_ptr<ayt::io::FileWatcher> watcher;
+    bool enabled = false;
+    std::unordered_map<std::string, Entry> byPath;
+    std::size_t applyCount = 0;
+};
+
 ScriptSubSystem::ScriptSubSystem()
 {
     _descriptor.name = "ayt.script.runtime";
-    // S3.1 (LG-04): World is required for the System host tick path.
     _descriptor.dependencies = {"ayt.log", "ayt.entity"};
     _descriptor.basePriority = 100;
     _descriptor.timeType = ayt::game::SubSystemDescriptor::TimeType::Scaled;
 }
 
-ScriptSubSystem::~ScriptSubSystem() = default;
+ScriptSubSystem::~ScriptSubSystem()
+{
+    shutdown();
+}
 
 const ayt::game::SubSystemDescriptor& ScriptSubSystem::getDescriptor() const
 {
@@ -62,7 +94,6 @@ bool ScriptSubSystem::initialize()
         ayt::log::error("ScriptSubSystem: bridge.initialize() failed");
         return false;
     }
-    // S3.4: create the adapter now that the bridge is live.
     if (!_adapter) {
         _adapter.reset(new LogiaScriptBridgeAdapter(&_bridge));
     }
@@ -74,45 +105,211 @@ bool ScriptSubSystem::initialize()
 
 void ScriptSubSystem::update(float deltaTime)
 {
-    // S3.5: publish the per-tick scaled delta to the bridge BEFORE
-    // any lifecycle dispatch. The `time.delta` / `time.total`
-    // ambient table reads from the accumulator populated here —
-    // ScriptSubSystem is the canonical source so all hosts (System
-    // + Component) see the same authoritative value.
+    pollAndApplyReloads();
     _bridge.tickAmbient(deltaTime);
-    // S3.1 (LG-04): drive Logia System-host scripts.
     tickLogiaSystems(_bridge, deltaTime);
-    // S3.4: drive Logia Component-host scripts via the Entity loop.
     tickComponentHosts(deltaTime);
 }
 
 void ScriptSubSystem::fixedUpdate(float fixedDeltaTime)
 {
-    // S3.5: fixedUpdate also feeds the ambient accumulator so a
-    // host that opts into fixed ticks (via SubSystemDescriptor)
-    // sees the fixed dt in `time.delta` instead of the variable
-    // one. Component-host Lifecycle dispatched from
-    // tickComponentHosts inherits the same accumulator.
+    pollAndApplyReloads();
     _bridge.tickAmbient(fixedDeltaTime);
-    // Same dispatch as update() — Logia System hosts opt into the
-    // fixed tick via their host-side ISystem::setPriority / descriptor
-    // wiring. Component host ticks get the fixed dt too.
     tickLogiaSystems(_bridge, fixedDeltaTime);
     tickComponentHosts(fixedDeltaTime);
 }
 
 void ScriptSubSystem::shutdown()
 {
-    if (!_initialized) return;
-    _bridge.shutdown();
-    _adapter.reset();
-    _initialized = false;
-    ayt::log::info("ScriptSubSystem: shutdown");
+    if (!_initialized && !_hotReload) {
+        return;
+    }
+
+    stopHotReload();
+    _hotReload.reset();
+
+    if (_initialized) {
+        _bridge.shutdown();
+        _adapter.reset();
+        _initialized = false;
+        ayt::log::info("ScriptSubSystem: shutdown");
+    }
 }
 
-// ============================================================================
-// S3.4 — Component host binding
-// ============================================================================
+void ScriptSubSystem::stopHotReload()
+{
+    if (!_hotReload) {
+        return;
+    }
+    if (_hotReload->watcher) {
+        _hotReload->watcher->clearPending();
+        _hotReload->watcher->stop();
+        _hotReload->watcher.reset();
+    }
+    _hotReload->enabled = false;
+}
+
+void ScriptSubSystem::setHotReloadEnabled(bool enabled)
+{
+    if (!_hotReload) {
+        _hotReload = std::make_unique<HotReloadState>();
+    }
+    if (_hotReload->enabled == enabled) {
+        return;
+    }
+
+    if (!enabled) {
+        stopHotReload();
+        return;
+    }
+
+    _hotReload->watcher = std::make_unique<ayt::io::FileWatcher>();
+    for (const auto& kv : _hotReload->byPath) {
+        if (!_hotReload->watcher->watch(kv.first, nullptr)) {
+            ayt::log::warn("ScriptSubSystem: hot reload watch failed for '%s'",
+                           kv.first.c_str());
+        }
+    }
+    _hotReload->watcher->start();
+    _hotReload->enabled = true;
+}
+
+bool ScriptSubSystem::isHotReloadEnabled() const
+{
+    return _hotReload && _hotReload->enabled;
+}
+
+bool ScriptSubSystem::watchScriptPath(const std::string& scriptName,
+                                     const std::string& filePath)
+{
+    return watchScriptPath(scriptName, filePath,
+                           logia::defaultLogiaHostContext());
+}
+
+bool ScriptSubSystem::watchScriptPath(const std::string& scriptName,
+                                     const std::string& filePath,
+                                     const logia::LogiaHostContext& ctx)
+{
+    if (scriptName.empty() || filePath.empty()) {
+        return false;
+    }
+
+    const std::string normalized = ayt::io::path::normalize(filePath);
+    if (normalized.empty()) {
+        return false;
+    }
+
+    if (!_hotReload) {
+        _hotReload = std::make_unique<HotReloadState>();
+    }
+
+    HotReloadState::Entry entry;
+    entry.scriptName = scriptName;
+    entry.normalizedPath = normalized;
+    entry.ctx = ctx;
+    _hotReload->byPath[normalized] = std::move(entry);
+
+    if (_hotReload->enabled && _hotReload->watcher) {
+        return _hotReload->watcher->watch(normalized, nullptr);
+    }
+    return true;
+}
+
+bool ScriptSubSystem::unwatchScriptPath(const std::string& filePath)
+{
+    if (!_hotReload) {
+        return false;
+    }
+    const std::string normalized = ayt::io::path::normalize(filePath);
+    const auto it = _hotReload->byPath.find(normalized);
+    if (it == _hotReload->byPath.end()) {
+        return false;
+    }
+    _hotReload->byPath.erase(it);
+    if (_hotReload->watcher) {
+        _hotReload->watcher->unwatch(normalized);
+    }
+    return true;
+}
+
+bool ScriptSubSystem::bindAndLoadFromFile(
+    ayt::entity::ScriptComponent& component,
+    const std::string& filePath,
+    std::vector<logia::CompilerError>& errors)
+{
+    if (!ayt::io::File::exists(filePath)) {
+        ayt::log::error("ScriptSubSystem::bindAndLoadFromFile: file not found '%s'",
+                        filePath.c_str());
+        return false;
+    }
+    const std::string source = ayt::io::File::readAllText(filePath);
+    if (!bindAndLoad(component, source, errors)) {
+        return false;
+    }
+    if (!watchScriptPath(component.getScriptName(), filePath)) {
+        ayt::log::warn("ScriptSubSystem::bindAndLoadFromFile: loaded but watch failed for '%s'",
+                       filePath.c_str());
+    }
+    return true;
+}
+
+std::size_t ScriptSubSystem::hotReloadApplyCount() const
+{
+    return _hotReload ? _hotReload->applyCount : 0u;
+}
+
+void ScriptSubSystem::pollAndApplyReloads()
+{
+    if (!_initialized || !_hotReload || !_hotReload->enabled || !_hotReload->watcher) {
+        return;
+    }
+    if (!_hotReload->watcher->isRunning()) {
+        return;
+    }
+
+    const int64_t nowMs = steadyClockMs();
+    std::vector<ayt::io::FileWatchEvent> events;
+    _hotReload->watcher->pollPending(events);
+
+    for (const ayt::io::FileWatchEvent& ev : events) {
+        const std::string norm = ayt::io::path::normalize(ev.path);
+        auto it = _hotReload->byPath.find(norm);
+        if (it == _hotReload->byPath.end()) {
+            continue;
+        }
+        if (ev.kind == ayt::io::FileWatchEvent::Kind::Deleted) {
+            continue;
+        }
+        it->second.pendingReload = true;
+        it->second.debounceStartMs = nowMs;
+    }
+
+    for (auto& kv : _hotReload->byPath) {
+        HotReloadState::Entry& entry = kv.second;
+        if (!entry.pendingReload) {
+            continue;
+        }
+        if (nowMs - entry.debounceStartMs < kHotReloadDebounceMs) {
+            continue;
+        }
+        entry.pendingReload = false;
+
+        if (!ayt::io::File::exists(entry.normalizedPath)) {
+            continue;
+        }
+
+        const std::string source =
+            ayt::io::File::readAllText(entry.normalizedPath);
+        if (source.empty()) {
+            continue;
+        }
+
+        std::vector<logia::CompilerError> errors;
+        if (_bridge.reloadScript(entry.scriptName, source, entry.ctx, errors)) {
+            ++_hotReload->applyCount;
+        }
+    }
+}
 
 bool ScriptSubSystem::bindAndLoad(ayt::entity::ScriptComponent& component,
                                   const std::string& scriptSource,
@@ -127,18 +324,9 @@ bool ScriptSubSystem::bindAndLoad(ayt::entity::ScriptComponent& component,
         ayt::log::error("ScriptSubSystem::bindAndLoad: component scriptName is empty");
         return false;
     }
-    // Step 1: compile + load the .logia source.
     if (!_bridge.loadScript(name, scriptSource, errors)) {
-        // Bridge keeps diagnostic; component remains unbound.
         return false;
     }
-    // Step 2: install adapter on the component. After this the
-    // component's onAttach/onUpdate/onDetach lifecycle routes
-    // through this subsystem. The adapter's `asScriptBridge()`
-    // returns the AYEntity IScriptBridge* view — the public
-    // AYScript header keeps the inheritance inside the cpp
-    // (pimpl-style) to avoid dragging AYEntity into AYScript's
-    // compile-time surface.
     component.setBridge(_adapter ? _adapter->asScriptBridge() : nullptr);
     return true;
 }
