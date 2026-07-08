@@ -18,9 +18,15 @@ namespace ayt::script
 // S1 scope:
 //   - Owns a LogiaRuntimeBridge
 //   - initialize(): bridge initialize + log "ayt.script.runtime ready"
-//   - update() / fixedUpdate(): no-op (real per-frame dispatch waits for
-//     ECS + ScriptComponent integration in S3)
+//   - update() / fixedUpdate(): S3.1 (LG-04) drives Logia System-host
+//     scripts. For each ISystem in World whose getName() matches a
+//     loaded Logia script, calls
+//     _bridge.callLifecycle(name, "on_update", systemPtr, &dt).
 //   - shutdown(): bridge shutdown
+//
+// Component-host (ScriptComponent) ticks are NOT driven from here — they
+// go through AYEntity's existing per-entity onUpdate path; see
+// LogiaScriptBridgeAdapter.
 //
 // Intentionally NOT auto-registered via REGISTER_SUBSYSTEM in this TU —
 // the host process must explicitly call

@@ -207,19 +207,28 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
     // written before the matching C++ host type is compiled in. The
     // runtime bridge is responsible for the actual binding check.
     //
-    // S3.0 (LG-03) intentionally does NOT branch on `hostKind`: the
-    // lookup path is the same single `findType(name)` regardless of
-    // whether the future host is a ScriptComponent, an ISystem, etc.
-    // Host-specific subclass validation is deferred to S3.1+.
+    // S3.1 (LG-04): the same `findType(name)` lookup is used for all
+    // host kinds. No subclass check (per LG-04b / S3.2 deferral). The
+    // host-kind-specific hint text below tells the user which C++ side
+    // binding to add (AY_SYSTEM for ECS systems, ScriptComponent for
+    // entity scripts).
     auto* selfType = resolveScriptName(s.name, 0, 0);
     if (!selfType) {
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::UnknownIdentifier;
         d.message = "script '" + s.name + "' has no matching registered type";
-        d.hint = "register a C++ host type named '" + s.name +
-                 "' via AYReflect (e.g. AY_FINALIZE_REGISTRATION_METADATA(" +
-                 s.name + ")); or fix the name to match an existing registered type";
+        std::string hint;
+        if (_ctx.kind == LogiaHostKind::System) {
+            hint = "register an ISystem subclass named '" + s.name +
+                   "' with AY_SYSTEM(" + s.name + ", priority) so World " +
+                   "ticks it; or fix the name to match an existing ISystem";
+        } else {
+            hint = "register a C++ host type named '" + s.name +
+                   "' via AYReflect (e.g. AY_FINALIZE_REGISTRATION_METADATA(" +
+                   s.name + ")); or fix the name to match an existing registered type";
+        }
+        d.hint = hint;
         report(d);
     }
     _currentSelfType = selfType;
@@ -295,6 +304,25 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         d.hint = "use 'self' for the receiver; read entity context via World::instance()";
         report(d);
     }
+
+    // S3.1 (LG-04): the System host (ctx.kind == System) defines its
+    // own lifecycle method set. `on_start` is one-shot at world tick
+    // start; `on_update` is the per-tick hook. `on_destroy` is not
+    // meaningful for an ISystem — emit a soft warning if a System-
+    // bound script declares it. Component host keeps the full S2.5
+    // set (on_start / on_update / on_destroy) unchanged.
+    if (_ctx.kind == LogiaHostKind::System
+        && fn.kind == LifecycleKind::OnDestroy) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Warning;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "on_destroy is not invoked on System host scripts";
+        d.hint = "ISystem instances are owned by World for the whole "
+                 "process lifetime; use on_start (one-shot) or on_update "
+                 "(per-tick) instead";
+        report(d);
+    }
+
     for (auto& s : fn.body) {
         if (s) analyzeStmt(*s);
     }

@@ -1,0 +1,25 @@
+// movement_system.logia — example for AYScript S3.1 (LG-04) System host.
+//
+// A minimal `script MovementSystem { on_update() { ... } }` that
+// increments a tick counter and (when self usertype binding lands in
+// S3.x) would read C++ fields via `self.moveSpeed`. The script's name
+// matches a C++ ISystem subclass registered with AY_SYSTEM, so the
+// ScriptSubSystem per-tick dispatcher invokes its `on_update` once per
+// tick.
+
+script MovementSystem {
+    var tick_counter: int = 0
+
+    on_start() {
+        tick_counter = 0
+    }
+
+    on_update() {
+        tick_counter = tick_counter + 1
+        // S3.1 caveat: `self` is a lightuserdata opaque to Lua until
+        // S3.x wires sol2::usertype. Reads/writes compile and pass
+        // semantic checks (AY_PROPERTY field is registered), but the
+        // runtime field access is no-op until usertype binding lands.
+        self.moveSpeed = self.moveSpeed + 0.0
+    }
+}

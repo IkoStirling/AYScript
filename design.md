@@ -431,6 +431,16 @@ CompileResult Compiler::compile(const std::string& source,
 | 调度 | GameLoop tick 调 `callLifecycle("MovementSystem", "on_update", system, &dt)` |
 | 继承 | **不需要** `isSubclassOf`——类型合法性由 ECS 注册 + Reflect 名字存在性保证 |
 
+**S3.1 (LG-04) 锁定决策**（2026-07-08 实现完成后补）：
+
+- **`self` 语义 = `ISystem*` lightuserdata**（`ctx.expectSelf = true`）。理由：与 Component host 的 `self` 模型保持对称；`self.field` 的 reflection 路径后续 S3.x 接入 `sol::usertype<ISystem>` 时无需重写语义层。
+- **未知 `script Name` = soft warning**（与 S2.5 / LG-03 保持一致）。host-kind-aware hint：System host 提示 `AY_SYSTEM`；Component host 提示 `AY_FINALIZE_REGISTRATION_METADATA`。
+- **System host lifecycle 白名单**：`on_start`、`on_update` 调；`on_destroy` 编译期软警告"not invoked on System host scripts"（ISystem 不销毁）。
+- **调度入口**：`ScriptSubSystem::update(float dt)` / `fixedUpdate(float dt)` 遍历 `World::instance().systemCount()`，对 `getSystemNameAt(i) == bridge.hasScript(name)` 的 system 调 `callLifecycle(name, "on_update", systemPtr, &dt)`。
+- **新增 `World::findSystemByName(name)`**（`AYRuntime/AYEntity/include/AYWorld.h`）——S3.1 之前 World 没有按名查 system 的公共入口。
+- **测试 fixture**：`unittest/AYTestMovementSystem.h`（ISystem 子类 + `AY_PROPERTY(moveSpeed, ...)` + `AY_FINALIZE_REGISTRATION_METADATA`），`unittest/Test_LogiaSystemHost.cpp`（4 用例）；`examples/movement_system.logia`（文档示例）。
+- **暂未做**：`self.field` 真正的 usertype 读写绑定（仍是 bare Lua member access，self 是 lightuserdata，访问会运行期 nil error）——这是 S3.x 任务，对应 Phase S3 backlog 的 "sol2 usertype 注册"。
+
 #### S3.2 — LG-04b（可选 B-min）：Reflect 单链 parent
 
 **触发条件**（任一成立才做）：Component host 需 hard 拒绝「已注册但不是 Component 子类」的类型；Serializer/Editor 也要同一套 `isDerivedFrom`。
@@ -644,16 +654,20 @@ AYScript/
 
 #### S3.0 — LG-03：LogiaHostContext API 穿线 ✅ 目标
 
-- [ ] 公开 `LogiaHostContext` + `Compiler::compile(source, ctx)`（§5.6）
-- [ ] `SemanticAnalyzer` 存 `_ctx`；**校验行为与 S2.5 相同**
-- [ ] 修正 unknown-script warning 文案（去掉虚假的 subclass 暗示）
-- [ ] +2~3 单元测试：ctx 传递 + 默认 ctx 等价旧路径
-- [ ] **不动 AYReflect**
+- [x] 公开 `LogiaHostContext` + `Compiler::compile(source, ctx)`（§5.6）
+- [x] `SemanticAnalyzer` 存 `_ctx`；**校验行为与 S2.5 相同**
+- [x] 修正 unknown-script warning 文案（去掉虚假的 subclass 暗示）
+- [x] +2~3 单元测试：ctx 传递 + 默认 ctx 等价旧路径
+- [x] **不动 AYReflect**
 
 #### S3.1 — LG-04：System host
 
-- [ ] `script MovementSystem { on_update(dt) }` + GameLoop tick 调度
-- [ ] 校验：`hostKind` + Reflect 存在 + World 系统注册（**不用 isSubclassOf**）
+- [x] `script MovementSystem { on_update(dt) }` + GameLoop tick 调度
+- [x] 校验：`hostKind` + Reflect 存在 + World 系统注册（**不用 isSubclassOf**）
+- [x] `self` 决策 = `ISystem*` lightuserdata（`expectSelf=true`）
+- [x] `World::findSystemByName(name)` 公共入口
+- [x] System host lifecycle 白名单：`on_destroy` 软警告
+- [x] `examples/movement_system.logia` + `unittest/Test_LogiaSystemHost.cpp`（4 用例）
 
 #### S3.2 — LG-04b（可选）：Reflect B-min
 
@@ -715,6 +729,7 @@ AYScript/
 | 2026-07-07 | **S2.5 重设计**：删除 `component`/`export`/`entity` 参数；引入 `script`/`self` 模型；Logia 改为消费 AYReflect 元数据而非定义数据。详见 §1 核心模型 |
 | 2026-07-08 | **§1.6 Host 绑定模型**：Logia = host-bound behavior DSL；S2.5 锁 Component host |
 | 2026-07-08 | **§5.6 S3 分阶段**：S3.0 API 穿线（不改 Reflect）；S3.1 System host；S3.2 可选 B-min `getBaseTypeId` |
+| 2026-07-08 | **S3.1 (LG-04) 完成**：第一个非 Component host——ECS `ISystem`（`script MovementSystem { on_update() { ... } }`）。校验 = `hostKind + Reflect name lookup + World registration`（无 `isSubclassOf`）。`self` = `ISystem*` lightuserdata。`ScriptSubSystem::update/fixedUpdate` 调度。新增 `World::findSystemByName`。`unittest/Test_LogiaSystemHost.cpp`（4 用例）+ `examples/movement_system.logia` |
 
 ---
 
