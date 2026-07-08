@@ -108,6 +108,10 @@ public:
     // (e.g. `__test_witness`).
     std::string getLuaGlobalString(const char* name) const;
 
+    // Test hook: read a top-level Lua number global. Returns false if
+    // missing or not numeric.
+    bool tryGetLuaGlobalNumber(const char* name, double& out) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> _impl;

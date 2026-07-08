@@ -224,8 +224,6 @@ int ayt_reflect_set_field_c(lua_State* L)
     return 0;
 }
 
-} // namespace
-
 // ------------------------------------------------------------
 // Impl
 // ------------------------------------------------------------
@@ -283,13 +281,9 @@ struct LogiaRuntimeBridge::Impl {
         };
         lua["log"] = logTbl;
 
-        // S3.5: time table reads the bridge-owned `_currentDelta` /
-        // `_totalElapsed`. Bound via lambda that captures `this`
-        // (the bridge Impl) — the script cannot mutate the
-        // accumulator; only tickAmbient() can. time.delta is the
-        // scaled frame delta; time.total is accumulated scaled
-        // elapsed. Real-source = ScriptSubSystem::update(dt) →
-        // bridge.tickAmbient(dt).
+        // S3.5: time table — `delta` / `total` are functions so Lua
+        // can call `time.delta()` (codegen lowers Logia `time.delta`).
+        // Lambdas read live Impl scalars updated by tickAmbient().
         auto timeTbl = lua.create_table();
         timeTbl["delta"] = [this]() -> double {
             return static_cast<double>(_currentDelta);
@@ -478,6 +472,7 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
 
 void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
 {
+    if (!_impl) return;
     if (scaledDelta < 0.0f) scaledDelta = 0.0f;
     _impl->_currentDelta = scaledDelta;
     _impl->_totalElapsed += scaledDelta;
@@ -517,6 +512,18 @@ std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
         return obj.as<std::string>();
     }
     return {};
+}
+
+bool LogiaRuntimeBridge::tryGetLuaGlobalNumber(const char* name, double& out) const
+{
+    if (_impl == nullptr || name == nullptr) return false;
+    sol::object obj = _impl->lua[name];
+    if (!obj.valid()) return false;
+    if (obj.get_type() == sol::type::number) {
+        out = obj.as<double>();
+        return true;
+    }
+    return false;
 }
 
 } // namespace ayt::script

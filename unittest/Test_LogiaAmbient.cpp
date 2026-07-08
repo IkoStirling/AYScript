@@ -25,6 +25,9 @@
 #include "AYTest.h"
 #include "AYLogger.h"
 
+#include <IAYEntity.h>
+#include <AYWorld.h>
+
 #include <cmath>
 #include <string>
 #include <vector>
@@ -34,6 +37,11 @@ using ayt::script::ScriptSubSystem;
 using ayt::script::logia::CompilerError;
 
 namespace {
+
+bool nearEqual(double a, double b, double eps = 1e-5)
+{
+    return std::fabs(a - b) < eps;
+}
 
 bool loadFromSource(LogiaRuntimeBridge& bridge,
                     const char* name,
@@ -46,23 +54,23 @@ bool loadFromSource(LogiaRuntimeBridge& bridge,
 // Visible-only test: script reads time.delta and time.total and
 // stashes them as Lua numbers. We assert after callLifecycle that
 // the cached values match the bridge's published values.
+// Logia has no `..` string concat — use separate witness globals.
+// Assign numeric witness globals (avoid tostring float formatting).
 constexpr const char* kTimeWitness = R"(
 script TimeWitness {
     on_update() {
-        __test_witness = tostring(time.delta) .. "," .. tostring(time.total)
+        __witness_delta = time.delta
+        __witness_total = time.total
     }
 }
 )";
 
-// Script reads input.is_pressed into __test_witness as a string,
-// encoding the boolean as "0"/"1". Lets us inspect the boolean from
-// C++ without coupling to ayt::log line-parse.
+// Separate globals for pressed / just_pressed (no `..` concat).
 constexpr const char* kInputWitness = R"(
 script InputWitness {
     on_update() {
-        local p  = input.is_pressed("jump")
-        local jp = input.is_just_pressed("jump")
-        __test_witness = (p and "1" or "0") .. "," .. (jp and "1" or "0")
+        __test_witness_p = input.is_pressed("jump") and "1" or "0"
+        __test_witness_j = input.is_just_pressed("jump") and "1" or "0"
     }
 }
 )";
@@ -72,7 +80,7 @@ script InputWitness {
 constexpr const char* kColdDelta = R"(
 script ColdDelta {
     on_update() {
-        __test_witness = tostring(time.delta)
+        __witness_delta = time.delta
     }
 }
 )";
@@ -89,8 +97,8 @@ TEST_SUITE(LogiaAmbientTests)
 TEST_CASE(ambient_time_delta_default_zero_before_tick) {
     LogiaRuntimeBridge bridge;
     CHECK(bridge.isInitialized());
-    CHECK_EQ(bridge.currentDelta(), 0.0f);
-    CHECK_EQ(bridge.totalElapsed(), 0.0f);
+    CHECK(bridge.currentDelta()==0.0f);
+    CHECK(bridge.totalElapsed()==0.0f);
 
     std::vector<CompilerError> errors;
     CHECK(loadFromSource(bridge, "ColdDelta", kColdDelta, errors));
@@ -98,12 +106,9 @@ TEST_CASE(ambient_time_delta_default_zero_before_tick) {
 
     float dt = 0.016f;
     CHECK(bridge.callLifecycle("ColdDelta", "on_update", nullptr, &dt));
-    // Important: tickAmbient MUST be called before the script sees
-    // time.delta — that is exactly ScriptSubSystem::update's job.
-    // This test simulates the "directly callLifecycle" path that
-    // legacy tests use; it confirms cold delta = 0 (no fallback
-    // crash, no garbage).
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"), std::string("0.0"));
+    double witnessDelta = -1.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
+    CHECK(nearEqual(witnessDelta, 0.0));
 }
 
 TEST_CASE(ambient_time_delta_published_via_tickAmbient) {
@@ -115,14 +120,15 @@ TEST_CASE(ambient_time_delta_published_via_tickAmbient) {
     // Publish a known dt BEFORE the script runs — exactly what
     // ScriptSubSystem::update will do under the live GameLoop.
     bridge.tickAmbient(0.016f);
-    CHECK_EQ(bridge.currentDelta(), 0.016f);
+    CHECK(bridge.currentDelta()==0.016f);
 
     CHECK(bridge.callLifecycle("TimeWitness", "on_update", nullptr, nullptr));
-    // After the first tick: total elapsed == 0.016, delta == 0.016.
-    // Lua's tostring() emits at minimum one fractional digit, so
-    // "0.016,0.016" is the canonical form.
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"),
-             std::string("0.016,0.016"));
+    double witnessDelta = -1.0;
+    double witnessTotal = -1.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_total", witnessTotal));
+    CHECK(nearEqual(witnessDelta, 0.016));
+    CHECK(nearEqual(witnessTotal, 0.016));
 }
 
 TEST_CASE(ambient_time_total_accumulates_across_ticks) {
@@ -141,10 +147,13 @@ TEST_CASE(ambient_time_total_accumulates_across_ticks) {
     CHECK(bridge.callLifecycle("TimeWitness", "on_update", nullptr, nullptr));
 
     CHECK(std::fabs(bridge.totalElapsed() - 0.048f) < 1e-5f);
-    CHECK_EQ(bridge.currentDelta(), 0.016f);
-    // After three ticks: delta=0.016, total=0.048
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"),
-             std::string("0.016,0.048"));
+    CHECK(bridge.currentDelta()==0.016f);
+    double witnessDelta = -1.0;
+    double witnessTotal = -1.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_total", witnessTotal));
+    CHECK(nearEqual(witnessDelta, 0.016));
+    CHECK(nearEqual(witnessTotal, 0.048));
 }
 
 TEST_CASE(ambient_tickAmbient_negative_dt_is_clamped) {
@@ -153,8 +162,8 @@ TEST_CASE(ambient_tickAmbient_negative_dt_is_clamped) {
     // accumulation to advance zero (not negative).
     LogiaRuntimeBridge bridge;
     bridge.tickAmbient(-1.0f);
-    CHECK_EQ(bridge.currentDelta(), 0.0f);
-    CHECK_EQ(bridge.totalElapsed(), 0.0f);
+    CHECK(bridge.currentDelta()==0.0f);
+    CHECK(bridge.totalElapsed()==0.0f);
 
     bridge.tickAmbient(0.5f);
     CHECK(std::fabs(bridge.totalElapsed() - 0.5f) < 1e-5f);
@@ -162,9 +171,28 @@ TEST_CASE(ambient_tickAmbient_negative_dt_is_clamped) {
 
 TEST_CASE(ambient_script_sub_system_publishes_dt_to_bridge) {
     // End-to-end integration: ScriptSubSystem::update(0.016f) must
-    // tickAmbient() before dispatching lifecycle. This is the
-    // critical guarantee that makes the ambient table real under
-    // the live GameLoop — the canonicalized path that ships.
+    // tickAmbient() BEFORE dispatching lifecycle. The canonical
+    // integration path: ScriptSubSystem.tickLogiaSystems walks the
+    // World and forwards dt into each system whose name matches a
+    // loaded Logia script. To prove sys.update really invokes the
+    // Logia under the published ambient state, register a minimal
+    // ISystem shim named "TimeWitness", load the Logia under the
+    // same name, then drive sys.update(0.016f) and read the witness
+    // globals back from the bridge.
+    struct TimeWitnessSystem : public ayt::entity::ISystem {
+        const char* getName() const override { return "TimeWitness"; }
+        void onUpdate(float /*dt*/) override {
+            // No-op: the Logia on_update is what we want to exercise.
+            // The ISystem exists only to give tickLogiaSystems a
+            // registered handle whose name matches the Logia.
+        }
+    };
+
+    auto& world = ayt::entity::World::instance();
+    world.shutdown();  // isolate from any prior test (S3.4 fix pattern)
+    world.initialize();
+    world.registerSystem<TimeWitnessSystem>(/* priority */ 200);
+
     ScriptSubSystem sys;
     CHECK(sys.initialize());
 
@@ -173,18 +201,25 @@ TEST_CASE(ambient_script_sub_system_publishes_dt_to_bridge) {
     CHECK(errors.empty());
 
     // Pre-tick: nothing has been pushed into the bridge yet.
-    CHECK_EQ(sys.bridge().currentDelta(), 0.0f);
+    CHECK(sys.bridge().currentDelta()==0.0f);
 
     sys.update(0.016f);
-    // After update(): delta reflects the published value and total
-    // has accumulated by it. The script also ran (__test_witness
-    // should be populated with the live values).
-    CHECK_EQ(sys.bridge().currentDelta(), 0.016f);
+
+    // After update(): bridge ambient state was published by
+    // tickAmbient(dt) BEFORE the lifecycle dispatch — and the
+    // TimeWitness.on_update ran and stashed its observations into
+    // __witness_delta / __witness_total.
+    CHECK(sys.bridge().currentDelta()==0.016f);
     CHECK(std::fabs(sys.bridge().totalElapsed() - 0.016f) < 1e-5f);
-    CHECK_EQ(sys.bridge().getLuaGlobalString("__test_witness"),
-             std::string("0.016,0.016"));
+    double witnessDelta = -1.0;
+    double witnessTotal = -1.0;
+    CHECK(sys.bridge().tryGetLuaGlobalNumber("__witness_delta", witnessDelta));
+    CHECK(sys.bridge().tryGetLuaGlobalNumber("__witness_total", witnessTotal));
+    CHECK(nearEqual(witnessDelta, 0.016));
+    CHECK(nearEqual(witnessTotal, 0.016));
 
     sys.shutdown();
+    world.shutdown();
 }
 
 // ------------------------------------------------------------------
@@ -199,10 +234,10 @@ struct ScriptedInputProvider final
     : public LogiaRuntimeBridge::InputProvider {
     bool pressedReturn = false;
     bool justPressedReturn = false;
-    std::string lastPressedKey;
-    std::string lastJustPressedKey;
-    int pressedQueries = 0;
-    int justPressedQueries = 0;
+    mutable std::string lastPressedKey;
+    mutable std::string lastJustPressedKey;
+    mutable int pressedQueries = 0;
+    mutable int justPressedQueries = 0;
 
     bool isPressed(const std::string& key) const override {
         ++pressedQueries;
@@ -229,8 +264,10 @@ TEST_CASE(ambient_input_default_mock_keeps_jump_pressed) {
 
     CHECK(bridge.inputProvider() != nullptr);
     CHECK(bridge.callLifecycle("InputWitness", "on_update", nullptr, nullptr));
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"),
-             std::string("1,0")); // pressed=1, just_pressed=0
+    CHECK(bridge.getLuaGlobalString("__test_witness_p")==
+             std::string("1"));
+    CHECK(bridge.getLuaGlobalString("__test_witness_j")==
+             std::string("0"));
 }
 
 TEST_CASE(ambient_input_custom_provider_dispatches_correctly) {
@@ -255,10 +292,12 @@ TEST_CASE(ambient_input_custom_provider_dispatches_correctly) {
     // table forwards string args without translation.
     CHECK(provider.pressedQueries      == 1);
     CHECK(provider.justPressedQueries  == 1);
-    CHECK_EQ(provider.lastPressedKey,     std::string("jump"));
-    CHECK_EQ(provider.lastJustPressedKey, std::string("jump"));
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"),
-             std::string("1,1"));
+    CHECK(provider.lastPressedKey==     std::string("jump"));
+    CHECK(provider.lastJustPressedKey== std::string("jump"));
+    CHECK(bridge.getLuaGlobalString("__test_witness_p")==
+             std::string("1"));
+    CHECK(bridge.getLuaGlobalString("__test_witness_j")==
+             std::string("1"));
 }
 
 TEST_CASE(ambient_input_null_provider_falls_back_to_default) {
@@ -272,8 +311,10 @@ TEST_CASE(ambient_input_null_provider_falls_back_to_default) {
     bridge.setInputProvider(nullptr);
     // callLifecycle should succeed by way of the mock fallback.
     CHECK(bridge.callLifecycle("InputWitness", "on_update", nullptr, nullptr));
-    CHECK_EQ(bridge.getLuaGlobalString("__test_witness"),
-             std::string("1,0")); // default mock = jump-pressed
+    CHECK(bridge.getLuaGlobalString("__test_witness_p")==
+             std::string("1"));
+    CHECK(bridge.getLuaGlobalString("__test_witness_j")==
+             std::string("0"));
 }
 
 TEST_SUITE_END
