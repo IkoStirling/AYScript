@@ -1,15 +1,24 @@
 #pragma once
-// AYSemanticAnalyzer.h - Logia semantic analyzer (S2.5)
+// AYSemanticAnalyzer.h - Logia semantic analyzer (S2.5 + S3.0 LG-03)
 //
-// S2.5 redesign: `self` is the canonical way to access the bound
-// ScriptComponent. The analyzer resolves:
-//   - `script Name`           — must match a registered ScriptComponent subclass
+// S2.5: `self` is the canonical way to access the bound ScriptComponent.
+// S3.0 (LG-03): the analyzer additionally takes a `LogiaHostContext`
+// describing which C++ host kind a `script` block is being bound to.
+// LG-03 stores the context but does NOT enable new validation —
+// existing S2.5 diagnostics are preserved verbatim. Future S3.1+
+// host-aware validation will consult `_ctx`.
+//
+// Resolves:
+//   - `script Name`           — must match a registered C++ host type
+//                               (S2.5: ScriptComponent subclass; S3.1+:
+//                               host-kind-specific). Unknown name is a
+//                               soft warning in LG-03.
 //   - `var x: T`              — T is a known type (builtin or AYReflect-registered)
 //   - `self.field` / `self.field.subfield` — must resolve against AYReflect fields
 //
 // Hard errors:
 //   - Unknown type name on a var declaration
-//   - Unknown script name (must match a ScriptComponent subclass)
+//   - Unknown script name (must match a registered host type)
 //   - Reference to an undeclared identifier
 //   - Lifecycle function declared with parameters
 //
@@ -19,6 +28,7 @@
 
 #include "AYAst.h"
 #include "AYCompilerError.h"
+#include "AYLogia.h"  // S3.0 (LG-03): LogiaHostContext
 
 #include <memory>
 #include <string>
@@ -64,7 +74,12 @@ struct SemanticResult {
 
 class SemanticAnalyzer {
 public:
-    explicit SemanticAnalyzer(SemanticOptions options = {});
+    // LG-03: ctor accepts an optional host context. Defaults to the
+    // S2.5 Component host context, so all existing call sites that
+    // construct `SemanticAnalyzer` with no context keep their previous
+    // behavior (hostType=nullptr, kind=Component, expectSelf=true).
+    explicit SemanticAnalyzer(SemanticOptions options = {},
+                              const LogiaHostContext& ctx = defaultLogiaHostContext());
     ~SemanticAnalyzer();
 
     SemanticAnalyzer(const SemanticAnalyzer&) = delete;
@@ -74,6 +89,10 @@ public:
 
     // Inject a custom registry (test hook).
     void setTypeProvider(ayt::reflect::ITypeRegistry* reg);
+
+    // LG-03: read-only access to the host context the analyzer was
+    // constructed with. Used by unit tests to assert plumbing.
+    const LogiaHostContext& hostContext() const { return _ctx; }
 
 private:
     void analyzeScript(ScriptDecl& s);
@@ -91,9 +110,11 @@ private:
                                                    int line, int column);
 
     // Resolve a script name (string) to an ITypeInfo* of the bound
-    // ScriptComponent subclass. Returns nullptr on miss. The script's
-    // own `self` field gets this type via `currentSelfType` during
-    // member analysis.
+    // host type. Returns nullptr on miss. The script's own `self`
+    // field gets this type via `_currentSelfType` during member
+    // analysis. S3.0 (LG-03) keeps the S2.5 lookup path: a single
+    // `findType(name)` against the registry, no host-kind-specific
+    // branch, no subclass check.
     const ayt::reflect::ITypeInfo* resolveScriptName(const std::string& name,
                                                      int line, int column);
 
@@ -116,12 +137,18 @@ private:
     };
     std::unordered_map<std::string, ScopeEntry> _scope;
 
-    // Type of the currently-analyzed `self` (the ScriptComponent
-    // subclass matching the script's name). nullptr if no current
-    // script (shouldn't happen inside analyzeScript).
+    // Type of the currently-analyzed `self` (the host type matching
+    // the script's name). nullptr if no current script (shouldn't
+    // happen inside analyzeScript).
     const ayt::reflect::ITypeInfo* _currentSelfType = nullptr;
 
     const std::string _fileName;
+
+    // S3.0 (LG-03): host context captured at construction time. S3.0
+    // does NOT consume it for validation — it is stored so the test
+    // suite can confirm plumbing, and so S3.1+ can read it without
+    // another signature churn.
+    LogiaHostContext _ctx;
 };
 
 } // namespace ayt::script::logia

@@ -1,8 +1,15 @@
-// AYSemanticAnalyzer.cpp - Logia semantic analyzer (S2.5)
+// AYSemanticAnalyzer.cpp - Logia semantic analyzer (S2.5 + S3.0 LG-03)
 //
-// S2.5 redesign: `script Name` binds to a C++ ScriptComponent subclass
-// (looked up in AYReflect TypeRegistry). `self` is the canonical way to
-// access fields on that component. `var` is a pure Lua local.
+// S2.5: `script Name` binds to a C++ ScriptComponent subclass (looked up
+// in AYReflect TypeRegistry). `self` is the canonical way to access
+// fields on that component. `var` is a pure Lua local.
+//
+// S3.0 (LG-03): the analyzer ctor also takes a `LogiaHostContext`.
+// LG-03 stores it but does NOT enable new validation — the S2.5
+// lookup path (`findType(name)`) and S2.5 soft-warning diagnostics
+// remain exactly as before. Future S3.1+ host-aware validation will
+// read `_ctx.hostKind` / `_ctx.hostType` / `_ctx.expectSelf`; LG-03
+// keeps the existing call signature stable for that future work.
 
 #include "logia/AYSemanticAnalyzer.h"
 
@@ -110,8 +117,10 @@ void ensureAYEntityTypesRegistered()
 
 } // namespace
 
-SemanticAnalyzer::SemanticAnalyzer(SemanticOptions options)
-    : _options(options), _fileName(options.fileName ? options.fileName : "")
+SemanticAnalyzer::SemanticAnalyzer(SemanticOptions options, const LogiaHostContext& ctx)
+    : _options(options)
+    , _fileName(options.fileName ? options.fileName : "")
+    , _ctx(ctx)
 {
     _registryImpl = &ayt::reflect::TypeRegistryImpl::instance();
     _registry     = _registryImpl;
@@ -192,20 +201,25 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
     _scope.clear();
     _currentSelfType = nullptr;
 
-    // Resolve the script name to the bound ScriptComponent subclass.
-    // S2.5: unknown script names are soft-warnings, not hard errors —
-    // Logia source files are sometimes written before the matching
-    // ScriptComponent subclass is compiled in. The runtime bridge
-    // (Step 4 / S3) is responsible for the actual binding check.
+    // Resolve the script name to the bound host type via the AYReflect
+    // TypeRegistry. S2.5 / S3.0 (LG-03): an unknown script name is a
+    // soft warning, not a hard error — Logia source files are sometimes
+    // written before the matching C++ host type is compiled in. The
+    // runtime bridge is responsible for the actual binding check.
+    //
+    // S3.0 (LG-03) intentionally does NOT branch on `hostKind`: the
+    // lookup path is the same single `findType(name)` regardless of
+    // whether the future host is a ScriptComponent, an ISystem, etc.
+    // Host-specific subclass validation is deferred to S3.1+.
     auto* selfType = resolveScriptName(s.name, 0, 0);
     if (!selfType) {
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::UnknownIdentifier;
-        d.message = "script '" + s.name + "' has no matching registered ScriptComponent subclass";
-        d.hint = "declare a ScriptComponent subclass named '" + s.name +
-                 "' with AY_COMPONENT(" + s.name + "); or fix the name to match "
-                 "an existing registered ScriptComponent subclass";
+        d.message = "script '" + s.name + "' has no matching registered type";
+        d.hint = "register a C++ host type named '" + s.name +
+                 "' via AYReflect (e.g. AY_FINALIZE_REGISTRATION_METADATA(" +
+                 s.name + ")); or fix the name to match an existing registered type";
         report(d);
     }
     _currentSelfType = selfType;

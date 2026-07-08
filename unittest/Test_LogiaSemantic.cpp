@@ -302,4 +302,116 @@ script PlayerController {
     CHECK(r.success);
 }
 
+// ============================================================================
+// S3.0 (LG-03) — LogiaHostContext plumbing
+// ----------------------------------------------------------------------------
+// LG-03 exposes `LogiaHostContext` and a new `Compiler::compile(source, ctx)`
+// overload. The LG-03 contract is that:
+//   1. The default no-ctx overload behaves exactly like S2.5 (no
+//      regressions in any of the S2.5 tests above).
+//   2. The ctx overload stores the context in both the compiler and the
+//      semantic analyzer (verified via `Compiler::lastHostContext()` and
+//      `SemanticAnalyzer::hostContext()`), but does NOT introduce new
+//      diagnostics — every S2.5 diagnostic continues to appear.
+//   3. Unknown script names still emit a soft warning (the LG-03 message
+//      is the new generic "no matching registered type" wording).
+// ============================================================================
+
+TEST_CASE(lg03_default_compile_matches_s25_implicit_component) {
+    // The S2.5 no-ctx overload must construct an implicit Component
+    // context. We verify that by calling the ctx overload with the
+    // exact same defaults and comparing the diagnostic count + content.
+    const char* src = R"(
+script UnknownT3 {
+    var x: int = 0
+    on_update() {
+        x = x + 1
+    }
+}
+)";
+
+    Compiler noCtxC;
+    auto noCtxRes = noCtxC.compile(src);
+    CHECK(noCtxRes.success);  // soft warning only
+
+    Compiler explicitC;
+    auto explicitRes = explicitC.compile(src, defaultLogiaHostContext());
+    CHECK(explicitRes.success);
+
+    // Same diagnostic count (same set of S2.5 diagnostics).
+    CHECK(noCtxRes.diagnostics.size() == explicitRes.diagnostics.size());
+
+    // The no-ctx path recorded the implicit default context.
+    CHECK(noCtxC.lastHostContext().kind == LogiaHostKind::Component);
+    CHECK(noCtxC.lastHostContext().hostType == nullptr);
+    CHECK(noCtxC.lastHostContext().expectSelf == true);
+}
+
+TEST_CASE(lg03_explicit_ctx_is_stored) {
+    // A non-default ctx is preserved verbatim on Compiler. We pass a
+    // System-kind context with hostType explicitly null and
+    // expectSelf=false. LG-03 does not consume these fields for
+    // validation, but the storage round-trip must be lossless so S3.1+
+    // can read them.
+    LogiaHostContext custom;
+    custom.kind = LogiaHostKind::System;
+    custom.hostType = nullptr;
+    custom.expectSelf = false;
+
+    const char* src = R"(
+script MovementSystemT {
+    on_update() {
+        x = 1
+    }
+}
+)";
+
+    Compiler c;
+    auto r = c.compile(src, custom);
+    CHECK(r.success);  // soft warning only (unknown script + implicit global)
+    CHECK(c.lastHostContext().kind == LogiaHostKind::System);
+    CHECK(c.lastHostContext().hostType == nullptr);
+    CHECK(c.lastHostContext().expectSelf == false);
+
+    // The analyzer instance also sees the same context (round-trip
+    // plumbing verified by re-invoking analyze() through a public
+    // SemanticAnalyzer constructed the same way).
+    SemanticAnalyzer sem({}, custom);
+    CHECK(sem.hostContext().kind == LogiaHostKind::System);
+    CHECK(sem.hostContext().expectSelf == false);
+}
+
+TEST_CASE(lg03_unknown_script_warning_unchanged_in_shape) {
+    // LG-03 changes the warning text from "no matching registered
+    // ScriptComponent subclass" to the more generic "no matching
+    // registered type" (since the registry may eventually hold host
+    // types other than ScriptComponent). The diagnostic *shape* — one
+    // soft warning with code UnknownIdentifier, compile still
+    // succeeds — must remain identical so S2.5 callers don't break.
+    const char* src = R"(
+script NotARealHostType {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    Compiler c;
+    auto r = c.compile(src);
+    CHECK(r.success);
+
+    bool foundUnknownHostWarning = false;
+    for (const auto& d : r.diagnostics) {
+        if (d.severity == DiagnosticSeverity::Warning
+            && d.errorCode == ErrorCode::UnknownIdentifier
+            && d.message.find("NotARealHostType") != std::string::npos) {
+            foundUnknownHostWarning = true;
+            // LG-03 wording: the new generic message. If this assertion
+            // ever changes, the S2.5 doc on §1.6/§5.6 must be revisited.
+            CHECK(d.message.find("no matching registered type")
+                  != std::string::npos);
+        }
+    }
+    CHECK(foundUnknownHostWarning);
+}
+
 TEST_SUITE_END

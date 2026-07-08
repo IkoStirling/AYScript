@@ -21,6 +21,17 @@ Compiler::Compiler(CompileOptions options)
 
 CompileResult Compiler::compile(const std::string& source)
 {
+    // S2.5 path — preserve the exact pre-S3.0 behavior. All existing
+    // tests that use the no-ctx overload keep their previous diagnostics
+    // verbatim.
+    return compile(source, defaultLogiaHostContext());
+}
+
+CompileResult Compiler::compile(const std::string& source,
+                                const LogiaHostContext& ctx)
+{
+    _lastCtx = ctx;
+
     CompileResult result;
 
     std::vector<Token> tokens;
@@ -40,12 +51,15 @@ CompileResult Compiler::compile(const std::string& source)
     result.errors = parser.errors();
     const bool parserOk = !parser.hasErrors() && result.program != nullptr;
 
-    // S2: run semantic analysis on the parsed AST.
+    // S3.0 (LG-03): thread the host context into the analyzer. The
+    // analyzer stores it for future host-aware validation but does
+    // NOT introduce new diagnostics in LG-03 — every existing test
+    // that asserted on a S2.5 diagnostic must still pass unchanged.
     if (parserOk) {
         SemanticAnalyzer sem(SemanticOptions{
             _options.useCompileTimeTypes,
             _options.fileName.c_str()
-        });
+        }, ctx);
         SemanticResult semRes = sem.analyze(*result.program);
         for (auto& d : semRes.diagnostics) {
             result.diagnostics.push_back(d);

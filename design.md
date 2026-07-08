@@ -6,14 +6,17 @@
 
 AYScript 是 AY Engine 的**游戏行为脚本子系统**。**作者编写 Logia 源码（`.logia`）**，经编译器流水线生成 **Lua chunk** 并由 sol2 加载执行。
 
-**核心模型（2026-07-07 重设计）**：
+**核心模型（S2.5 锁定，2026-07-07）**：
 
-- **Logia 脚本不是定义数据的地方，是消费 AYReflect 元数据的地方**。
-- C++ 端的 `ScriptComponent` 子类（如 `PlayerController`）已经用 `AY_PROPERTY(float, speed, ...)` 注册了字段；Logia 脚本通过 `self.speed` 读写这些**已经在 C++ 端声明**的字段。
-- **`script` 块**对应一个 C++ `ScriptComponent` 子类——Logia 给出**行为**（生命周期函数），C++ 给出**数据**（`AY_PROPERTY` 字段）。
+- **Logia 是 host-bound behavior DSL**——`script Foo { ... }` 声明一段绑定到 **C++ host 类型** 的行为，不是「只能给 ScriptComponent 用的语法糖」。
+- **S2.5 唯一落地的 host**：`ScriptComponent` 子类（如 `PlayerController`）。S3 再扩展 System / Tool 等 host，**不改 Logia 表面语法**。
+- **Logia 不定义数据，只消费 AYReflect 元数据**：C++ host 用 `AY_PROPERTY(float, speed, ...)` 注册字段；Logia 通过 `self.speed` 读写这些字段。
+- **`script` 块**给出**行为**（生命周期 + 自定义逻辑）；C++ host 给出**数据**（`AY_PROPERTY` 字段）。
 - **`var` 块** = 纯 Lua local（脚本内部状态），C++ 不可见。
-- **`self`** = lightuserdata 指向绑定的 `ScriptComponent*` 实例。字段访问 `self.speed` 走 AYReflect 反射到 C++ 端 `PlayerController::speed`。
-- **生命周期函数 `on_start` / `on_update` / `on_destroy` 不收参数**——实体上下文通过 `self` 隐式可达，需要时通过 `ayt::entity::World::instance()` 显式查询。
+- **`self`**（S2.5）：lightuserdata 指向绑定的 `ScriptComponent*`。S3 其他 host 时 `self` 类型由 `LogiaHostContext` 决定；无 receiver 的 host（如 CLI tool）可省略 `self`。
+- **生命周期 `on_start` / `on_update` / `on_destroy`** 是**约定方法名**，不是 Logia 内置 magic——host 调度方决定调用哪些、何时调用。S2.5 由 `ScriptComponent` + `IScriptBridge` 驱动。
+
+**关键字 `script` 保留**——不改为 `behavior` / `attach` 等。泛化的是 **host 绑定**，不是 DSL 名字。
 
 **Lua 是实现细节**，不暴露给内容作者（体验目标类似 GDScript：引擎自有语法，隐藏宿主语言）。
 
@@ -22,7 +25,8 @@ AYScript 是 AY Engine 的**游戏行为脚本子系统**。**作者编写 Logia
 - **Logia DSL**：简化语法，只暴露玩法相关概念（self、生命周期、引擎类型、ambient 引擎 API）
 - **Phoskia 式编译器**：词法 → 语法 → 语义分析 → 后端；错误带文件/行号；可缓存编译结果
 - **AYReflect 语义层**：C++ 字段/类型在编译期校验，长期可维护、可接编辑器
-- **绑定**：Logia script 与 C++ `ScriptComponent` 子类一对一（同名），运行时通过 `ScriptComponent` 实例化
+- **Host 绑定（S2.5）**：`script Name` 与 Reflect 中注册的 C++ 类型同名；**S2.5 运行时**只通过 `ScriptComponent` 实例化并调度
+- **Host 多元化（S3）**：同一套 `script` 语法，编译/加载时由调用方传入 `LogiaHostContext`（见 §1.6）
 - **热更新**（S3+）：监视 `.logia` 变更，重编译并重载
 
 ### 1.2 与 Phoskia 的对称关系
@@ -85,7 +89,64 @@ AYScript 是 AY Engine 的**游戏行为脚本子系统**。**作者编写 Logia
 | **AYGameLoop** | 驱动 `ScriptSubSystem::update` |
 | **Lua 5.5 + sol2** | **仅实现层**；不出现在公开文档与示例中 |
 
-### 1.5 明确不做（v1）
+### 1.6 Host 绑定模型（S2.5 锁定 / S3 扩展）
+
+Logia **语法层**与 **host 类型**解耦：作者始终写 `script Name { ... }`；**谁加载、以什么 C++ 类型绑定 `self`** 由引擎集成层决定。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  .logia 源码（作者可见）                                      │
+│    script PlayerController { on_update(dt) { self.speed } } │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ Compiler::compile(source, ctx)
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  LogiaHostContext（调用方传入，作者不可见）                    │
+│    hostKind     = Component | System | Tool | ...  (S3+)    │
+│    hostType     = Reflect TypeInfo*（决定 self 类型校验）    │
+│    expectSelf   = true/false（Tool 可能无 self）               │
+└───────────────────────────┬─────────────────────────────────┘
+                            │ SemanticAnalyzer + LuaCodegen
+                            ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Lua module + 运行时调度                                      │
+│    S2.5: ScriptComponent → IScriptBridge → callLifecycle    │
+│    S3+:  SystemSubSystem / EditorToolRunner / ...           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**S2.5 锁定的 `LogiaHostContext` 默认值**（隐式，尚未暴露为公开 API）：
+
+| 字段 | S2.5 值 |
+|------|---------|
+| `hostKind` | `Component` |
+| `hostType` | S3.0 起由调用方传入期望 host 基类型；S2.5 隐式等价于 Component。`nullptr` = 不做 host 兼容性校验 |
+| `expectSelf` | `true` |
+
+**S3 计划支持的其他 host（语法不变，只改 ctx + 调度）**：
+
+| 场景 | C++ host | Logia 侧 | `self` | 调度方 |
+|------|----------|----------|--------|--------|
+| 实体组件脚本（**S2.5 已落地**） | `class PlayerController : ScriptComponent` | `script PlayerController { on_update(dt) {...} }` | `ScriptComponent*` | `ScriptComponent` + `IScriptBridge` |
+| ECS System（S3 首选扩展） | `class MovementSystem : ISystem` | `script MovementSystem { on_update(dt) {...} }` | `ISystem*` 或无 | `AnimationSystem` 同类 tick |
+| 编辑器/CLI 工具（S3+） | `class BuildTool` | `script BuildTool { run() {...} }` | 无 | 一次性 `call("run")` |
+| 事件回调（S3+） | 已注册 Reflect 类型 | `script DamageHandler { on_damage(amount) {...} }` | host 实例 | EventBus 订阅 |
+| 纯数据配置 | — | **不用 Logia** | — | 用 JSON / AYConfig |
+
+**语义分析规则（分阶段）**：
+
+| 规则 | S2.5 / S3.0 | S3.1+ | S3.2（可选 B-min） |
+|------|-------------|-------|---------------------|
+| `script Name` 在 AYReflect 注册 | soft warning（未知名仍生成 Lua） | 同左 | 同左 |
+| `Name` 与 `ctx.hostType` 继承兼容 | **不做**（S2.5 从未做子类检查） | **不做**；按 `hostKind` + registry 存在性 + 运行时注册表 | `isDerivedFrom(type, hostType)` 沿单链 parent walk |
+| `self.field` 字段存在 | 检查 AY_PROPERTY | 同左 | 同左 |
+| 生命周期名 | `on_start/on_update/on_destroy` | 各 host 文档化合法方法集 | 同左 |
+
+**AYReflect 现状（2026-07-08）**：`ITypeInfo` 无 `isSubclassOf` / 无派生图；`TypeRegistry` 只有 name/id 映射。`resolveScriptName` 仅 `findType(name)`——warning 文案中的 “ScriptComponent subclass” 是**目标语义**，不是 S2.5 已实现行为；S3.0 应修正文案为 “no matching registered type”。
+
+**明确不做**：为每种 host 新增 Logia 关键字（如 `system Foo`、`tool Foo`）。Host 种类是 **C++ 集成概念**，不是语法概念。
+
+### 1.7 明确不做（v1）
 
 - 多宿主语言（Python / JavaScript）并行
 - 源码扫描 + 多语言 codegen
@@ -133,10 +194,10 @@ script PlayerController {
 
 ### 2.3 语法原则
 
-1. **`script Name { ... }`**：顶层声明；`Name` 必须对应一个 C++ 端 `ScriptComponent` 子类（同名），运行时通过 `setScriptName("Name")` 绑定。
+1. **`script Name { ... }`**：顶层行为块；`Name` 应对应 AYReflect 中已注册的 C++ host 类型（**S2.5 运行时**通过 `ScriptComponent::setScriptName("Name")` 绑定到实体组件实例）。
 2. **`var x: T = ...`**：纯 Lua local 状态（self 不可见）。仅用于脚本内部计数器、缓存等。
-3. **`self`**：lightuserdata 指向绑定的 `ScriptComponent*`。`self.field` 走 AYReflect 反射到 C++ 字段（必须已在 C++ 端用 `AY_PROPERTY` 注册）。
-4. **生命周期是语言内置**：`on_start` / `on_update` / `on_destroy`，**无参数**——实体上下文通过 `World::instance()` 显式查询。
+3. **`self`**：指向当前 host 实例的 lightuserdata。**S2.5** = `ScriptComponent*`；`self.field` 走 AYReflect（须已在 C++ 用 `AY_PROPERTY` 注册）。
+4. **生命周期是约定方法名**：S2.5 标准集为 `on_start` / `on_update` / `on_destroy`；源码可写 `on_update(dt: float)` 作文档性参数，codegen 仍 emit `function M.on_update(self)`，Lua 侧由 bridge 传入 `dt`。**S3** 其他 host 可定义 `run()`、`on_damage()` 等，由调度方调用。
 5. **类型写引擎认识的**：`Entity`、`Transform`、`float` 等，由 Reflect 注册表解析。
 6. **snake_case**：关键字与 API 统一蛇形命名。
 7. **无 Lua 泄漏**：不提供 `local` / `nil` / `pcall` / `require` 等给用户。
@@ -197,7 +258,9 @@ script PlayerController {
 │  3. 语法分析 (Parser) → AST  (ScriptDecl, VarDeclStmt, ...)  │
 │                                                            │
 │  4. 语义分析 (SemanticAnalyzer) + AYReflect TypeRegistry    │
-│     — `script Name` 校验对应 C++ ScriptComponent 子类存在    │
+│     + LogiaHostContext（S3 公开；S2.5 隐式 = Component）   │
+│     — `script Name` 校验 Reflect 中是否存在（S2.5/S3.0: soft warning）│
+│     — `ctx.hostType` 传入 analyzer（S3.0: 存储不用；S3.1+: hostKind 规则）│
 │     — `var x: T` 校验 T 是已知类型（builtin 或 registry）     │
 │     — `self.field` 校验 field 是 AY_PROPERTY 注册的字段      │
 │     — Ambient API（log.*, input.*, time.*）— 名称白名单     │
@@ -242,11 +305,11 @@ script PlayerController {
 
 | 层 | 做什么 |
 |----|--------|
-| **AYEntity** | `ScriptComponent` 子类 + `AY_PROPERTY` 字段注册（**数据来源**） |
-| **AYReflect** | 读 AY_PROPERTY 注册的字段元数据，暴露 `ITypeInfo` / `IFieldInfo` |
-| **Logia SemanticAnalyzer** | 校验 `script Name` 对应的 C++ 类存在；`var` 类型合法；`self.field` 字段在 registry 中存在 |
+| **AYEntity** | `ScriptComponent` 基类、子类用 `AY_PROPERTY` 注册字段、`IScriptBridge` 接口（**S2.5 唯一 runtime host**） |
+| **AYReflect** | 类型/字段元数据；Logia 语义分析的数据源 |
+| **Logia SemanticAnalyzer** | 校验 `script Name` 在 registry；`var` 类型合法；`self.field` 存在；**S3.0** 接收 `LogiaHostContext`（校验不变）；**S3.1+** 按 hostKind 启用规则 |
 | **LuaCodegen** | 对 `self.field` 生成反射访问代码（详见 §5.3）；对 ambient API 生成直接调用 |
-| **LogiaRuntimeBridge (sol2)** | 注册 ambient API + LogiaRuntimeBridge 内的 helper 用于 `self.field` 反射 |
+| **LogiaRuntimeBridge (sol2)** | 注册 ambient API + helper 用于 `self.field` 反射；**S2.5** 只服务 ScriptComponent 调度 |
 
 ### 5.2 编译期错误示例
 
@@ -312,6 +375,91 @@ sol2 usertype 注册（**S3**）：`ScriptComponent` 子类用 `sol::usertype<T>
 - C++ 组件字段标 `Serialize` 的，存档 / 网络与 Logia `self.field` 访问**共享同一份 AYReflect 元数据**——数据布局只定义一次。
 - Logia **不替代** AYSerializer；场景 `.ayscene` 存组件数据，`.logia` 存行为。
 - 因此 Logia **不**再有 `export` 关键字——数据可见性由 C++ 端的 `AY_PROPERTY` + `FieldAttribute` 决定。
+
+### 5.6 LogiaHostContext 与 S3 分阶段路线
+
+S2.5：`SemanticAnalyzer` 行为等价于隐式 `LogiaHostContext{ Component, nullptr, true }`，但 **API 尚未公开**。
+
+#### API（S3.0 锁定）
+
+```cpp
+namespace ayt::script::logia {
+
+enum class LogiaHostKind {
+    Component,   // S2.5 — ScriptComponent on Entity
+    System,      // S3.1 — ISystem tick
+    Tool,        // S3+ — editor/CLI one-shot
+    EventHandler // S3+ — callback object
+};
+
+struct LogiaHostContext {
+    LogiaHostKind kind = LogiaHostKind::Component;
+    // Expected host base type for future strict checks.
+    // S3.0: stored, not used for validation. nullptr = skip.
+    const ayt::reflect::ITypeInfo* hostType = nullptr;
+    bool expectSelf = true;   // false for Tool.run()-only scripts
+};
+
+} // namespace
+```
+
+公开入口：
+
+```cpp
+CompileResult Compiler::compile(const std::string& source,
+                                const LogiaHostContext& ctx = LogiaHostContext{});
+```
+
+默认参数保持 S2.5 行为；现有 169 测试零修改。
+
+#### S3.0 — LG-03：API 穿线（**不改 AYReflect**）
+
+| 做 | 不做 |
+|----|------|
+| `LogiaHostContext` + `Compiler::compile(source, ctx)` | `ITypeInfo::isSubclassOf` |
+| `SemanticAnalyzer` 构造/分析时存 `_ctx` | TypeRegistry 派生图 |
+| 校验逻辑与 S2.5 相同（registry lookup + soft warning） | 启用 `hostType` 子类 hard check |
+| 修正 unknown-script warning 文案 | 重命名 `ScriptDecl` → `BehaviorDecl` |
+| +2~3 个 ctx 传递单测 | 改 LuaCodegen 输出形状 |
+
+#### S3.1 — LG-04：System host 落地（**仍可不碰 Reflect 继承**）
+
+| 项 | 策略 |
+|----|------|
+| 校验 | `ctx.kind == System` + `findType(scriptName)` + `World` 已注册该系统 |
+| `self` | `ISystem*` 或 `expectSelf=false`（实现时二选一锁死） |
+| 调度 | GameLoop tick 调 `callLifecycle("MovementSystem", "on_update", system, &dt)` |
+| 继承 | **不需要** `isSubclassOf`——类型合法性由 ECS 注册 + Reflect 名字存在性保证 |
+
+#### S3.2 — LG-04b（可选 B-min）：Reflect 单链 parent
+
+**触发条件**（任一成立才做）：Component host 需 hard 拒绝「已注册但不是 Component 子类」的类型；Serializer/Editor 也要同一套 `isDerivedFrom`。
+
+**范围**（刻意小于完整派生图）：
+
+```cpp
+// ITypeInfo — optional virtual, default 0
+virtual size_t getBaseTypeId() const { return 0; }
+
+// TypeRegistry — walk base chain only
+bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
+```
+
+注册宏（`AY_COMPONENT` 等）写入 `getBaseTypeId()`；**不做** `getAllDerived()`、多继承图。
+
+#### 明确拒绝的方案
+
+| 方案 | 结论 |
+|------|------|
+| S3.0 上完整 B（派生图 + 改 FINALIZE 宏） | ❌ 跨模块爆炸，非 LG-03 范围 |
+| C：child→base 映射散在 AYScript 调用方 | ❌ 破坏 host 模型集中在校验层 |
+
+**迁移原则**：
+
+1. AST 仍叫 `ScriptDecl`。
+2. **S3.0** 只穿 `ctx`，**不**把「ScriptComponent 子类检查」当作迁移项（S2.5 从未实现）。
+3. **S3.1** 第一个新 host = System；合法性 = hostKind + registry + 运行时注册。
+4. **S3.2** 按需 B-min；完整派生图留 Reflect 独立 backlog。
 
 ---
 
@@ -474,28 +622,52 @@ AYScript/
 - [x] 单元测试：`Test_LogiaCodegen`、`Test_LogiaRuntime`
 - [x] 端到端：Logia 脚本能修改 mock 状态
 
-### Phase S2 — Reflect 语义（核心） 🟡 重设计中
+### Phase S2 — Reflect 语义（核心） ✅
 
 - [x] `SemanticAnalyzer` + `TypeRegistry` —— 已接入 AYReflect
 - [x] 类型/字段编译期校验
 - [x] 单元测试 13 个
-- [ ] **S2.5 重设计（2026-07-07 决定）**：
-  - [ ] `component` → `script` 重命名
-  - [ ] 删除 `export` 关键字
-  - [ ] 删除 `ComponentDecl` → `ScriptDecl`
-  - [ ] 删除 `entity.get_component(...)` 路径（改由 self + World 查询）
-  - [ ] 生命周期参数移除（on_start() / on_update(dt) / on_destroy()）
-  - [ ] `self.field` 语义检查走 AYReflect
-  - [ ] 重写所有测试 + example
 
-### Phase S3 — 引擎 API 与工具
+### Phase S2.5 — ScriptComponent host 重设计 ✅
 
-- [ ] sol2 usertype 注册：`self.field` 真正走 AYReflect 读写
+- [x] `component` → `script` 重命名
+- [x] 删除 `export` 关键字
+- [x] `ComponentDecl` → `ScriptDecl`
+- [x] 删除 `entity.get_component(...)` 路径（改由 self + World 查询）
+- [x] 生命周期参数移除（codegen emit `(self)`；bridge 仍可传 dt）
+- [x] `self.field` 语义检查走 AYReflect
+- [x] 未知 `script Name` → **soft warning**（非 hard error，支持离线编辑）
+- [x] 重写所有测试 + example（169/169 通过）
+- [x] **design §1.6**：Logia = host-bound behavior DSL；ScriptComponent = 第一 host
+
+### Phase S3 — 引擎 API、多 host 与工具
+
+#### S3.0 — LG-03：LogiaHostContext API 穿线 ✅ 目标
+
+- [ ] 公开 `LogiaHostContext` + `Compiler::compile(source, ctx)`（§5.6）
+- [ ] `SemanticAnalyzer` 存 `_ctx`；**校验行为与 S2.5 相同**
+- [ ] 修正 unknown-script warning 文案（去掉虚假的 subclass 暗示）
+- [ ] +2~3 单元测试：ctx 传递 + 默认 ctx 等价旧路径
+- [ ] **不动 AYReflect**
+
+#### S3.1 — LG-04：System host
+
+- [ ] `script MovementSystem { on_update(dt) }` + GameLoop tick 调度
+- [ ] 校验：`hostKind` + Reflect 存在 + World 系统注册（**不用 isSubclassOf**）
+
+#### S3.2 — LG-04b（可选）：Reflect B-min
+
+- [ ] `ITypeInfo::getBaseTypeId()` + `TypeRegistry::isDerivedFrom()`（单链 parent only）
+- [ ] Component strict 模式：拒绝「已注册非 Component 派生」的 script 名
+
+#### S3.x — 其余（与 host 正交）
+
+- [ ] sol2 usertype：`self.field` 真正走 AYReflect 读写（LG-05）
 - [ ] 真实 AYInput / AYTime 绑定（替换 mock）
-- [ ] 编译缓存
-- [ ] ScriptSubSystem 接入 GameLoop（update 遍历所有 ScriptComponent）
-- [ ] CLI：`ays-logia compile player.logia`（可选）
-- [ ] 热重载（FileWatcher）
+- [ ] 编译缓存、热重载（LG-06）
+- [ ] ScriptSubSystem 接入 GameLoop（遍历 ScriptComponent）
+- [ ] CLI：`ays-logia compile`（可选）
+- [ ] Editor / CLI Tool host（LG-07）
 
 ### Phase S4 — 语法扩展
 
@@ -541,6 +713,8 @@ AYScript/
 | 2026-07-06 | S1 完成：LuaCodegen + LogiaRuntimeBridge（sol2 3.5.0 + Lua 5.5.0）；注意后端是 Lua **5.5**（vcpkg） |
 | 2026-07-07 | S2 第一版完成（168/168 测试通过）：SemanticAnalyzer + IScriptBridge adapter |
 | 2026-07-07 | **S2.5 重设计**：删除 `component`/`export`/`entity` 参数；引入 `script`/`self` 模型；Logia 改为消费 AYReflect 元数据而非定义数据。详见 §1 核心模型 |
+| 2026-07-08 | **§1.6 Host 绑定模型**：Logia = host-bound behavior DSL；S2.5 锁 Component host |
+| 2026-07-08 | **§5.6 S3 分阶段**：S3.0 API 穿线（不改 Reflect）；S3.1 System host；S3.2 可选 B-min `getBaseTypeId` |
 
 ---
 
