@@ -692,11 +692,16 @@ AYScript/
 #### S3.x — 其余（与 host 正交）
 
 - [x] sol2 usertype：`self.field` 真正走 AYReflect 读写（LG-05 / S3.3）— **见上**
-- [ ] 真实 AYInput / AYTime 绑定（替换 mock）
-- [ ] 编译缓存、热重载（LG-06）
-- [ ] ScriptSubSystem 接入 GameLoop（遍历 ScriptComponent）
-- [ ] CLI：`ays-logia compile`（可选）
-- [ ] Editor / CLI Tool host（LG-07）
+- [ ] **S3.4** ScriptSubSystem / bootstrap：Component host 注入 bridge + 加载 `.logia` + GameLoop tick
+- [ ] **S3.5** 真实 AYInput / AYTime 绑定（替换 mock）
+- [ ] **S3.6** 编译缓存（LG-06a）
+- [ ] **S3.7** 热重载（LG-06b）
+- [ ] **S3.8** Editor / CLI Tool host（LG-07）
+- [ ] **S3.9** CLI：`ays-logia compile`（可选）
+- [ ] **S3.10** System host `self.field` 端到端验证（可选）
+- [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
+
+**Next session:** §13 Prompt **S3.4** (copy-paste).
 
 ### Phase S4 — 语法扩展
 
@@ -748,7 +753,6 @@ AYScript/
 | 2026-07-08 | **S3.2 (LG-04b) B-min 完成**：Reflect 单链 parent 指针 + `isDerivedFrom()` + Component host strict 模式（`LogiaHostContext::strictInheritance`）。`ITypeInfo::getBaseTypeId()` 默认 0；`AY_FINALIZE_REGISTRATION_METADATA` 写入 `AY_INHERITS` 解析出的 base；strict 模式仅在 `kind==Component && hostType!=nullptr && strictInheritance==true` 时启用，对「已注册但非 hostType 派生」的 script 名产生 hard error。`unittest/ReflectBminTests`（6 用例）+ `Test_LogiaSemantic`（5 用例）。**不**做完整派生图 / `getAllDerived()` / 多继承。 |
 | 2026-07-08 | **S3.3 (LG-05) 完成**：`self.<primitiveField>` 单跳走 AYReflect 真实读写。Bridge 注册 `ayt_reflect_get_field` / `ayt_reflect_set_field`（`lua_CFunction`，lua_register）；codegen 单跳 primitive leaf 改发 `ayt_reflect_*_field(self, "<type>", "<f>", ...)`；`ScriptDecl::hostTypeName` 由 SemanticAnalyzer stamp；compound assignment 拆分「读 + 算 + 写」。`unittest/Test_LogiaReflectRuntime.cpp`（5 用例：helpers 可见 / 单跳读 / 单跳写 int+float+bool / codegen 字符串包含 reflect 调用 / 未知 type 安全）。`AYScript_Test` 237/237 PASS。**不**做 struct subfield 链 (`self.position.x`)、non-primitive 字段。 |
 
-
 ---
 
 ## 12. 参考
@@ -757,3 +761,243 @@ AYScript/
 - [`AYFoundation/AYReflect/design.md`](../../AYFoundation/AYReflect/design.md) — 元数据系统
 - [`AYEntity/design.md`](../AYEntity/design.md) — ScriptComponent
 - [sol2](https://sol2.readthedocs.io/) — Lua C++ 绑定（仅实现层）
+
+---
+
+## 13. Session prompts (copy-paste) — post S3.3
+
+**Done through S3.3:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 (`AYScript_Test` 237/237).
+
+Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
+
+### 13.1 Recommended order
+
+| Order | ID | Why |
+|-------|-----|-----|
+| 1 | **S3.4** | Component scripts must run in GameLoop (System tick alone is insufficient) |
+| 2 | **S3.5** | Real `time` / `input` ambient (replace mocks) |
+| 3 | **S3.6** | Compile cache (prerequisite for hot reload) |
+| 4 | **S3.7** | Hot reload LG-06 |
+| 5 | **S3.8** | Tool host LG-07 |
+| 6 | **S3.9** | CLI `ays-logia compile` (optional) |
+| 7 | **S4.x** | signal / await / source map |
+| parallel | **Foundation ED-01–04** | Phase 1 north-star — not blocked on Logia |
+
+---
+
+### Prompt S3.4 — Component host GameLoop wiring
+
+```
+Implement AYScript S3.4: wire ScriptComponent host end-to-end in GameLoop.
+
+Read first:
+- AYRuntime/AYScript/design.md §6.1–§6.4, §692 (ScriptSubSystem 遍历 ScriptComponent)
+- AYRuntime/AYScript/src/AYScriptBridgeAdapter.cpp
+- AYRuntime/AYEntity/include/components/AYScriptComponent.h
+- AYRuntime/AYScript/unittest/Test_LogiaReflectRuntime.cpp (S3.3 reflect path)
+
+Context:
+- S3.1 already ticks System-host scripts via ScriptSubSystem::update → World systems.
+- ScriptComponent calls IScriptBridge::call(onStart/onUpdate/onDestroy) but nothing injects LogiaScriptBridgeAdapter or loads .logia by script name in the live loop.
+
+Scope (DO):
+1. ScriptSubSystem (or Entity bootstrap hook): create LogiaScriptBridgeAdapter bound to bridge.
+2. On initialize / entity attach: set adapter on ScriptComponent instances; load .logia source into LogiaRuntimeBridge keyed by script name (path convention TBD — document in design.md).
+3. Ensure Entity tick path invokes ScriptComponent::onUpdate → adapter → callLifecycle with ScriptComponent* receiver (S3.3 reflect helpers must work at runtime).
+4. Add unittest: mock World + entity with ScriptComponent + minimal .logia that mutates AY_PROPERTY field via self.speed (no HWND).
+
+Scope (DO NOT):
+- No struct chain reflect (self.position.x) — deferred.
+- No hot reload yet (S3.7).
+- No new Logia syntax.
+
+Acceptance:
+- Component-host script runs on GameLoop tick and self.<primitive> read/write mutates C++ AY_PROPERTY.
+- Existing System-host tests (Test_LogiaSystemHost) stay green.
+- AYScript_Test count increases; user verifies all green locally.
+```
+
+---
+
+### Prompt S3.5 — Real ambient API (time + input)
+
+```
+Implement AYScript S3.5: bind real AYTime / AYInput ambient APIs (replace mocks).
+
+Read first:
+- AYRuntime/AYScript/design.md §6.5 (ambient API table)
+- LogiaRuntimeBridge ambient registration (log.info, input.is_pressed mock sites)
+
+Scope (DO):
+1. Expose `time.delta` (and optionally `time.total`) from GameLoop scaled delta passed into bridge tick.
+2. Wire `input.is_pressed` / `input.is_just_pressed` to AYDevice or existing input poll layer (document key code mapping).
+3. Keep mock fallbacks for headless unittest only (#ifdef or injectable backend).
+4. Add unittest: script calling time.delta receives non-zero dt in tick simulation.
+
+Scope (DO NOT):
+- No event.emit/subscribe yet (S4 or later).
+- No spawn_prefab.
+
+Acceptance:
+- examples/player_controller.logia can use real time.delta in integrated tick test.
+- Unit tests pass without real window where mock backend used.
+```
+
+---
+
+### Prompt S3.6 — LG-06a Compile cache
+
+```
+Implement AYScript S3.6 / LG-06 part A: compile cache for Logia → Lua.
+
+Read first:
+- AYRuntime/AYScript/design.md §3 compile pipeline, §692 LG-06
+- LogiaRuntimeBridge::loadScript implementation
+
+Scope (DO):
+1. Cache key = hash(source) + serialized LogiaHostContext fields + compiler version stamp.
+2. Persist cache entry: source hash → generated Lua string (memory cache minimum; optional disk under user cache dir).
+3. loadScript skips Lexer/Parser/Semantic/Codegen on cache hit; still validates script name registry.
+4. Unittest: compile same source twice → second call hits cache (expose hit/miss counter for test).
+
+Scope (DO NOT):
+- No FileWatcher yet (S3.7).
+
+Acceptance:
+- Cache hit produces identical Lua module table as miss.
+- All existing codegen/semantic tests green.
+```
+
+---
+
+### Prompt S3.7 — LG-06b Hot reload
+
+```
+Implement AYScript S3.7 / LG-06 part B: .logia hot reload.
+
+Read first:
+- AYRuntime/AYScript/design.md §1.1 hot reload goal
+- AYFoundation/AYConfig or AYIO FileWatcher if available
+- S3.6 compile cache API (must land first)
+
+Scope (DO):
+1. Watch configured script directory for .logia changes.
+2. On change: invalidate cache entry, recompile, replace LogiaRuntimeBridge module table for that script name.
+3. In-flight lifecycle calls: document behavior (finish current frame vs immediate swap).
+4. Unittest: simulate reload by calling reload API directly (no real filesystem if flaky).
+
+Acceptance:
+- Edit .logia on disk → next tick runs new logic without process restart.
+- No leak / double-register of Lua globals.
+```
+
+---
+
+### Prompt S3.8 — LG-07 Tool host
+
+```
+Implement AYScript S3.8 / LG-07: Tool host (run-only, no self).
+
+Read first:
+- AYRuntime/AYScript/design.md §5.6 Tool row, LogiaHostKind::Tool
+- ENGINE-FOUNDATION-PLAN.md LG-07
+
+Scope (DO):
+1. LogiaHostContext{ kind=Tool, expectSelf=false } validation: lifecycle whitelist = `run()` only; on_update/on_start soft warning or hard error (pick one, document).
+2. LuaCodegen: omit self param when expectSelf=false.
+3. ToolRunner API: compile + callLifecycle(name, "run", nullptr, nullptr) for Editor/CLI one-shot.
+4. Unittest: minimal tool.logia with run() { log.info("ok") }.
+
+Scope (DO NOT):
+- Full Editor UI integration (stub runner API is enough).
+
+Acceptance:
+- Tool script compiles and executes once via runner API.
+- Component/System hosts unchanged.
+```
+
+---
+
+### Prompt S3.9 — CLI ays-logia compile (optional)
+
+```
+Implement AYScript S3.9: optional CLI `ays-logia compile` for CI/editor.
+
+Read: AYRuntime/AYScript/design.md §692 CLI row.
+
+DO: small executable or AYTool target: read .logia path, compile with ctx flags (--host component|system|tool), emit .lua or bytecode, exit non-zero on errors.
+DO NOT: embed in Editor critical path.
+
+Acceptance: `ays-logia compile examples/player_controller.logia` prints errors with file/line or writes lua artifact.
+```
+
+---
+
+### Prompt S4.1 — signal / connect (syntax)
+
+```
+Implement AYScript S4.1: signal / connect syntax (design Phase S4).
+
+Read: AYRuntime/AYScript/design.md Phase S4.
+
+DO: lexer/parser/semantic/codegen for signal declarations + connect(handler); runtime dispatch stub or bridge to AYEventSystem when ready.
+Acceptance: parse + compile sample; unit tests for AST + codegen shape.
+Gate: S3.4+ runtime stable preferred.
+```
+
+---
+
+### Prompt S4.2 — await delay
+
+```
+Implement AYScript S4.2: await delay coroutine sugar.
+
+Read: design.md Phase S4, Lua 5.5 coroutine constraints.
+
+DO: surface syntax → desugar to Lua coroutine/yield pattern; document limitations.
+Acceptance: minimal script with await delay compiles; runtime test with mocked timer.
+```
+
+---
+
+### Prompt S4.3 — Source map
+
+```
+Implement AYScript S4.3: runtime errors map back to .logia line numbers.
+
+Read: design.md Phase S4 source map item.
+
+DO: codegen embeds line mapping table; bridge wraps Lua errors to logia file:line.
+Acceptance: intentional runtime error in test script reports .logia line, not chunk.lua line.
+```
+
+---
+
+### Prompt S3.10 — System host reflect fields (optional)
+
+```
+Implement AYScript S3.10 (optional): verify self.<field> on System host (ISystem*) via S3.3 ayt_reflect_* path.
+
+Read: design.md S3.1 note "self.field usertype" — S3.3 may already work if hostTypeName stamped for System scripts.
+
+DO: extend Test_LogiaReflectRuntime or Test_LogiaSystemHost with MovementSystem + AY_PROPERTY field read/write in on_update.
+If gap found: fix codegen/analyzer to stamp hostTypeName for System host same as Component.
+
+Acceptance: movement_system.logia can mutate moveSpeed via self.moveSpeed.
+Only do if S3.4 landed and System scripts need fields.
+```
+
+---
+
+### Prompt S3.11 — Struct chain reflect (optional, large)
+
+```
+Implement AYScript S3.11 (optional): chained struct field reflect (self.position.x).
+
+Read: design.md S3.3 locked decision — explicitly deferred.
+
+DO: recursive reflect walk for AY_PROPERTY struct fields; codegen nested get/set.
+Acceptance: round-trip vec3 field on test component; document perf limits.
+
+Gate: only after S3.4 + S3.5 stable; high complexity — confirm with tech lead before starting.
+```

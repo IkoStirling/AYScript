@@ -7,17 +7,21 @@
 #include "AYScriptBridgeAdapter.h"
 #include "AYScriptRuntimeBridge.h"
 
-// The adapter needs the full ScriptComponent definition so it can
-// read .getScriptName() to forward to the runtime bridge (which keys
-// its chunk cache by name). AYEntity's AYScriptComponent.h has a
-// side-effect macro (AY_COMPONENT) that registers ScriptComponent
-// with `World::registerComponentType<T>`. AYEntity's IAYEntity.h
-// only forward-declares World — so we include AYWorld.h here for
-// the full definition. AYEntity.lib already contains the actual
-// registrar (AYEntityReflection.cpp); the per-TU static we emit here
-// is benign because the registrar is idempotent and AYEntity's own
-// static init runs first. In S3 we plan to split AYScriptComponent.h
-// so this layering cleanup is no longer needed.
+// AYScriptBridgeAdapter.cpp - pimpl IScriptBridge implementation (S3.4)
+//
+// The public AYScriptBridgeAdapter.h forward-declares the class
+// and an opaque `Impl`. The concrete `Impl` here derives from
+// AYEntity's IScriptBridge (defined in AYScriptComponent.h) and
+// lives entirely in this TU so the AYEntity header doesn't leak
+// through AYScript's public include surface.
+//
+// The adapter performs two responsibilities, both of which already
+// existed in S2:
+//   1. camelCase → snake_case method translation.
+//   2. ScriptComponent* → receiver pointer pass-through (so the
+//      Lua `self` and `ayt_reflect_*_field` (S3.3) see the real
+//      ScriptComponent instance).
+
 #include <AYWorld.h>
 #include <components/AYScriptComponent.h>
 
@@ -26,44 +30,78 @@
 namespace ayt::script
 {
 
-LogiaScriptBridgeAdapter::LogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge)
-    : _bridge(bridge)
-{
-}
+struct LogiaScriptBridgeAdapter::Impl : public ayt::entity::IScriptBridge {
+public:
+    explicit Impl(LogiaRuntimeBridge* bridge)
+        : _bridge(bridge) {}
 
-const char* LogiaScriptBridgeAdapter::toLogiaName(const char* m)
+    // AYEntity's IScriptBridge contract: `arg1` is the ScriptComponent*,
+    // `arg2` is contextual (Entity* on onStart, float* on onUpdate,
+    // nullptr on onDestroy). We forward `arg1` as the Lua lightuserdata
+    // receiver so `self.<primitiveField>` reads/writes (S3.3) mutate
+    // AY_PROPERTY fields on the real component.
+    bool call(const char* method, void* arg1, void* arg2) override {
+        if (_bridge == nullptr || method == nullptr) return false;
+        auto* receiver = static_cast<ayt::entity::ScriptComponent*>(arg1);
+        const char* scriptName = receiver ? receiver->getScriptName() : "";
+        return _bridge->callLifecycle(scriptName, toLogiaName(method),
+                                      /*receiver*/ arg1, arg2);
+    }
+
+    bool hasScript(const char* scriptName) const override {
+        if (_bridge == nullptr) return false;
+        return _bridge->hasScript(scriptName ? scriptName : "");
+    }
+
+    LogiaRuntimeBridge* bridge() const { return _bridge; }
+
+private:
+    static const char* toLogiaName(const char* m) {
+        if (m == nullptr) return nullptr;
+        if (std::strcmp(m, "onStart")   == 0) return "on_start";
+        if (std::strcmp(m, "onUpdate")  == 0) return "on_update";
+        if (std::strcmp(m, "onDestroy") == 0) return "on_destroy";
+        return m; // unknown — bridge returns false (script not found)
+    }
+
+    LogiaRuntimeBridge* _bridge; // non-owning
+};
+
+// === Public surface (defined in the .h forward-decl) ===
+
+LogiaScriptBridgeAdapter::LogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge)
+    : _impl(new Impl(bridge))
+{}
+
+LogiaScriptBridgeAdapter::~LogiaScriptBridgeAdapter()
 {
-    if (m == nullptr) return nullptr;
-    if (std::strcmp(m, "onStart")   == 0) return "on_start";
-    if (std::strcmp(m, "onUpdate")  == 0) return "on_update";
-    if (std::strcmp(m, "onDestroy") == 0) return "on_destroy";
-    return m; // unknown — bridge will return false (script not found)
+    delete _impl;
+    _impl = nullptr;
 }
 
 bool LogiaScriptBridgeAdapter::call(const char* method, void* arg1, void* arg2)
 {
-    if (_bridge == nullptr || method == nullptr) return false;
-
-    // AYEntity's IScriptBridge contract: `arg1` is the ScriptComponent*.
-    // We forward it directly to the runtime bridge as `receiver`. The
-    // runtime bridge passes it through as Lua lightuserdata, so the
-    // script's `self` parameter receives the actual component.
-    auto* receiver = static_cast<ayt::entity::ScriptComponent*>(arg1);
-
-    // The script name lives on the ScriptComponent; the bridge keys
-    // its chunk cache by it. Read it here so we know which module to
-    // invoke. (ScriptComponent::getScriptName returns "" when unset,
-    // in which case the bridge correctly returns false.)
-    const char* scriptName = receiver ? receiver->getScriptName() : "";
-
-    return _bridge->callLifecycle(scriptName, toLogiaName(method),
-                                  /*receiver*/ arg1, arg2);
+    return _impl ? _impl->call(method, arg1, arg2) : false;
 }
 
 bool LogiaScriptBridgeAdapter::hasScript(const char* scriptName) const
 {
-    if (_bridge == nullptr) return false;
-    return _bridge->hasScript(scriptName ? scriptName : "");
+    return _impl ? _impl->hasScript(scriptName) : false;
+}
+
+LogiaRuntimeBridge* LogiaScriptBridgeAdapter::bridgePtr() const
+{
+    return _impl ? _impl->bridge() : nullptr;
+}
+
+ayt::entity::IScriptBridge* LogiaScriptBridgeAdapter::asScriptBridge() const
+{
+    return _impl;
+}
+
+LogiaScriptBridgeAdapter* makeLogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge)
+{
+    return new LogiaScriptBridgeAdapter(bridge);
 }
 
 } // namespace ayt::script

@@ -1,32 +1,47 @@
 #pragma once
-// AYScriptSubSystem.h - AYGameLoop subsystem for the Logia runtime (S1)
+// AYScriptSubSystem.h - AYGameLoop subsystem for the Logia runtime (S3.4)
 
 #include <IAYGameLoop.h>
 
 #include "AYScriptRuntimeBridge.h"
 
 #include <memory>
+#include <string>
+#include <vector>
+
+namespace ayt::entity { class ScriptComponent; }
+namespace ayt::entity { class Entity; }
 
 namespace ayt::script
 {
+
+class LogiaScriptBridgeAdapter;
 
 // ScriptSubSystem
 //
 // First concrete ISubSystem in the engine — establishes the pattern for
 // future subsystems (e.g. RenderSubSystem, AudioSubSystem).
 //
-// S1 scope:
+// S3.4 scope:
 //   - Owns a LogiaRuntimeBridge
-//   - initialize(): bridge initialize + log "ayt.script.runtime ready"
-//   - update() / fixedUpdate(): S3.1 (LG-04) drives Logia System-host
-//     scripts. For each ISystem in World whose getName() matches a
-//     loaded Logia script, calls
-//     _bridge.callLifecycle(name, "on_update", systemPtr, &dt).
-//   - shutdown(): bridge shutdown
-//
-// Component-host (ScriptComponent) ticks are NOT driven from here — they
-// go through AYEntity's existing per-entity onUpdate path; see
-// LogiaScriptBridgeAdapter.
+//   - Owns a LogiaScriptBridgeAdapter (sibling to the bridge) that
+//     implements AYEntity's IScriptBridge. ScriptSubSystem hands the
+//     adapter pointer to AYEntity's ScriptComponent instances via
+//     bindComponent(); from that moment the component's onAttach /
+//     onUpdate / onDetach lifecycle routes through the Logia runtime
+//     and (S3.3) `self.<primitiveField>` writes mutate AY_PROPERTY fields.
+//   - initialize(): bridge initialize + adapter instantiation.
+//   - update() / fixedUpdate():
+//       * S3.1 (LG-04) drives Logia System-host scripts. For each
+//         ISystem in World whose getName() matches a loaded Logia
+//         script, calls `_bridge.callLifecycle(name, "on_update",
+//         systemPtr, &dt)`.
+//       * S3.4 additionally walks World::getAllEntities() and calls
+//         `entity->onUpdate(dt)` on each. This dispatches into
+//         every ScriptComponent the bound adapter wired — so a
+//         Component-host script's on_update runs through the same
+//         GameLoop tick as a System-host script.
+//   - shutdown(): bridge shutdown + reset adapter registry.
 //
 // Intentionally NOT auto-registered via REGISTER_SUBSYSTEM in this TU —
 // the host process must explicitly call
@@ -53,8 +68,54 @@ public:
     LogiaRuntimeBridge& bridge() { return _bridge; }
     const LogiaRuntimeBridge& bridge() const { return _bridge; }
 
+    // S3.4 — Component host binding + script loading.
+    //
+    // bindAndLoad() takes a caller-supplied ScriptComponent that
+    // already has a scriptName set (via setScriptName("Foo")). It
+    // (a) loads the script source into the bridge keyed by name and
+    // (b) installs the adapter as the component's IScriptBridge so
+    // the component's onStart/onUpdate/onDestroy lifecycle routes
+    // into the Logia runtime.
+    //
+    // After this call returns true, `entity.onUpdate(dt)` (driven
+    // either by World::update or by tests calling
+    // ScriptSubSystem::tickComponentHosts(dt) directly) will run
+    // the Logia script with `self` = the ScriptComponent pointer —
+    // so self.<primitiveField> reads/writes mutate AY_PROPERTY.
+    //
+    // Returns false if the source failed to compile (the bridge
+    // stores the diagnostics in `errors`).
+    bool bindAndLoad(ayt::entity::ScriptComponent& component,
+                     const std::string& scriptSource,
+                     std::vector<logia::CompilerError>& errors);
+
+    // Lower-level hook — set the adapter on a component that the
+    // caller has already loaded into the bridge by hand. Useful
+    // for stress tests that exercise path conventions
+    // independently of source loading.
+    void bindComponent(ayt::entity::ScriptComponent& component);
+
+    // S3.4 — drive every entity's onUpdate path. World keeps the
+    // canonical entity list; we ask it for getAllEntities() and
+    // forward dt into Entity::onUpdate, which in turn calls every
+    // component's onUpdate — including bound ScriptComponents
+    // whose `self.<f>` mutations hit AYReflect (S3.3). This is
+    // what GameLoop ticks ultimately call.
+    void tickComponentHosts(float deltaTime);
+
+    // Adapter handle so tests can drive the adapter path
+    // independently (e.g. when bypassing the World loop). Not
+    // declared override — IScriptBridge is owned by AYEntity; this
+    // pointer is just the same object AYEntity will see.
+    LogiaScriptBridgeAdapter* adapter() { return _adapter.get(); }
+
 private:
     LogiaRuntimeBridge _bridge;
+    // Owning — non-copyable because the adapter holds a raw
+    // pointer to _bridge above. Single ownership keeps the
+    // destruction order trivial (adapter dies first).
+    std::unique_ptr<LogiaScriptBridgeAdapter> _adapter;
+
     ayt::game::SubSystemDescriptor _descriptor;
     bool _initialized = false;
 };

@@ -164,12 +164,14 @@ TEST_CASE(lg04_runtime_on_update_invoked_per_tick) {
     using ayt::script::test::MovementSystem;
 
     auto& world = ayt::entity::World::instance();
+    world.shutdown();  // isolate singleton state from any prior test run
     world.initialize();
 
     // Register the C++ host (use AY_SYSTEM-equivalent explicit call to
     // avoid pulling in a static-init cycle with the test executable).
-    auto* sys = new MovementSystem();
     world.registerSystem<MovementSystem>(/* priority */ 200);
+    ayt::entity::ISystem* sys = world.findSystemByName("MovementSystem");
+    CHECK(sys != nullptr);
 
     // Set up a Logia script under the same name and load it.
     // Use a var for the local state (counter) and a string for the
@@ -206,17 +208,13 @@ script MovementSystem {
 
     // Tick the subsystem manually (the GameLoop run() is heavier than
     // the test needs). Each tick should call callLifecycle once.
-    fprintf(stderr, "[lg04 debug] before tick: world systems=%zu\n",
-            ayt::entity::World::instance().systemCount());
-    fprintf(stderr, "[lg04 debug] bridge.hasScript(MovementSystem)=%d\n",
-            (int)bridge.hasScript("MovementSystem"));
-    // Direct manual call as a sanity check.
+    // Direct manual call as a sanity check — pass the registered ISystem*
+    // as receiver (System host convention).
     {
         float dt = 1.0f;
         bool ok = bridge.callLifecycle("MovementSystem", "on_update",
-                                        nullptr, &dt);
-        fprintf(stderr, "[lg04 debug] manual callLifecycle=%d counter='%s'\n",
-                (int)ok, bridge.getLuaGlobalString("__lg04_counter").c_str());
+                                        static_cast<void*>(sys), &dt);
+        CHECK(ok);
     }
     sub.update(0.016f);
     sub.update(0.016f);
@@ -229,13 +227,7 @@ script MovementSystem {
     std::string counter = bridge.getLuaGlobalString("__lg04_counter");
     CHECK(counter == "4");
     sub.shutdown();
-
-    // The C++ MovementSystem also ticked 3 times via World::update.
-    // (Note: the subsystem only dispatches to the Logia layer; the C++
-    // tick is separate and goes through World::update. We assert the
-    // Logia side here; the World tick is exercised in SystemTest.cpp.)
-    (void)sys;  // pointer is owned by World — leaked on shutdown, OK for test
-    bridge.shutdown();
+    world.shutdown();
 }
 
 TEST_SUITE_END

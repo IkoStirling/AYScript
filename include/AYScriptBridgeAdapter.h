@@ -1,5 +1,5 @@
 #pragma once
-// AYScriptBridgeAdapter.h - AYEntity IScriptBridge adapter for Logia (S2)
+// AYScriptBridgeAdapter.h - AYEntity IScriptBridge adapter for Logia (S3.4)
 //
 // Bridges AYEntity's `IScriptBridge::call(method, arg1, arg2)` calling
 // convention to AYScript's `LogiaRuntimeBridge::callLifecycle(scriptName,
@@ -12,30 +12,26 @@
 //      receives the real ScriptComponent lightuserdata (S1 used the
 //      script-name string as a placeholder).
 //
-// Implementation note (S2 limitation): AYEntity's AYScriptComponent.h
-// is guarded by an AY_COMPONENT macro that triggers a static-init
-// registrar calling `World::registerComponentType<ScriptComponent>`,
-// but `class World` is only forward-declared via IAYEntity.h in the
-// consumer view (the actual definition lives in AYWorld.h and is
-// linked through AYEntity.lib's own TU). Including the full
-// AYScriptComponent.h in AYScript's TUs would force them to include
-// AYWorld.h and re-instantiate the registrar — fragile and noisy.
-// We instead expose a parallel interface here that matches
-// IScriptBridge's call signature (call/hasScript). The adapter
-// concrete class *does* inherit from IScriptBridge, but only when the
-// consumer has set the include path that makes ScriptComponent +
-// World fully visible. For S2 tests we use the parallel interface
-// directly via a friend helper in the cpp.
+// S3.4: the adapter is declared in this header (forwarding
+// IScriptBridge and LogiaRuntimeBridge only — no AYEntity or
+// AYScriptComponent full include — to keep AYScript's compiled
+// surface free of those recompilation triggers). The cpp file
+// pulls in <components/AYScriptComponent.h> + <AYWorld.h> and
+// instantiates the inheritance there via the concrete bridge
+// declaration. Consumers wanting `LogiaScriptBridgeAdapter*` to
+// outlive the include of this header (e.g. for setBridge()) must
+// already have AYScriptComponent.h visible transitively.
 //
-// In S3, AYEntity should split AYScriptComponent.h into a class-only
-// header and a registrar header so consumers can include just the
-// former — at which point LogiaScriptBridgeAdapter can derive
-// directly from IScriptBridge without this adapter shim.
-
-#include <cstdint>
+// Why this split: the previous S2 layout dropped IScriptBridge
+// inheritance entirely; the new S3.4 layout forwards the interface
+// shape but defers the inheritance to the .cpp. Tests and consumers
+// that include AYScriptComponent.h + AYWorld.h can use the
+// adapter directly. The S2 manual "AdapterCall" forwarding struct
+// in Test_LogiaAdapter.cpp is now unnecessary for new code paths.
 
 namespace ayt::entity
 {
+class IScriptBridge;
 class ScriptComponent;
 }
 
@@ -44,24 +40,49 @@ namespace ayt::script
 
 class LogiaRuntimeBridge;
 
-// BridgeAdapter public surface — mirrors IScriptBridge but is
-// declared here so AYScript doesn't have to depend on AYScriptComponent.h.
+// Forward declaration of the bridge adapter. The cpp declares
+// the concrete derived-from-IScriptBridge class behind the same
+// name; consumers should never need to redeclare it.
+//
+// S3.4 keeps the declaration here minimal: constructor + dtor are
+// part of the public surface. The dtor must be declared in the
+// header so `std::unique_ptr<LogiaScriptBridgeAdapter>` (used in
+// ScriptSubSystem) can instantiate. Its definition lives in the
+// cpp where the full class is visible.
 class LogiaScriptBridgeAdapter {
 public:
     explicit LogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge);
+    ~LogiaScriptBridgeAdapter();
 
-    // True AYEntity IScriptBridge-shape call. When the cpp file has
-    // pulled in <components/AYScriptComponent.h>, this is the
-    // override of the virtual call(); otherwise it's just a method
-    // callable on the adapter directly.
+    // The adapter is movable so the unique_ptr reset / swap work
+    // as expected; we don't need it copyable.
+    LogiaScriptBridgeAdapter(const LogiaScriptBridgeAdapter&) = delete;
+    LogiaScriptBridgeAdapter& operator=(const LogiaScriptBridgeAdapter&) = delete;
+
+    // IScriptBridge interface — these forward through the cpp's
+    // `Impl` table; declared here so consumers who only include
+    // this header can still call/hasScript through the adapter.
     bool call(const char* method, void* arg1, void* arg2);
-
     bool hasScript(const char* scriptName) const;
 
-private:
-    static const char* toLogiaName(const char* entityMethod);
+    // Test/introspection hook — return the underlying bridge
+    // pointer so callers can call loadScript/hasScript on the
+    // bridge without keeping a separate handle.
+    LogiaRuntimeBridge* bridgePtr() const;
 
-    LogiaRuntimeBridge* _bridge; // non-owning
+    // AYEntity integration — return the IScriptBridge view so
+    // ScriptComponent::setBridge(IScriptBridge*) accepts the
+    // adapter without exposing the inheritance in this header.
+    ayt::entity::IScriptBridge* asScriptBridge() const;
+
+private:
+    // Opaque forward-declared impl in the cpp; the pimpl
+    // indirection lets us keep AYEntity's IScriptBridge header
+    // out of this public surface.
+    struct Impl;
+    Impl* _impl;
 };
+
+LogiaScriptBridgeAdapter* makeLogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge);
 
 } // namespace ayt::script
