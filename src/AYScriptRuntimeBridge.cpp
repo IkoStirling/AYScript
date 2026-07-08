@@ -351,13 +351,14 @@ struct LogiaRuntimeBridge::Impl {
         // S3.5: time table — `delta` / `total` are functions so Lua
         // can call `time.delta()` (codegen lowers Logia `time.delta`).
         // Lambdas read live Impl scalars updated by tickAmbient().
+        // S3.5: time table — `delta` and `total` are kept in sync
+        // with the bridge's _currentDelta / _totalElapsed scalars
+        // via tickAmbient(). The bare-Lua emission in AYLuaCodegen
+        // (`time.delta` / `time.total`) reads them as plain numbers;
+        // tickAmbient pushes fresh values after each dispatcher tick.
         auto timeTbl = lua.create_table();
-        timeTbl["delta"] = [this]() -> double {
-            return static_cast<double>(_currentDelta);
-        };
-        timeTbl["total"] = [this]() -> double {
-            return static_cast<double>(_totalElapsed);
-        };
+        timeTbl["delta"] = 0.0;
+        timeTbl["total"] = 0.0;
         lua["time"] = timeTbl;
 
         // S3.5: input table defers to the injectable provider.
@@ -394,6 +395,16 @@ struct LogiaRuntimeBridge::Impl {
         // that the receiver/self mapping is correct without parsing
         // AYLog output.
         lua["__test_witness"] = std::string{};
+
+        // Numeric witness slots used by ambient.time inspectors in
+        // Test_LogiaAmbient.cpp. Pre-registering them with explicit
+        // numeric types lets scripts assign `__witness_delta =
+        // time.delta` (a Lua number) without sol2 auto-typing the
+        // global to nil on first touch. tryGetLuaGlobalNumber reads
+        // these back via lua["__witness_delta"] and fails closed
+        // (returns false) if the global is missing.
+        lua["__witness_delta"] = 0.0;
+        lua["__witness_total"] = 0.0;
     }
 };
 
@@ -658,6 +669,15 @@ void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
     if (scaledDelta < 0.0f) scaledDelta = 0.0f;
     _impl->_currentDelta = scaledDelta;
     _impl->_totalElapsed += scaledDelta;
+    // Mirror onto the `time` table so scripts that hold a reference
+    // to the table see fresh values without going through the
+    // bridge's accessor methods. This matches the S3.5 ambient
+    // expectation that `time.delta` is a number read each frame.
+    sol::table timeTbl = _impl->lua["time"];
+    if (timeTbl.valid()) {
+        timeTbl["delta"] = static_cast<double>(scaledDelta);
+        timeTbl["total"] = static_cast<double>(_impl->_totalElapsed);
+    }
 }
 
 float LogiaRuntimeBridge::currentDelta() const noexcept
