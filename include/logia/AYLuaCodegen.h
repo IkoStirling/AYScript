@@ -9,6 +9,7 @@
 
 #include "AYAst.h"
 #include "AYCompilerError.h"
+#include "AYLogia.h"  // S3.8b: LogiaHostContext for expectSelf-aware codegen.
 #include <string>
 #include <vector>
 
@@ -18,6 +19,14 @@ namespace ayt::script::logia
 struct LuaCodegenOptions {
     // Script name for header comment; not required for codegen correctness.
     std::string scriptName;
+    // S3.8b: optional host context. When `expectSelf == false` the
+    // codegen omits the `self` parameter from emitted lifecycle
+    // functions (used by the Tool host's `run()` entry point so the
+    // generated Lua signature matches the no-receiver contract). The
+    // default `LogiaHostContext{}` mirrors S2.5 (kind=Component,
+    // expectSelf=true) so existing callers that construct a bare
+    // options struct keep emitting `function M.on_*(self)`.
+    LogiaHostContext hostContext = defaultLogiaHostContext();
 };
 
 struct LuaCodegenResult {
@@ -28,6 +37,9 @@ struct LuaCodegenResult {
     std::string source;
 };
 
+// For compile + codegen together, prefer compileLogiaToLua() in
+// AYLogiaPipeline.h instead of stack-allocating Compiler + LuaCodegen
+// in the same frame (MSVC Debug /GS stack-cookie issues).
 class LuaCodegen {
 public:
     explicit LuaCodegen(LuaCodegenOptions options = {});

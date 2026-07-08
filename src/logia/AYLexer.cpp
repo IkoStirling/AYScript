@@ -141,6 +141,7 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         {"on_start", TokenType::OnStart},
         {"on_update", TokenType::OnUpdate},
         {"on_destroy", TokenType::OnDestroy},
+        {"run", TokenType::Run},  // S3.8b: Tool host entry point.
         {"if", TokenType::If},
         {"else", TokenType::Else},
         {"return", TokenType::Return},

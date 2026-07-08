@@ -75,6 +75,28 @@ inline LogiaHostContext defaultLogiaHostContext()
     };
 }
 
+// S3.8b: Tool host context — one-shot editor / CLI scripts.
+//   kind = Tool          → lifecycle whitelist is `run()` only;
+//                          on_start / on_update / on_destroy are soft
+//                          warnings (mirrors the S3.1 System-on_destroy
+//                          policy).
+//   expectSelf = false   → ToolRunner does not pass a receiver;
+//                          codegen omits the `self` parameter and the
+//                          semantic analyzer skips injecting `self`
+//                          into the script's scope.
+//   hostType = nullptr   → no subclass check (Tool hosts don't bind
+//                          against a Reflect type).
+//   strictInheritance = false — same reason.
+inline LogiaHostContext toolLogiaHostContext()
+{
+    return LogiaHostContext{
+        LogiaHostKind::Tool,
+        nullptr,
+        false,
+        false,
+    };
+}
+
 struct CompileOptions {
     std::string fileName;
     bool useCompileTimeTypes = false;
@@ -93,6 +115,10 @@ class Compiler {
 public:
     Compiler() = default;
     explicit Compiler(CompileOptions options);
+
+    // Compile-only entry points. When you also need Lua source, call
+    // compileLogiaToLua() (AYLogiaPipeline.h) instead of stacking
+    // Compiler + LuaCodegen in the same frame.
 
     // S2.5 entry — equivalent to `compile(source, defaultLogiaHostContext())`.
     // Preserved verbatim so the 169 existing tests do not need editing.

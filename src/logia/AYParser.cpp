@@ -73,6 +73,14 @@ std::unique_ptr<Stmt> Parser::parseMember()
     if (match(TokenType::OnDestroy)) {
         return parseLifecycleFunc(LifecycleKind::OnDestroy);
     }
+    // S3.8b: `run` is the Tool host's run-only entry point. The
+    // parser accepts it unconditionally as a member; the semantic
+    // analyzer decides whether the host kind allows it (Tool only —
+    // soft warn on Component / System so a refactor doesn't break
+    // the source shape).
+    if (match(TokenType::Run)) {
+        return parseLifecycleFunc(LifecycleKind::Run);
+    }
 
     error("Expected script member (var or lifecycle function)");
     return nullptr;
@@ -419,6 +427,7 @@ void Parser::synchronize()
         case TokenType::OnStart:
         case TokenType::OnUpdate:
         case TokenType::OnDestroy:
+        case TokenType::Run:
         case TokenType::Return:
         case TokenType::If:
         case TokenType::RightBrace:

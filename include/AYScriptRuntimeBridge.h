@@ -22,7 +22,14 @@ namespace ayt::script
 //
 // The stamp is intentionally a raw constant (not a date string) so
 // it's cheap to fold into the cache key hash.
-constexpr std::size_t kLogiaPipelineVersion = 1u;
+//
+// History:
+//   1 — S3.6 baseline (LG-06a compile cache).
+//   2 — S3.8b (LG-07): added `run` lifecycle keyword +
+//       Tool host policy + Tool-kind codegen branch
+//       (`function M.run()` without `self` when
+//       ctx.expectSelf == false).
+constexpr std::size_t kLogiaPipelineVersion = 2u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -116,6 +123,29 @@ public:
                       const std::string& logiaSource,
                       const logia::LogiaHostContext& ctx,
                       std::vector<logia::CompilerError>& errors);
+
+    // S3.8b (LG-07) — ToolRunner one-shot entry point.
+    //
+    // Convenience wrapper used by editor / CLI hosts that want to
+    // "run a tool" without spelling out the Tool host context + the
+    // `run()` lifecycle call. Compiles `logiaSource` under
+    // `toolLogiaHostContext()` (kind=Tool, expectSelf=false), loads
+    // it, and invokes the `run()` method exactly once. No receiver
+    // is passed (Tool scripts don't bind to a host instance).
+    //
+    // Failure policy: a compile error returns false and leaves
+    // `errors` populated; `hasScript(name)` reflects whatever the
+    // load step produced (false on compile failure, true on success).
+    // The `run()` call's own failure (missing method, Lua runtime
+    // error) is also returned as false; the bridge logs the Lua
+    // error per the S1 contract.
+    //
+    // Repeat calls reuse the S3.6 compile cache when the source +
+    // pipeline version are unchanged — a Tool invocation is cheap
+    // after the first.
+    bool runTool(const std::string& scriptName,
+                 const std::string& logiaSource,
+                 std::vector<logia::CompilerError>& errors);
 
     // === S3.6 (LG-06a) — compile cache observability ===
 

@@ -26,6 +26,7 @@ enum class LifecycleKind {
     OnStart,
     OnUpdate,
     OnDestroy,
+    Run,            // S3.8b: Tool host entry point (no receiver / no self).
 };
 
 class Expr;

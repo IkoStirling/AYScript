@@ -13,6 +13,7 @@ enum class TokenType : uint8_t {
     OnStart,
     OnUpdate,
     OnDestroy,
+    Run,            // S3.8b: Tool host run-only entry point.
     If,
     Else,
     Return,

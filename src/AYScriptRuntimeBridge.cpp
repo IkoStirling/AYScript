@@ -641,6 +641,34 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
     return ok;
 }
 
+// S3.8b (LG-07) — ToolRunner one-shot entry point.
+//
+// Composes three pieces:
+//   1. loadScript under the Tool host context (cached under its
+//      own (source, ctx, version) slot — separate from Component
+//      runs of the same source).
+//   2. callLifecycle(name, "run", nullptr, nullptr) — dispatches
+//      the no-self / no-args signature that LuaCodegen emits under
+//      ctx.expectSelf = false.
+//   3. Returns true iff BOTH the load and the run dispatch
+//      succeeded. On any failure, `errors` is populated and the
+//      function returns false.
+bool LogiaRuntimeBridge::runTool(const std::string& scriptName,
+                                 const std::string& logiaSource,
+                                 std::vector<logia::CompilerError>& errors)
+{
+    errors.clear();
+    if (!loadScript(scriptName, logiaSource,
+                    logia::toolLogiaHostContext(), errors)) {
+        return false;
+    }
+    // callLifecycle's `run` branch passes zero args to the Lua
+    // function (the no-self contract). We pass nullptr for both
+    // receiver and arg2 for clarity; callLifecycle ignores them on
+    // the `run` path.
+    return callLifecycle(scriptName, "run", nullptr, nullptr);
+}
+
 // S3.6 — compile-cache observability. Counters live on _impl so the
 // public methods delegate without holding a separate state.
 std::size_t LogiaRuntimeBridge::compileCacheHitCount() const noexcept
@@ -702,6 +730,12 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
     } else if (methodName == "on_start") {
         // on_start(self, entity) — entity passed as lightuserdata.
         r = fn.call(receiver, arg2);
+    } else if (methodName == "run") {
+        // S3.8b (LG-07): Tool host's run() takes NO args — neither
+        // self nor a dt / entity. The ToolRunner passes nullptr for
+        // receiver; the generated Lua signature is `function M.run()`
+        // (no self) when the host context's expectSelf is false.
+        r = fn.call();
     } else {
         // on_destroy(self) — no extra args.
         r = fn.call(receiver);

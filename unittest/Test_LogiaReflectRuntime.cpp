@@ -17,8 +17,8 @@
 
 #include "AYScript.h"
 #include "AYScriptRuntimeBridge.h"
-#include "logia/AYLuaCodegen.h"
 #include "logia/AYCompilerError.h"
+#include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
 #include "IAYReflect.h"
@@ -29,10 +29,7 @@
 #include <vector>
 
 using ayt::script::LogiaRuntimeBridge;
-using ayt::script::logia::Compiler;
 using ayt::script::logia::CompilerError;
-using ayt::script::logia::LuaCodegen;
-using ayt::script::logia::LuaCodegenOptions;
 
 namespace {
 
@@ -102,30 +99,6 @@ bool loadSource(LogiaRuntimeBridge& bridge,
                 std::vector<CompilerError>& errors)
 {
     return bridge.loadScript(name, logiaSource, errors);
-}
-
-std::string generateLua(const std::string& logiaSource,
-                        std::vector<CompilerError>& errors)
-{
-    Compiler c;
-    auto compiled = c.compile(logiaSource);
-    if (!compiled.success) {
-        for (auto& e : compiled.errors) {
-            errors.push_back(e);
-        }
-        return {};
-    }
-    LuaCodegenOptions opts;
-    opts.scriptName = "<TestSource>";
-    LuaCodegen cg(opts);
-    auto res = cg.generate(*compiled.program);
-    if (!res.success) {
-        for (auto& e : res.errors) {
-            errors.push_back(e);
-        }
-        return {};
-    }
-    return res.source;
 }
 
 } // namespace
@@ -254,7 +227,9 @@ script LG05ScoreHolder {
 )";
 
     std::vector<CompilerError> errors;
-    std::string lua = generateLua(src, errors);
+    ayt::script::logia::LuaCodegenOptions opts;
+    opts.scriptName = "<TestSource>";
+    std::string lua = logia_test::compileToLua(src, errors, {}, opts);
     CHECK(errors.empty());
     CHECK(lua.find("ayt_reflect_get_field") != std::string::npos);
     CHECK(lua.find("ayt_reflect_set_field") != std::string::npos);

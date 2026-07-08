@@ -14,6 +14,8 @@ const char* lifecycleKindName(LifecycleKind kind)
         return "on_update";
     case LifecycleKind::OnDestroy:
         return "on_destroy";
+    case LifecycleKind::Run:
+        return "run";
     }
     return "unknown";
 }

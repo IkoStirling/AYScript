@@ -5,7 +5,7 @@
 // functions take no parameters (just `self`).
 
 #include "AYScript.h"
-#include "logia/AYLuaCodegen.h"
+#include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
 #include <string>
@@ -16,16 +16,9 @@ namespace {
 
 std::string compileToLua(const char* logiaSource)
 {
-    Compiler compiler;
-    auto compiled = compiler.compile(logiaSource);
-    if (!compiled.success) return {};
-
     LuaCodegenOptions opts;
     opts.scriptName = "test";
-    LuaCodegen codegen(opts);
-    auto gen = codegen.generate(*compiled.program);
-    if (!gen.success) return {};
-    return gen.source;
+    return logia_test::compileToLua(logiaSource, {}, opts);
 }
 
 std::string flatten(const std::string& s)

@@ -6,6 +6,7 @@
 #include "logia/AYSemanticAnalyzer.h"
 
 #include <algorithm>
+#include <memory>
 
 namespace ayt::script::logia
 {
@@ -56,11 +57,11 @@ CompileResult Compiler::compile(const std::string& source,
     // NOT introduce new diagnostics in LG-03 — every existing test
     // that asserted on a S2.5 diagnostic must still pass unchanged.
     if (parserOk) {
-        SemanticAnalyzer sem(SemanticOptions{
+        auto sem = std::make_unique<SemanticAnalyzer>(SemanticOptions{
             _options.useCompileTimeTypes,
             _options.fileName.c_str()
         }, ctx);
-        SemanticResult semRes = sem.analyze(*result.program);
+        SemanticResult semRes = sem->analyze(*result.program);
         for (auto& d : semRes.diagnostics) {
             result.diagnostics.push_back(d);
             if (d.severity == DiagnosticSeverity::Error) {

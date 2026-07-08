@@ -140,7 +140,7 @@ Logia **语法层**与 **host 类型**解耦：作者始终写 `script Name { ..
 | `script Name` 在 AYReflect 注册 | soft warning（未知名仍生成 Lua） | 同左 | 同左 |
 | `Name` 与 `ctx.hostType` 继承兼容 | **不做**（S2.5 从未做子类检查） | **不做**；按 `hostKind` + registry 存在性 + 运行时注册表 | `isDerivedFrom(type, hostType)` 沿单链 parent walk |
 | `self.field` 字段存在 | 检查 AY_PROPERTY | 同左 | 同左 |
-| 生命周期名 | `on_start/on_update/on_destroy` | 各 host 文档化合法方法集 | 同左 |
+| 生命周期名 | `on_start/on_update/on_destroy` | 各 host 文档化合法方法集；Tool host 另增 `run()`（S3.8b） | 同左 |
 
 **AYReflect 现状（2026-07-08）**：`ITypeInfo` 无 `isSubclassOf` / 无派生图；`TypeRegistry` 只有 name/id 映射。`resolveScriptName` 仅 `findType(name)`——warning 文案中的 “ScriptComponent subclass” 是**目标语义**，不是 S2.5 已实现行为；S3.0 应修正文案为 “no matching registered type”。
 
@@ -222,8 +222,8 @@ script PlayerController {
 
 <var_decl>     ::= "var" <identifier> ":" <type> ["=" <expression>] ";"
 
-<lifecycle_func> ::= ("on_start" | "on_update" | "on_destroy")
-                     "(" ")" <block>            (* v1: 无参数 *)
+<lifecycle_func> ::= ("on_start" | "on_update" | "on_destroy" | "run")
+                     "(" ")" <block>            (* v1: 无参数；`run` 仅 Tool host *)
 
 <type>         ::= <identifier>    (* Entity, Transform, float, int, bool, ... *)
 
@@ -557,6 +557,26 @@ void setBaseTypeByName(const char* childName, const char* baseName);
 
 **Logia 集成**：新增 `LogiaHostContext::strictInheritance`（默认 false）。当 `kind == Component && hostType != nullptr && strictInheritance == true` 时，analyzer 调 `isDerivedFrom(scriptNameInfo, hostType)`：true → 通过；false → **hard error**（`TypeMismatch`）；script name 不在 registry → 维持 S2.5/LG-03 的 soft warning（strict 不适用）。
 
+#### S3.8 — LG-07：Tool host（editor / CLI one-shot）
+
+**S3.8b (LG-07) 锁定决策**（2026-07-08 实现完成后补）：
+
+- **Surface syntax**：新增 lifecycle 关键字 **`run()`**（Lexer `TokenType::Run` → Parser → `LifecycleKind::Run` → codegen `M.run`）。示例：`script BuildTool { run() { log.info("ok") } }`。
+- **`toolLogiaHostContext()`**（`logia/AYLogia.h`）：`{ kind=Tool, hostType=nullptr, expectSelf=false, strictInheritance=false }` — Tool host 的单一权威 ctx 工厂。
+- **Semantic — Tool host**（`ctx.kind == Tool`）：
+  - **`run()`**：合法入口，不警告。
+  - **`on_start` / `on_update` / `on_destroy`**：软警告 `"<name> is not invoked on Tool host scripts"`，hint 指回 `run()`。
+  - **`expectSelf=false`**：analyzer **不**注入 `self`；脚本体引用 `self` → S2.5 implicit-global 软警告。
+- **Semantic — 非 Tool host**（Component / System）：脚本内声明 **`run()`** → 软警告，hint 指 `toolLogiaHostContext()` + `runTool()`。
+- **Codegen**（`LuaCodegenOptions::hostContext`）：`expectSelf=false` → `function M.run()`（**无** `self`）；`expectSelf=true` → 保持 S2.5 `function M.on_*(self)`。`compileLogiaToLua()`（`AYLogiaPipeline.cpp`）把调用方 `ctx` 写入 `codegenOpts.hostContext`。
+- **Bridge — `LogiaRuntimeBridge::runTool(name, src, errors)`**：`loadScript(name, src, toolLogiaHostContext(), errors)` + `callLifecycle(name, "run", nullptr, nullptr)`。`callLifecycle` 的 `run` 分支以 **零 Lua 实参** dispatch（匹配无 `self` 签名）。
+- **Compile cache**：Tool 与 Component **独立 cache slot**（key 含 `kind=Tool` + `expectSelf=false`）；同源字符串 Component `loadScript` 与 Tool `runTool` **不会**错误 hit 彼此产物。
+- **Pipeline version**：`kLogiaPipelineVersion = 2`（S3.8b bump；见 `AYScriptRuntimeBridge.h` History 注释）。
+- **测试**：`unittest/Test_LogiaToolHost.cpp`（19 用例：lexer `run` keyword / Tool semantic policy / `toolLogiaHostContext` 工厂 / 非 Tool 上 `run()` 警告 / codegen `function M.run()` / Component 回归 / `runTool` 端到端 + cache / System `on_destroy` 回归）。
+- **未做**：Editor / CLI 可执行文件集成（→ **S3.9**）；Tool hot reload（one-shot 不需要）；`examples/build_tool.logia`（可选文档示例）。
+
+> **S3.8-min 归档**（同日早些时候交付，已被 S3.8b 取代）：曾用 `on_start` 作 Tool 入口、`defaultLogiaHostContext()` 编译、无 `run` 关键字 / 无 `runTool` / 无 `expectSelf` codegen 分支。保留此记录仅供 bisect；新代码 **必须** 走 S3.8b 路径。
+
 #### 明确拒绝的方案
 
 | 方案 | 结论 |
@@ -698,8 +718,10 @@ AYScript/
 │       ├── AYParser.cpp
 │       ├── AYSemanticAnalyzer.cpp
 │       ├── AYLuaCodegen.cpp
-│       └── AYLogia.cpp
+│       ├── AYLogia.cpp
+│       └── AYLogiaPipeline.cpp
 ├── unittest/
+│   ├── LogiaTestHelpers.h   # compile→Lua: use compileLogiaToLua(), not stack Compiler+LuaCodegen
 │   ├── Test_LogiaLexer.cpp
 │   ├── Test_LogiaParser.cpp
 │   ├── Test_LogiaSemantic.cpp

@@ -279,11 +279,20 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
         s.hostTypeName = std::string(selfType->getName());
     }
 
-    // Inject `self` into the script's scope so `self.field` resolves.
-    ScopeEntry e;
-    e.type = selfType;
-    e.decl = nullptr;
-    _scope["self"] = e;
+    // S3.8b: Tool hosts (and any other host that sets `expectSelf`
+    // = false) do not bind a receiver to the script — ToolRunner
+    // calls `run()` with `receiver = nullptr`, so injecting `self`
+    // into the scope would be misleading (every read would be a
+    // soft warning, every write would target a nil lightuserdata).
+    // Skip the scope injection; a `run()` body that mentions `self`
+    // will hit the implicit-global path and produce the standard
+    // soft warning, which is the right surface to the user.
+    if (_ctx.expectSelf) {
+        ScopeEntry e;
+        e.type = selfType;
+        e.decl = nullptr;
+        _scope["self"] = e;
+    }
 
     // First pass: collect var declarations into the script-local scope.
     for (auto& member : s.members) {
@@ -369,15 +378,17 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         report(d);
     }
 
-    // S3.8 (LG-07) — Tool host policy. A Tool script is a run-only
-    // one-shot (editor / CLI) whose entry point is `on_start`. Other
-    // lifecycle methods (`on_update`, `on_destroy`) are never
-    // invoked by the ToolRunner — emit soft warnings so legacy
-    // refactors from Component / System hosts keep parsing. The
-    // shape mirrors the S3.1 System-on_destroy policy above.
+    // S3.8b (LG-07) — Tool host policy. A Tool script is a run-only
+    // one-shot (editor / CLI) whose entry point is the new `run()`
+    // lifecycle. The legacy `on_start` / `on_update` / `on_destroy`
+    // methods are never invoked by the ToolRunner — emit soft
+    // warnings so refactors from Component / System hosts keep
+    // parsing. The shape mirrors the S3.1 System-on_destroy policy.
     if (_ctx.kind == LogiaHostKind::Tool) {
         const char* name = nullptr;
-        if (fn.kind == LifecycleKind::OnUpdate) {
+        if (fn.kind == LifecycleKind::OnStart) {
+            name = "on_start";
+        } else if (fn.kind == LifecycleKind::OnUpdate) {
             name = "on_update";
         } else if (fn.kind == LifecycleKind::OnDestroy) {
             name = "on_destroy";
@@ -388,12 +399,36 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
             d.errorCode = ErrorCode::InvalidStatement;
             d.message = std::string(name) +
                         " is not invoked on Tool host scripts";
-            d.hint = "Tool host runs once via the on_start() entry point; "
-                     "use `on_start()` for the one-shot body, or move this "
+            d.hint = "Tool host runs once via the run() entry point; "
+                     "use `run()` for the one-shot body, or move this "
                      "script to a Component / System host if you need "
                      "tick-driven lifecycle";
             report(d);
         }
+    }
+
+    // S3.8b (LG-07) — symmetric warning: `run()` is meaningful only
+    // under the Tool host. On Component / System hosts it would be a
+    // dead method (neither the dispatcher nor the runner ever calls
+    // it). Soft warn so a copy-paste from a Tool source still parses
+    // under a Component host but the user knows to drop it.
+    if (_ctx.kind != LogiaHostKind::Tool
+        && fn.kind == LifecycleKind::Run) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Warning;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "run() is a Tool host lifecycle and is not invoked on "
+                    + std::string(_ctx.kind == LogiaHostKind::Component
+                                      ? "Component"
+                                      : (_ctx.kind == LogiaHostKind::System
+                                             ? "System"
+                                             : "EventHandler"))
+                    + " host scripts";
+        d.hint = "move this script to a Tool host (toolLogiaHostContext()) "
+                 "and bind it via runTool(), or replace `run()` with the "
+                 "appropriate lifecycle (on_start / on_update) for this "
+                 "host kind";
+        report(d);
     }
 
     for (auto& s : fn.body) {

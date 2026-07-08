@@ -1,49 +1,32 @@
-// Test_LogiaToolHost.cpp — S3.8 / LG-07 Tool host tests
+// Test_LogiaToolHost.cpp - S3.8b / LG-07 Tool host tests
 //
-// Verifies the run-only one-shot Tool host (editor / CLI). The Tool host
-// reuses the existing `on_start` lifecycle as its entry point — the Tool
-// runner API compiles the source under the default (Component) host
-// context and invokes the script's `on_start` exactly once via the
-// runtime bridge's standard `callLifecycle` path.
-//
-// This file replaces the original S3.8 design (which introduced a new
-// `run` keyword and a dedicated `runTool` API on the bridge). The new
-// shape keeps the parser / lexer / AST surface stable, lets the Tool
-// host share the Component host's compile pipeline, and only adds the
-// host-kind-aware *policy* (hint text, on_update / on_destroy warnings).
-//
-// Coverage:
-//   1. Semantic analyzer with `ctx.kind == Tool`:
-//      - `on_start` lifecycle parses + compiles cleanly (no warning).
-//      - `on_update` / `on_destroy` are soft warnings (matching the
-//        S3.1 System host's on_destroy policy) — the ToolRunner never
-//        invokes them at runtime, but the source still parses.
-//      - `self` references in a Tool host script fall through to the
-//        standard UnknownIdentifier path. Since the Tool host does not
-//        inject `self` into scope (mirroring the S3.1 ISystem* contract),
-//        the test below asserts the implicit-global soft warning
-//        (legacy S2.5 / LG-03 behavior on an undeclared identifier)
-//        — there is no hard error in this shape.
-//      - Unknown script name under Tool host still produces a soft
-//        warning but the hint text is host-kind-aware.
-//
-//   2. LuaCodegen:
-//      - Tool host scripts still emit `function M.on_start(self)` (the
-//        S2.5 / LG-04 contract; S3.8 does not change codegen).
-//      - Component host scripts keep the same `on_update(self)` form
-//        (regression guard).
-//
-//   3. LogiaRuntimeBridge — `runTool` was a planned S3.8 API entry
-//      point but the implementation is gated on the parser supporting
-//      the `run` keyword. Until that ships, the ToolRunner path is the
-//      same as Component-on_start: compile + load + callLifecycle. The
-//      test below exercises that path end-to-end with a test witness
-//      global so the bridge's load + dispatch can be observed.
-//
-//   4. Regression: a Component host script with `on_update` still
-//      compiles cleanly with no Tool-related warnings (host kind
-//      discrimination works). A System host script's `on_destroy`
-//      still emits the S3.1 warning (legacy policy preserved).
+// The S3.8 baseline (policy-only) is replaced by the original prompt's
+// `run` keyword + dedicated Tool host surface. Concretely:
+//   - The lexer recognizes `run` as a keyword; the parser accepts it
+//     as a script member and produces a `LifecycleFuncDecl` with
+//     `kind == LifecycleKind::Run`.
+//   - `toolLogiaHostContext()` returns a context with `kind=Tool,
+//     expectSelf=false` (single source of truth for the Tool host
+//     shape).
+//   - Semantic policy:
+//       * Under Tool: only `run()` is allowed. `on_start` /
+//         `on_update` / `on_destroy` emit a soft warning (mirroring
+//         the S3.1 System-on_destroy policy).
+//       * Under Component / System: `run()` emits a soft warning
+//         (symmetric: `run()` is a Tool lifecycle, not invoked by
+//         tick-driven hosts).
+//   - LuaCodegen: under `ctx.expectSelf == false` the emitted
+//     signature is `function M.run()` (no `self`); under
+//     expectSelf==true (Component / System) the existing
+//     `function M.on_*(self)` shape is preserved verbatim.
+//   - Bridge: `runTool(name, src, errors)` compiles under
+//     `toolLogiaHostContext()`, loads, and invokes `run` exactly
+//     once. The compile cache is keyed by (source, Tool ctx, v2),
+//     which is a separate slot from any Component-host run of the
+//     same source.
+//   - Regression: Component / System hosts see no Tool-related
+//     warnings; their codegen output is byte-identical to the
+//     S3.8 baseline (golden strings verified).
 //
 // AYScript test macro convention: CHECK(condition), CHECK(... == ...).
 // Headless, no HWND, no filesystem. Picked up by the unittest glob.
@@ -52,8 +35,9 @@
 #include "AYScriptRuntimeBridge.h"
 #include "logia/AYCompilerError.h"
 #include "logia/AYLogia.h"
-#include "LogiaTestHelpers.h"
 #include "logia/AYSemanticAnalyzer.h"
+#include "logia/AYToken.h"
+#include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
 #include <string>
@@ -63,25 +47,26 @@ using ayt::script::LogiaRuntimeBridge;
 using ayt::script::logia::CompileResult;
 using ayt::script::logia::Compiler;
 using ayt::script::logia::CompilerError;
+using ayt::script::logia::LifecycleKind;
 using ayt::script::logia::LogiaHostContext;
 using ayt::script::logia::LogiaHostKind;
+using ayt::script::logia::tokenize;
 
 namespace {
 
-// Tool hosts use `on_start` as the canonical entry point (the parser
-// has only the on_start / on_update / on_destroy keywords; introducing
-// a new `run` keyword is out of S3.8 scope).
-const char* kToolOnStartOnly = R"(
+// Canonical Tool source: `run()` is the entry point.
+const char* kToolRunOnly = R"(
 script BuildTool {
-    on_start() {
+    run() {
         log.info("tool ran")
     }
 }
 )";
 
+// Tool source that ALSO declares `on_update` (should soft-warn).
 const char* kToolWithOnUpdate = R"(
 script HasOnUpdate {
-    on_start() {
+    run() {
         log.info("still runs")
     }
     on_update() {
@@ -90,15 +75,20 @@ script HasOnUpdate {
 }
 )";
 
-const char* kToolWithSelfRef = R"(
-script UsesSelf {
+// Tool source that ALSO declares `on_start` (should soft-warn).
+const char* kToolWithOnStart = R"(
+script HasOnStart {
     on_start() {
-        log.info(self.something)
+        log.info("not invoked")
+    }
+    run() {
+        log.info("the only entry")
     }
 }
 )";
 
-const char* kNoEntryMethod = R"(
+// Tool source with no `run()` at all.
+const char* kNoRunEntry = R"(
 script NoEntry {
     on_update() {
         log.info("no entry")
@@ -106,20 +96,27 @@ script NoEntry {
 }
 )";
 
-const char* kUnknownName = R"(
-script UnregisteredTool {
-    on_start() {
-        log.info("hi")
-    }
-}
-)";
-
+// Component host source with `on_update` (must stay clean).
 const char* kComponentOnUpdate = R"(
 script PlayerController {
     var n: int = 0
     on_update() {
         n = n + 1
         __test_witness = n
+    }
+}
+)";
+
+// Component host source with `run()` (should soft-warn under
+// Component, since `run` is a Tool lifecycle).
+const char* kComponentWithRun = R"(
+script PlayerController {
+    var n: int = 0
+    run() {
+        n = n + 1
+    }
+    on_update() {
+        n = n + 1
     }
 }
 )";
@@ -150,50 +147,72 @@ bool hasHintContaining(const CompileResult& r, const std::string& needle)
 TEST_SUITE(LogiaToolHostTests)
 
 // ============================================================
+// 0. Lexer — `run` is a keyword
+// ============================================================
+
+TEST_CASE(tool_lexer_run_is_keyword) {
+    std::vector<ayt::script::logia::Token> tokens;
+    tokenize("run on_start on_update on_destroy", tokens);
+    CHECK(tokens.size() == 5u);
+    CHECK(tokens[0].type == ayt::script::logia::TokenType::Run);
+    CHECK(tokens[1].type == ayt::script::logia::TokenType::OnStart);
+    CHECK(tokens[2].type == ayt::script::logia::TokenType::OnUpdate);
+    CHECK(tokens[3].type == ayt::script::logia::TokenType::OnDestroy);
+    CHECK(tokens[4].type == ayt::script::logia::TokenType::EndOfFile);
+}
+
+// ============================================================
 // 1. Semantic analyzer (Tool host policy)
 // ============================================================
 
-// --- 1a. on_start only — no Tool-specific warnings, success.
-//          Note: a baseline S2.5 unknown-name soft warning may
-//          still fire for script names that are not registered
-//          in AYReflect. The Tool host does not introduce any
-//          additional diagnostics on top of that. -------------
+// --- 1a. `run()` under Tool host compiles cleanly with no
+//          Tool-specific warnings. -----------------------------
 
-TEST_CASE(tool_ctx_on_start_only_no_tool_specific_warnings) {
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
+TEST_CASE(tool_ctx_run_only_no_tool_specific_warnings) {
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
 
     Compiler c;
-    auto r = c.compile(kToolOnStartOnly, ctx);
+    auto r = c.compile(kToolRunOnly, ctx);
     CHECK(r.success);
     CHECK(r.errors.empty());
     CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
+    CHECK_FALSE(hasWarningWithMessage(r, "is a Tool host lifecycle"));
 }
 
-// --- 1b. on_update in Tool host → soft warning. -------------
+// --- 1b. `on_update` under Tool → soft warning. --------------
 
 TEST_CASE(tool_ctx_on_update_emits_soft_warning) {
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
 
     Compiler c;
     auto r = c.compile(kToolWithOnUpdate, ctx);
     CHECK(r.success);
     CHECK(hasWarningWithMessage(r, "on_update is not invoked on Tool host scripts"));
-    CHECK(hasHintContaining(r, "on_start()"));
+    CHECK(hasHintContaining(r, "run()"));
 }
 
-// --- 1c. on_destroy in Tool host → soft warning. ------------
+// --- 1c. `on_start` under Tool → soft warning. ---------------
+
+TEST_CASE(tool_ctx_on_start_emits_soft_warning) {
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
+
+    Compiler c;
+    auto r = c.compile(kToolWithOnStart, ctx);
+    CHECK(r.success);
+    CHECK(hasWarningWithMessage(r, "on_start is not invoked on Tool host scripts"));
+    CHECK(hasHintContaining(r, "run()"));
+}
+
+// --- 1d. `on_destroy` under Tool → soft warning. -------------
 
 TEST_CASE(tool_ctx_on_destroy_emits_soft_warning) {
     const char* src = R"(
 script Both {
-    on_start() { log.info("a") }
+    run() { log.info("a") }
     on_destroy() { log.info("c") }
 }
 )";
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
 
     Compiler c;
     auto r = c.compile(src, ctx);
@@ -201,78 +220,97 @@ script Both {
     CHECK(hasWarningWithMessage(r, "on_destroy is not invoked on Tool host scripts"));
 }
 
-// --- 1d. self in Tool host — `self` is in scope (shared
-//          contract with Component / System hosts). The Tool
-//          host does NOT add a hard error for self references
-//          (matching S3.8 keep-it-simple policy: scoping is
-//          shared, only lifecycle policy differs). ------------
+// --- 1e. `self` in Tool host — Tool does NOT inject `self`
+//          into scope (expectSelf=false). A `self` reference
+//          falls through to the standard UnknownIdentifier
+//          soft warning. (Tool scripts must not touch `self`.) -
 
-TEST_CASE(tool_ctx_self_reference_compiles_cleanly) {
+TEST_CASE(tool_ctx_self_reference_emits_implicit_global_warning) {
     const char* src = R"(
 script PlayerController {
-    var t: Transform
-    on_start() {
-        t.position.x = 0.0
+    run() {
+        log.info(self.something)
     }
 }
 )";
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
 
     Compiler c;
     auto r = c.compile(src, ctx);
-    CHECK(r.success);
+    CHECK(r.success);  // soft warning only
+    // No Tool-specific lifecycle warnings (run() is allowed).
     CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
-    // The baseline member-not-found warning is NOT expected for a
-    // valid Transform.position.x chain — only Tool-specific
-    // lifecycle warnings are part of the S3.8 contract.
+    // `self` is not in scope → implicit global warning.
+    CHECK(hasWarningWithMessage(r, "implicit global 'self'"));
 }
 
-// --- 1e. Unknown script name under Tool host — soft warning
-//          with host-kind-aware hint. -------------------------
+// --- 1f. `toolLogiaHostContext()` returns the canonical
+//          Tool host context. ----------------------------------
 
-TEST_CASE(tool_ctx_unknown_name_emits_soft_warning) {
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
-
-    Compiler c;
-    auto r = c.compile(kUnknownName, ctx);
-    CHECK(r.success);
-    CHECK(hasWarningWithMessage(r, "UnregisteredTool"));
+TEST_CASE(tool_logia_host_context_factory) {
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
+    CHECK(ctx.kind == LogiaHostKind::Tool);
+    CHECK(ctx.expectSelf == false);
+    CHECK(ctx.hostType == nullptr);
+    CHECK(ctx.strictInheritance == false);
 }
 
-// --- 1f. Regression: Component host's on_update is clean. --
+// ============================================================
+// 2. Symmetric policy — `run()` on Component / System hosts
+// ============================================================
 
-TEST_CASE(component_host_on_update_emits_no_tool_warning) {
+// --- 2a. `run()` under Component → soft warning. ------------
+
+TEST_CASE(component_ctx_run_emits_soft_warning) {
     LogiaHostContext ctx;
     ctx.kind = LogiaHostKind::Component;
 
     Compiler c;
-    auto r = c.compile(kComponentOnUpdate, ctx);
+    auto r = c.compile(kComponentWithRun, ctx);
     CHECK(r.success);
-    CHECK(r.errors.empty());
+    CHECK(hasWarningWithMessage(r, "run() is a Tool host lifecycle"));
+    CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
+}
+
+// --- 2b. `run()` under System → soft warning. ---------------
+
+TEST_CASE(system_ctx_run_emits_soft_warning) {
+    const char* src = R"(
+script MovementSystem {
+    run() {
+        log.info("not invoked by tick dispatcher")
+    }
+}
+)";
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::System;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    CHECK(r.success);
+    CHECK(hasWarningWithMessage(r, "run() is a Tool host lifecycle"));
     CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
 }
 
 // ============================================================
-// 2. LuaCodegen — Tool host shares Component host codegen
+// 3. LuaCodegen — `function M.run()` (no self) under Tool host
 // ============================================================
 
-// --- 2a. Tool host on_start keeps the standard `(self)` header.
-//          S3.8 does not change codegen — the Tool host only
-//          gates *which* lifecycle methods are called, not the
-//          generated Lua signature. ----------------------------
+// --- 3a. Tool host `run()` → emitted without `self`. ---------
 
-TEST_CASE(tool_codegen_emits_on_start_with_self) {
-    LogiaHostContext ctx;
-    ctx.kind = LogiaHostKind::Tool;
+TEST_CASE(tool_codegen_emits_run_without_self) {
+    LogiaHostContext ctx = ayt::script::logia::toolLogiaHostContext();
 
-    auto lua = logia_test::compileToLua(kToolOnStartOnly, ctx);
+    auto lua = logia_test::compileToLua(kToolRunOnly, ctx);
     CHECK(!lua.empty());
-    CHECK(lua.find("function M.on_start(self)") != std::string::npos);
+    // Tool host: signature is `function M.run()` — no `self`.
+    CHECK(lua.find("function M.run()") != std::string::npos);
+    // Crucially, NO `function M.run(self)`.
+    CHECK(lua.find("function M.run(self)") == std::string::npos);
 }
 
-// --- 2b. Component host (expectSelf=true) keeps S2.5 form. -
+// --- 3b. Component host `on_update` keeps the S2.5 `(self)`
+//          signature (regression guard). ---------------------
 
 TEST_CASE(component_codegen_emits_on_update_with_self) {
     LogiaHostContext ctx;
@@ -283,85 +321,151 @@ TEST_CASE(component_codegen_emits_on_update_with_self) {
     CHECK(lua.find("function M.on_update(self)") != std::string::npos);
 }
 
+// --- 3c. Component host `run()` soft-warns in the diagnostic
+//          surface (codegen still emits `function M.run(self)`
+//          because expectSelf=true on the Component host). ----
+
+TEST_CASE(component_codegen_emits_run_with_self_when_expectSelf_true) {
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+    // expectSelf is true by default for Component.
+
+    auto lua = logia_test::compileToLua(kComponentWithRun, ctx);
+    CHECK(!lua.empty());
+    // The codegen is host-context-driven, not warning-driven.
+    // Even though `run()` on Component is a soft warning, the
+    // signature still has `self` because expectSelf=true.
+    CHECK(lua.find("function M.run(self)") != std::string::npos);
+}
+
 // ============================================================
-// 3. LogiaRuntimeBridge — Tool entry path via on_start
+// 4. LogiaRuntimeBridge — runTool end-to-end
 // ============================================================
 
-// --- 3a. ToolRunner path: compile + load + callLifecycle on
-//          the script's `on_start`, with observable side effect. -
+// --- 4a. runTool: compile + load + invoke `run` once. -------
 
-TEST_CASE(tool_runner_executes_on_start_once) {
+TEST_CASE(tool_bridge_run_tool_executes_run_once) {
     LogiaRuntimeBridge bridge;
     std::vector<CompilerError> errors;
 
     const char* src = R"(
 script Tool1 {
-    on_start() {
+    run() {
         log.info("ran")
         __test_witness = "ran-once"
     }
 }
 )";
-    CHECK(bridge.loadScript("Tool1", src, errors));
+    CHECK(bridge.runTool("Tool1", src, errors));
     CHECK(errors.empty());
-    CHECK(bridge.callLifecycle("Tool1", "on_start", nullptr, nullptr));
+    CHECK(bridge.hasScript("Tool1"));
     CHECK(bridge.getLuaGlobalString("__test_witness") == std::string("ran-once"));
 }
 
-// --- 3b. Tool script that declares no `on_start` is
-//          loadable (it's a valid source) but the dispatch
-//          via callLifecycle returns false (no such method). --
+// --- 4b. runTool: a Tool source without `run()` is
+//          loadable (parser accepts it as valid source) but
+//          runTool returns false because dispatch fails. -----
 
-TEST_CASE(tool_runner_without_on_start_method_dispatch_fails) {
+TEST_CASE(tool_bridge_run_tool_without_run_method_fails) {
     LogiaRuntimeBridge bridge;
     std::vector<CompilerError> errors;
 
-    CHECK(bridge.loadScript("NoEntry", kNoEntryMethod, errors));
-    CHECK(errors.empty());
-    CHECK(bridge.callLifecycle("NoEntry", "on_start", nullptr, nullptr) == false);
+    CHECK_FALSE(bridge.runTool("NoEntry", kNoRunEntry, errors));
+    // The compile cache slot for (NoEntry, Tool ctx) is still
+    // populated (compile succeeded; only dispatch failed).
+    CHECK(bridge.hasScript("NoEntry"));
 }
 
-// --- 3c. Compile failure surfaces errors and loadScript
-//          returns false (no entry attempted). ----------------
+// --- 4c. runTool: a compile-broken source returns false
+//          and does NOT leave a script bound. ----------------
 
-TEST_CASE(tool_runner_compile_failure_returns_false) {
+TEST_CASE(tool_bridge_run_tool_compile_failure_returns_false) {
     LogiaRuntimeBridge bridge;
     std::vector<CompilerError> errors;
 
     // Unparseable (missing brace).
     const char* bad = R"(
 script BrokenTool {
-    on_start() {
+    run() {
         log.info("x")
 )";
-    CHECK(bridge.loadScript("BrokenTool", bad, errors) == false);
+    CHECK(bridge.runTool("BrokenTool", bad, errors) == false);
     CHECK(!errors.empty());
     CHECK(bridge.hasScript("BrokenTool") == false);
 }
 
-// --- 3d. Repeat loadScript on the same source hits the S3.6
-//          compile cache. -------------------------------------
+// --- 4d. Repeat runTool on the same source hits the S3.6
+//          compile cache. -----------------------------------
 
-TEST_CASE(tool_runner_repeat_source_hits_compile_cache) {
+TEST_CASE(tool_bridge_run_tool_repeat_source_hits_compile_cache) {
     LogiaRuntimeBridge bridge;
     std::vector<CompilerError> errors;
 
-    CHECK(bridge.loadScript("Repeatable", kToolOnStartOnly, errors));
+    CHECK(bridge.runTool("Repeatable", kToolRunOnly, errors));
     CHECK(bridge.compileCacheMissCount() == 1u);
     CHECK(bridge.compileCacheHitCount() == 0u);
 
     errors.clear();
-    CHECK(bridge.loadScript("Repeatable", kToolOnStartOnly, errors));
+    CHECK(bridge.runTool("Repeatable", kToolRunOnly, errors));
     CHECK(bridge.compileCacheMissCount() == 1u);
     CHECK(bridge.compileCacheHitCount() == 1u);
 }
 
+// --- 4e. Tool host and Component host of the same source
+//          are SEPARATE cache slots (different ctx hash).
+//          A Component-host loadScript + Tool-host runTool on
+//          the same source string must both miss + populate
+//          their own slots. ---------------------------------
+
+TEST_CASE(tool_bridge_separate_cache_slot_from_component) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+
+    // First run under Tool host — miss + populate Tool slot.
+    CHECK(bridge.runTool("Shared", kToolRunOnly, errors));
+    CHECK(bridge.compileCacheMissCount() == 1u);
+    CHECK(bridge.compileCacheHitCount() == 0u);
+
+    // Same source but loaded under Component host — different ctx
+    // hash → must miss + populate a separate slot. The Tool slot
+    // is untouched.
+    LogiaHostContext componentCtx;
+    componentCtx.kind = LogiaHostKind::Component;
+    errors.clear();
+    CHECK(bridge.loadScript("Shared", kToolRunOnly, componentCtx, errors));
+    CHECK(bridge.compileCacheMissCount() == 2u);
+    CHECK(bridge.compileCacheHitCount() == 0u);
+
+    // Re-run the Tool variant → still hits the Tool slot (no
+    // new miss). Cache key carries `expectSelf` + `kind` so the
+    // Tool and Component slots remain isolated.
+    errors.clear();
+    CHECK(bridge.runTool("Shared", kToolRunOnly, errors));
+    CHECK(bridge.compileCacheMissCount() == 2u);
+    CHECK(bridge.compileCacheHitCount() == 1u);
+}
+
 // ============================================================
-// 4. Regression — host kind discrimination
+// 5. Regression — Component / System hosts unchanged
 // ============================================================
 
-// --- 4a. System host on_destroy still emits S3.1 warning
-//          (legacy policy, NOT the new Tool host message). ---
+// --- 5a. Component host `on_update` produces no Tool-related
+//          warnings (host kind discrimination). -------------
+
+TEST_CASE(component_host_on_update_emits_no_tool_warning) {
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+
+    Compiler c;
+    auto r = c.compile(kComponentOnUpdate, ctx);
+    CHECK(r.success);
+    CHECK(r.errors.empty());
+    CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
+    CHECK_FALSE(hasWarningWithMessage(r, "is a Tool host lifecycle"));
+}
+
+// --- 5b. System host `on_destroy` still emits the S3.1
+//          legacy warning (NOT a Tool warning). --------------
 
 TEST_CASE(system_host_on_destroy_legacy_warning_preserved) {
     const char* src = R"(

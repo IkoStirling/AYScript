@@ -135,15 +135,43 @@ void LuaCodegen::emitLifecycleFunc(const LifecycleFuncDecl& func)
     indent();
     _out += "function M.";
     _out += lifecycleKindName(func.kind);
-    // S2.5: lifecycle functions take no parameters. `self` is injected
-    // by the runtime bridge. If the AST ever carries params (forward
-    // compat for future event handlers), emit them too.
-    _out += "(self";
-    for (const auto& p : func.params) {
-        _out += ", ";
-        _out += p.name;
+    // S3.8b: when the host context's `expectSelf` is false (Tool
+    // host), emit a parameter list with NO `self`. The ToolRunner
+    // passes `receiver = nullptr` at call time — emitting `self`
+    // here would mismatch Lua's call arity (`function M.run(self)`
+    // expects one arg, the bridge calls with zero).
+    //
+    // Component / System / EventHandler hosts keep the S2.5 shape
+    // `function M.on_*(self[, ...legacyParams])`. Legacy params from
+    // the parser are still forwarded for forward-compat with future
+    // event-handler signatures (e.g. `on_damage(amount: float)`).
+    const bool emitSelf = _options.hostContext.expectSelf;
+    if (emitSelf) {
+        _out += "(self";
+        for (const auto& p : func.params) {
+            _out += ", ";
+            _out += p.name;
+        }
+        _out += ")\n";
+    } else {
+        // No self. Legacy params still go through (the parser only
+        // emits them as a documentation affordance, but codegen is
+        // the single source of truth — forwarding them keeps the
+        // signature shape stable if a future event handler is bound
+        // through the same plumbing with expectSelf re-enabled).
+        if (func.params.empty()) {
+            _out += "()\n";
+        } else {
+            _out += "(";
+            bool first = true;
+            for (const auto& p : func.params) {
+                if (!first) _out += ", ";
+                _out += p.name;
+                first = false;
+            }
+            _out += ")\n";
+        }
     }
-    _out += ")\n";
 
     ++_indent;
     emitBlock(func.body);
