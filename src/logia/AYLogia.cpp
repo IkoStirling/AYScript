@@ -50,6 +50,20 @@ CompileResult Compiler::compile(const std::string& source,
     Parser parser(tokens);
     result.program = parser.parse();
     result.errors = parser.errors();
+    // S3.9: also project parser errors into the LogiaDiagnostic stream
+    // so the CLI / pipeline callers can iterate a single uniform
+    // diagnostic list. Without this, parser errors live only in
+    // `errors` (legacy projection) and callers that walk `diagnostics`
+    // miss them. Severity is always Error for parser-side failures.
+    for (const auto& e : result.errors) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = e.code;
+        d.message = e.message;
+        d.location.line = e.line;
+        d.location.column = e.column;
+        result.diagnostics.push_back(d);
+    }
     const bool parserOk = !parser.hasErrors() && result.program != nullptr;
 
     // S3.0 (LG-03): thread the host context into the analyzer. The

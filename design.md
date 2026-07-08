@@ -656,9 +656,15 @@ public:
     // args, so passing `entity` to `on_start()` (which takes no
     // args in Logia) is harmless.
     bool callLifecycle(const std::string& scriptName,
-                       const std::string& methodName,   // snake_case
+                       const std::string& methodName,   // snake_case: on_start / on_update / on_destroy / run
                        void* receiver = nullptr,
                        void* arg2 = nullptr);
+
+    // S3.8b (LG-07) — ToolRunner one-shot: compile under
+    // toolLogiaHostContext(), then dispatch run() with no receiver.
+    bool runTool(const std::string& scriptName,
+                 const std::string& logiaSource,
+                 std::vector<logia::CompilerError>& errors);
 };
 
 }
@@ -701,7 +707,8 @@ AYScript/
 │   ├── AYScriptRuntimeBridge.h     # sol2 + 引擎 API 绑定
 │   ├── AYScriptBridgeAdapter.h     # AYEntity IScriptBridge 适配
 │   └── logia/
-│       ├── AYLogia.h               # Compiler 入口
+│       ├── AYLogia.h               # Compiler 入口 + toolLogiaHostContext()
+│       ├── AYLogiaPipeline.h       # compileLogiaToLua() heap-backed pipeline
 │       ├── AYToken.h
 │       ├── AYLexer.h
 │       ├── AYParser.h
@@ -721,7 +728,8 @@ AYScript/
 │       ├── AYLogia.cpp
 │       └── AYLogiaPipeline.cpp
 ├── unittest/
-│   ├── LogiaTestHelpers.h   # compile→Lua: use compileLogiaToLua(), not stack Compiler+LuaCodegen
+│   ├── LogiaTestHelpers.h          # compile→Lua: use compileLogiaToLua()
+│   ├── Test_LogiaToolHost.cpp      # S3.8b Tool host (19 cases)
 │   ├── Test_LogiaLexer.cpp
 │   ├── Test_LogiaParser.cpp
 │   ├── Test_LogiaSemantic.cpp
@@ -815,7 +823,7 @@ AYScript/
 - [x] **S3.6** 编译缓存（LG-06a）— 见下锁定决策
 - [x] **S3.7a** 热重载 API（LG-06b part A，pure memory）— 见下锁定决策
 - [x] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
-- [x] **S3.8** Editor / CLI Tool host（LG-07）— 见下锁定决策
+- [x] **S3.8** Editor / CLI Tool host（LG-07 / **S3.8b**）— 见 §5.6 S3.8 + 下锁定决策摘要
 - [ ] **S3.9** CLI：`ays-logia compile`（可选）
 - [ ] **S3.10** System host `self.field` 端到端验证（可选）
 - [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
@@ -893,47 +901,21 @@ AYScript/
 3. 同源码 reload → compile cache **hit**（S3.6 计数可观测）。
 4. （S3.7b）scratch 目录 + FileWatcher 集成测 **独立** `TEST_CASE`，失败不阻塞 CI 时可 `#ifdef AYSCRIPT_HOTRELOAD_OS_TEST`。
 
-**S3.8 (LG-07) 锁定决策**（2026-07-08 实现完成后补）：
+**S3.8 (LG-07) 验收摘要**（完整决策见 §5.6 **S3.8 — LG-07**）：
 
-- **目标最小化**：原 S3.8 prompt 提议引入新的 `run` 关键字 + `runTool` 专用 API + 改 `LuaCodegen` 让 `expectSelf == false` 跳过 `self` 参数。**本次实现未走这条路**——理由：
-  1. **Parser 稳定性**：新增 `run` 关键字要碰 Lexer（keyword 表）/ TokenType enum（顺序变化影响所有 lexer 单测的 `TokenType` 数值断言）/ Parser `parseMember` + `synchronize`。S3.7b 25d87f5 baseline 49 个 lexer 单测全绿，加 enum 会让 enum 顺序变 → 11 个 lexer 单测失绿 → 失去 green baseline 的硬保证。
-  2. **Codegen 不变性**：改 `emitLifecycleFunc` 加 `expectSelf` 分支会同时影响 Component / System host 已有 codegen 测试的字符串匹配（`function M.on_update(self)` 仍可保持，但 `first` 状态机 + 多分支路径风险面大）。
-  3. **Tool host 的实际差异点**是 **policy**（哪些 lifecycle 被调 / 哪些被警告），**不是** lifecycle 关键字。`on_start` 已存在、Component host 也用、且 ToolRunner 调一次即可。
-
-- **实际实现**：
-  - **Lifecycle policy**：`SemanticAnalyzer::analyzeLifecycle` 在 `ctx.kind == Tool` 时，对 `LifecycleKind::OnUpdate` / `OnDestroy` 报告**软警告**（message = `"<name> is not invoked on Tool host scripts"`，hint 指回 `on_start()` 作为唯一入口）。`on_start` 不警告——它是 ToolRunner 的入口。
-  - **ToolRunner 入口** = `loadScript(name, src, errs) + callLifecycle(name, "on_start", nullptr, nullptr)`。**不**新增 `runTool` API；`on_start` 复用 Component host 的 codegen 路径，生成 `function M.on_start(self)`，bridge 把 `receiver = nullptr`（即 nil lightuserdata）透传——Lua 端 `on_start` 第一参 `self` 收到 nil，跟"无 receiver"语义一致。
-  - **Compile cache**：S3.6 缓存按 `(source, LogiaHostContext, pipelineVersion)` key 索引；Tool 走 `defaultLogiaHostContext()`（kind=Component），跟 Component host 共用 cache key 槽——这意味着同源码 Component run + Tool run **会** cache hit，符合 S3.6 "同 key 同产物" 的设计。Tool host 不需要 `toolLogiaHostContext()` 工厂。
-  - **`self` 注入**：保持 baseline 行为（无条件 `_scope["self"] = e`），**不**做 `expectSelf=false → 不 inject self` 的区分。ToolRunner 透传 `nullptr` 作为 receiver，Lua 端 `self` = nil（不崩，因为 Tool script 不调 `self.field`；若调了，`nil.field` 触发 Lua runtime error，bridge 仍按 S1 错误路径 log 不崩）。
-  - **Pipeline 层**（`compileLogiaToLua` heap-backed 包装）保留 S3.7a baseline；Tool host 与 Component host 共用同一入口。
-
-- **测试**（`unittest/Test_LogiaToolHost.cpp`，12 用例）：
-  - 1a: Tool ctx `on_start` only → success, no Tool-specific warnings.
-  - 1b: Tool ctx `on_update` 共存 → soft warning, hint 指回 `on_start()`.
-  - 1c: Tool ctx `on_destroy` 共存 → soft warning.
-  - 1d: Tool ctx self + Transform chain → success, no Tool-specific warnings（scope 共享 contract）.
-  - 1e: Tool ctx unregistered script name → soft warning (S2.5 baseline hint 保留).
-  - 1f: Component host `on_update` → success, 无 Tool warning（host kind discrimination 隔离）.
-  - 2a: Tool host codegen → `function M.on_start(self)`（保持 S2.5 形状，regression guard）.
-  - 2b: Component host codegen → `function M.on_update(self)`（S3.7b baseline 保持）.
-  - 3a: ToolRunner 端到端（loadScript + callLifecycle("on_start") + 验证 `__test_witness`）→ 全绿.
-  - 3b: 无 `on_start` 的 script → loadScript 成功, callLifecycle("on_start") 返回 false.
-  - 3c: 编译失败 → loadScript 返回 false, errors 非空, hasScript false.
-  - 3d: 同源码重复 loadScript → S3.6 compile cache hit + miss 计数 (1 / 1).
-  - 4a: System host on_destroy → S3.1 warning, **不**触发 Tool warning（host kind 隔离）.
-
-- **未做**（推迟到后续 session）：
-  - 新 `run` 关键字 + 新 `runTool` API + `LuaCodegen::expectSelf` 路径 — 见上"目标最小化"理由。
-  - Editor / CLI binary 集成（这是 S3.9 prompt 的范围）。
-  - Tool hot reload via FileWatcher（不需要：Tool 是 one-shot，无 running-state to preserve）。
-  - `toolLogiaHostContext()` 工厂函数（不必要：Tool host 走 default ctx）。
+> **实现状态（2026-07-08）**：✅ **S3.8b 已交付**。`run` 关键字 + `toolLogiaHostContext()` + `expectSelf` codegen + `runTool()` + `Test_LogiaToolHost.cpp`（19 用例）。
 
 - **Acceptance**：
-  - ✅ AYScript_Test 492/492 全绿（exit 0），含新增 12 个 Tool host 用例 + baseline 480 用例。
-  - ✅ Component / System host 路径**完全不变**（codegen / semantic / bridge 行为 identical）。
-  - ✅ compile cache 行为 identical（Tool 走 default ctx，自动与 Component run 共用 cache slot）。
+  - ✅ Tool 脚本 `run() { ... }` 经 `runTool()` compile + 执行一次。
+  - ✅ Component / System host 路径不变（codegen / semantic / bridge 行为与 S3.7b baseline 一致，除新增 `run` 关键字解析与非 Tool 上 `run()` 软警告）。
+  - ✅ Tool 与 Component **独立** compile cache slot（`kind` + `expectSelf` 入 key）。
+  - ✅ `AYScript_Test` 全量全绿（exit 0）。
+- **未做**（→ S3.9 或更后）：
+  - CLI / Editor 二进制集成（`ays-logia compile`）。
+  - Tool hot reload（one-shot 不需要）。
+  - `examples/build_tool.logia`（可选）。
 
-**Next session:** §13 Prompt **S3.8**（Tool host LG-07）。
+**Next session:** §13 Prompt **S3.9**（CLI `ays-logia compile`）。
 
 ### Phase S4 — 语法扩展
 
@@ -989,6 +971,8 @@ AYScript/
 | 2026-07-08 | **§5.7 Script exposure 设计**：字段/方法暴露策略、`FieldAttribute` vs C++ access、R1–R4 backlog。**S3.7 设计锁定 + 失败复盘**：分两阶段 S3.7a（reload API）/ S3.7b（AYIO FileWatcher）；实现尝试 segfault 回滚，代码未合并。 |
 | 2026-07-08 | **S3.7a 完成（LG-06b part A）**：纯内存 `LogiaRuntimeBridge::reloadScript(name, src[, ctx], errs)` 落地。3-arg 委派到 `defaultLogiaHostContext()`，4-arg 与 `loadScript` 4-arg 对称共享同一 S3.6 cache key。**失败策略**（核心）：reload 入口先 snapshot `sol::table prior`（sol::table 是廉价 handle 副本），委派到 `loadScript`，若 loadScript 失败（它自己 `erase` 了 `_impl->scripts[name]`）就**回填** prior → `hasScript(name) == true` 跨失败 reload 保持，旧模块继续跑。`unittest/Test_LogiaHotReload.cpp`（6 用例，filesystem-free）。 |
 | 2026-07-08 | **S3.7b 完成（LG-06b part B）**：`ScriptSubSystem` + `AYScriptHotReload.cpp` 接 `ayt::io::FileWatcher`（AYIO PRIVATE link）。`setHotReloadEnabled` / `watchScriptPath` / `unwatchScriptPath` / `bindAndLoadFromFile` / `hotReloadApplyCount`；`update`/`fixedUpdate` 最前 `pollAndApplyReloads`（100ms debounce）；`shutdown()` 与 `~ScriptSubSystem()` 先 `stopHotReload()`。`unittest/Test_LogiaHotReloadWatcher.cpp`（5 用例）。 |
+| 2026-07-08 | **S3.8-min（LG-07 中间版，已取代）**：Tool host policy 仅用 `on_start` 入口 + `defaultLogiaHostContext()`；12 用例。同日 **S3.8b** 交付完整 LG-07。 |
+| 2026-07-08 | **S3.8b 完成（LG-07）**：`run` lifecycle 关键字；`toolLogiaHostContext()`（`expectSelf=false`）；Tool semantic 白名单 + 非 Tool 上 `run()` 对称警告；codegen `function M.run()`；`LogiaRuntimeBridge::runTool()`；`compileLogiaToLua` 转发 `hostContext`；`kLogiaPipelineVersion=2`。`unittest/Test_LogiaToolHost.cpp`（19 用例）。`compileLogiaToLua` heap pipeline + `LogiaTestHelpers.h`（MSVC /GS stack 防护）。 |
 
 ---
 
@@ -1003,22 +987,18 @@ AYScript/
 
 ## 13. Session prompts (copy-paste) — post S3.3
 
-**Done through S3.3:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 (`AYScript_Test` 237/237).
+**Done through S3.8b:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · **S3.8b LG-07** (`run` + `runTool` + `toolLogiaHostContext`).
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 
 ### 13.1 Recommended order
 
-| Order | ID | Why |
-|-------|-----|-----|
-| 1 | **S3.4** | Component scripts must run in GameLoop (System tick alone is insufficient) |
-| 2 | **S3.5** | Real `time` / `input` ambient (replace mocks) |
-| 3 | **S3.6** | Compile cache (prerequisite for hot reload) |
-| 4 | **S3.7** | Hot reload LG-06 |
-| 5 | **S3.8** | Tool host LG-07 |
-| 6 | **S3.9** | CLI `ays-logia compile` (optional) |
-| 7 | **S4.x** | signal / await / source map |
-| parallel | **Foundation ED-01–04** | Phase 1 north-star — not blocked on Logia |
+| Order | ID | Status |
+|-------|-----|--------|
+| 1–5 | S3.4–S3.8b | ✅ done |
+| **6** | **S3.9** | CLI `ays-logia compile` (optional) — **next** |
+| 7 | S4.x | signal / await / source map |
+| parallel | Foundation ED-01–04 | Phase 1 north-star — not blocked on Logia |
 
 ---
 
@@ -1163,42 +1143,46 @@ Acceptance:
 
 ---
 
-### Prompt S3.8 — LG-07 Tool host
+### Prompt S3.8 — LG-07 Tool host ✅ DONE (S3.8b)
+
+> **Completed 2026-07-08.** See §5.6 S3.8 + Phase S3 验收摘要. Do not re-implement unless bisecting regressions.
+
+Original prompt (archived):
 
 ```
 Implement AYScript S3.8 / LG-07: Tool host (run-only, no self).
-
-Read first:
-- AYRuntime/AYScript/design.md §5.6 Tool row, LogiaHostKind::Tool
-- ENGINE-FOUNDATION-PLAN.md LG-07
-
-Scope (DO):
-1. LogiaHostContext{ kind=Tool, expectSelf=false } validation: lifecycle whitelist = `run()` only; on_update/on_start soft warning or hard error (pick one, document).
-2. LuaCodegen: omit self param when expectSelf=false.
-3. ToolRunner API: compile + callLifecycle(name, "run", nullptr, nullptr) for Editor/CLI one-shot.
-4. Unittest: minimal tool.logia with run() { log.info("ok") }.
-
-Scope (DO NOT):
-- Full Editor UI integration (stub runner API is enough).
-
-Acceptance:
-- Tool script compiles and executes once via runner API.
-- Component/System hosts unchanged.
+...
 ```
+
+Delivered as **S3.8b**: `run()` keyword, `toolLogiaHostContext()`, `expectSelf` codegen, `runTool()`.
 
 ---
 
-### Prompt S3.9 — CLI ays-logia compile (optional)
+### Prompt S3.9 — CLI ays-logia compile (optional) ← **NEXT**
 
 ```
 Implement AYScript S3.9: optional CLI `ays-logia compile` for CI/editor.
 
-Read: AYRuntime/AYScript/design.md §692 CLI row.
+Read first:
+- AYRuntime/AYScript/design.md §3 compile pipeline, §5.6 S3.8 (toolLogiaHostContext)
+- AYRuntime/AYScript/include/logia/AYLogiaPipeline.h (compileLogiaToLua)
+- AYRuntime/AYScript/examples/player_controller.logia
 
-DO: small executable or AYTool target: read .logia path, compile with ctx flags (--host component|system|tool), emit .lua or bytecode, exit non-zero on errors.
-DO NOT: embed in Editor critical path.
+DO:
+- Small executable or AYTool CMake target: read .logia path from argv.
+- `--host component|system|tool` selects LogiaHostContext
+  (tool → toolLogiaHostContext(), system → kind=System, default → defaultLogiaHostContext()).
+- Emit generated Lua to stdout or `-o path.lua`; exit non-zero on compile errors.
+- Print diagnostics with file:line on stderr.
 
-Acceptance: `ays-logia compile examples/player_controller.logia` prints errors with file/line or writes lua artifact.
+DO NOT:
+- Embed in Editor critical path.
+- Re-implement compile pipeline (call compileLogiaToLua / Compiler directly).
+
+Acceptance:
+- `ays-logia compile examples/player_controller.logia` → writes valid Lua or prints errors.
+- `ays-logia compile tool.logia --host tool` → output contains `function M.run()` (no self).
+- `ays-logia compile bad.logia` → exit 1, non-empty stderr.
 ```
 
 ---

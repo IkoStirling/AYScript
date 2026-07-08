@@ -56,5 +56,9 @@ if(MSVC)
     target_compile_options(AYScript PRIVATE /Zc:__cplusplus /Zc:preprocessor)
 endif()
 
+# S3.9 — ays-logia CLI. Built when AYScript is built; tests run via
+# the unittest target (which forks the CLI as a child process).
+add_subdirectory(cli)
+
 enable_testing()
 add_subdirectory(unittest)
