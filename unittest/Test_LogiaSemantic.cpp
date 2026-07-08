@@ -17,6 +17,8 @@
 #include "AYTest.h"
 
 #include "IAYReflect.h"
+#include "AYReflect.h"
+#include "AYReflectMacros.h"
 
 #include <string>
 
@@ -24,10 +26,92 @@ using namespace ayt::script::logia;
 
 namespace {
 
+// ============================================================================
+// S3.2 (LG-04b, B-min) test fixtures
+// ----------------------------------------------------------------------------
+// LogiaHostContext::strictInheritance=true requires:
+//   1. ctx.hostType != nullptr  — must point to a registered ITypeInfo*
+//   2. The script's reflect entry, if found, must be derived from hostType
+//      per ayt::reflect::isDerivedFrom (single-chain walk).
+//
+// The fixtures below register a hierarchy entirely from this TU:
+//   ScriptComponentBase (root, treated as the expected host base)
+//     ^-- StrictDerived     (AY_INHERITS → ScriptComponentBase)
+//   StrictUnrelated        (no AY_INHERITS — must be hard-rejected)
+// ============================================================================
+struct ScriptComponentBase {
+    int baseField = 0;
+};
+
+struct StrictDerived : ScriptComponentBase {
+    int derivedField = 0;
+};
+
+struct StrictUnrelated {
+    int aloneField = 0;
+};
+
+namespace
+{
+struct StrictFixtureRegistrar {
+    StrictFixtureRegistrar() {
+        auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+
+        // Register ScriptComponentBase (root). Use a no-op field
+        // registrar pattern: we cannot use AY_PROPERTY from a non-class
+        // context, so we register a bare TypeInfoImpl<ScriptComponentBase>.
+        if (!reg.findType("ScriptComponentBase")) {
+            auto* info = new ayt::reflect::TypeInfoImpl<ScriptComponentBase>(
+                "ScriptComponentBase",
+                ayt::reflect::detail::defaultCreate<ScriptComponentBase>,
+                ayt::reflect::detail::defaultDestroy<ScriptComponentBase>,
+                ayt::reflect::detail::defaultCopy<ScriptComponentBase>);
+            reg.registerTypeInfo("ScriptComponentBase", info);
+        }
+
+        // Register StrictDerived (sets base = ScriptComponentBase).
+        if (!reg.findType("StrictDerived")) {
+            auto* info = new ayt::reflect::TypeInfoImpl<StrictDerived>(
+                "StrictDerived",
+                ayt::reflect::detail::defaultCreate<StrictDerived>,
+                ayt::reflect::detail::defaultDestroy<StrictDerived>,
+                ayt::reflect::detail::defaultCopy<StrictDerived>);
+            reg.registerTypeInfo("StrictDerived", info);
+            // Wire parent: StrictDerived → ScriptComponentBase.
+            reg.setBaseTypeByName("StrictDerived", "ScriptComponentBase");
+        }
+
+        // Register StrictUnrelated (no parent).
+        if (!reg.findType("StrictUnrelated")) {
+            auto* info = new ayt::reflect::TypeInfoImpl<StrictUnrelated>(
+                "StrictUnrelated",
+                ayt::reflect::detail::defaultCreate<StrictUnrelated>,
+                ayt::reflect::detail::defaultDestroy<StrictUnrelated>,
+                ayt::reflect::detail::defaultCopy<StrictUnrelated>);
+            reg.registerTypeInfo("StrictUnrelated", info);
+        }
+    }
+};
+static StrictFixtureRegistrar g_strictFixtureRegistrar;
+} // namespace
+
+
+
 bool hasError(const CompileResult& r, ErrorCode code)
 {
     for (const auto& d : r.diagnostics) {
         if (d.severity == DiagnosticSeverity::Error && d.errorCode == code) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool hasWarningWithMessage(const CompileResult& r, const std::string& needle)
+{
+    for (const auto& d : r.diagnostics) {
+        if (d.severity == DiagnosticSeverity::Warning
+            && d.message.find(needle) != std::string::npos) {
             return true;
         }
     }
@@ -412,6 +496,148 @@ script NotARealHostType {
         }
     }
     CHECK(foundUnknownHostWarning);
+}
+
+// ============================================================================
+// S3.2 (LG-04b, B-min) — LogiaHostContext::strictInheritance
+// ----------------------------------------------------------------------------
+// Verifies the Component-host strict inheritance check:
+//   - Default ctx (strictInheritance=false) accepts any registered
+//     script name, even unrelated types — matches LG-03 / S2.5
+//     behavior.
+//   - With strictInheritance=true AND hostType=ScriptComponentBase:
+//       * script StrictDerived      → compiles (parent chain matches).
+//       * script StrictUnrelated    → hard error (TypeMismatch).
+//       * script TotallyUnknownName → no strict check applies (the
+//         type was not found, so the soft warning path triggers but
+//         strictInheritance does not fire).
+// ============================================================================
+
+TEST_CASE(lg04b_strict_off_accepts_unrelated_registered_type) {
+    // Sanity: the S2.5 / LG-03 / LG-04 default path tolerates any
+    // registered name. We turn strictInheritance OFF and confirm an
+    // unrelated registered type still compiles.
+    const char* src = R"(
+script StrictUnrelated {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+    ctx.strictInheritance = false;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    CHECK(r.success);
+}
+
+TEST_CASE(lg04b_strict_on_accepts_derived_type) {
+    // strictInheritance=true with hostType=ScriptComponentBase AND
+    // a script whose Reflect entry IS derived from that base → pass.
+    const char* src = R"(
+script StrictDerived {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    auto* base = ayt::reflect::TypeRegistryImpl::instance()
+                    .findType("ScriptComponentBase");
+    CHECK_NOT_NULL(base);
+
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+    ctx.hostType = base;
+    ctx.strictInheritance = true;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    CHECK(r.success);
+    // The soft "no matching registered type" warning must NOT fire
+    // because StrictDerived IS in the registry.
+    CHECK_FALSE(hasWarningWithMessage(r, "no matching registered type"));
+    // The strict-mode error must NOT fire either.
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(lg04b_strict_on_rejects_unrelated_type) {
+    // strictInheritance=true with hostType=ScriptComponentBase AND
+    // a script whose Reflect entry is NOT derived → hard error.
+    const char* src = R"(
+script StrictUnrelated {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    auto* base = ayt::reflect::TypeRegistryImpl::instance()
+                    .findType("ScriptComponentBase");
+    CHECK_NOT_NULL(base);
+
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+    ctx.hostType = base;
+    ctx.strictInheritance = true;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(lg04b_strict_on_ignores_unknown_names) {
+    // strictInheritance only checks script names that ARE in the
+    // registry. A genuinely unknown name still emits the S2.5 / LG-03
+    // soft warning and does NOT also raise a strict-mode hard error
+    // (the caller is expected to handle missing types separately).
+    const char* src = R"(
+script Lg04bNotInRegistry {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    auto* base = ayt::reflect::TypeRegistryImpl::instance()
+                    .findType("ScriptComponentBase");
+    CHECK_NOT_NULL(base);
+
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::Component;
+    ctx.hostType = base;
+    ctx.strictInheritance = true;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    // Compile still succeeds (soft warning, not hard error).
+    CHECK(r.success);
+    CHECK(hasWarningWithMessage(r, "Lg04bNotInRegistry"));
+}
+
+TEST_CASE(lg04b_strict_only_applies_to_component_host) {
+    // strictInheritance=true is a no-op when kind != Component — the
+    // System host keeps its hostKind + registry + World registration
+    // checks only.
+    const char* src = R"(
+script StrictUnrelated {
+    on_update() {
+        x = 1
+    }
+}
+)";
+    auto* base = ayt::reflect::TypeRegistryImpl::instance()
+                    .findType("ScriptComponentBase");
+    CHECK_NOT_NULL(base);
+
+    LogiaHostContext ctx;
+    ctx.kind = LogiaHostKind::System;  // System host, not Component
+    ctx.hostType = base;
+    ctx.strictInheritance = true;
+
+    Compiler c;
+    auto r = c.compile(src, ctx);
+    CHECK(r.success);  // strict check skipped for System host
 }
 
 TEST_SUITE_END

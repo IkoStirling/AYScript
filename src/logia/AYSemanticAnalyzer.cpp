@@ -20,6 +20,13 @@
 #include "AYReflectRegistry.h"
 #include "AYReflect.h"  // full TypeRegistryImpl definition (linkable)
 
+// S3.2 (LG-04b, B-min): isDerivedFrom is a free function defined in
+// AYReflect.cpp. Forward-declare to keep the include surface small.
+namespace ayt::reflect
+{
+bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
+} // namespace ayt::reflect
+
 // Force AYEntity's Transform component to be registered with AYReflect.
 #include "components/AYTransformComponent.h"
 #include "AYEntityModule.h"
@@ -231,6 +238,35 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
         d.hint = hint;
         report(d);
     }
+    // S3.2 (LG-04b, B-min): Component host strict inheritance. Only
+    // applies when the caller asked for it via `ctx.strictInheritance`
+    // AND supplied a non-null `ctx.hostType` AND the host kind is
+    // Component. We hard-reject scripts that are registered in
+    // AYReflect but NOT derived from `hostType` (per
+    // ayt::reflect::isDerivedFrom single-chain walk). Scripts not
+    // registered at all still emit the S2.5 / LG-03 soft warning
+    // above and are not covered by this check (the caller is
+    // responsible for catching genuinely missing types before
+    // enabling strict mode).
+    if (_ctx.kind == LogiaHostKind::Component
+        && _ctx.strictInheritance
+        && _ctx.hostType != nullptr
+        && selfType != nullptr) {
+        if (!ayt::reflect::isDerivedFrom(selfType, _ctx.hostType)) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Error;
+            d.errorCode = ErrorCode::TypeMismatch;
+            d.message = "script '" + s.name + "' must derive from '" +
+                        std::string(_ctx.hostType->getName()) +
+                        "' (strict Component host binding)";
+            d.hint = "either add an AY_INHERITS(" + s.name + ", " +
+                     std::string(_ctx.hostType->getName()) +
+                     ") declaration, or remove `strictInheritance` from "
+                     "the LogiaHostContext";
+            report(d);
+        }
+    }
+
     _currentSelfType = selfType;
 
     // Inject `self` into the script's scope so `self.field` resolves.

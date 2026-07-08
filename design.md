@@ -450,12 +450,16 @@ CompileResult Compiler::compile(const std::string& source,
 ```cpp
 // ITypeInfo — optional virtual, default 0
 virtual size_t getBaseTypeId() const { return 0; }
+virtual void setBaseTypeId(size_t /*baseId*/) {}  // default no-op
 
 // TypeRegistry — walk base chain only
 bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
+void setBaseTypeByName(const char* childName, const char* baseName);
 ```
 
-注册宏（`AY_COMPONENT` 等）写入 `getBaseTypeId()`；**不做** `getAllDerived()`、多继承图。
+注册宏（`AY_INHERITS` + `AY_FINALIZE_REGISTRATION_METADATA`）写入 `getBaseTypeId()`；**不做** `getAllDerived()`、多继承图。
+
+**Logia 集成**：新增 `LogiaHostContext::strictInheritance`（默认 false）。当 `kind == Component && hostType != nullptr && strictInheritance == true` 时，analyzer 调 `isDerivedFrom(scriptNameInfo, hostType)`：true → 通过；false → **hard error**（`TypeMismatch`）；script name 不在 registry → 维持 S2.5/LG-03 的 soft warning（strict 不适用）。
 
 #### 明确拒绝的方案
 
@@ -671,8 +675,8 @@ AYScript/
 
 #### S3.2 — LG-04b（可选）：Reflect B-min
 
-- [ ] `ITypeInfo::getBaseTypeId()` + `TypeRegistry::isDerivedFrom()`（单链 parent only）
-- [ ] Component strict 模式：拒绝「已注册非 Component 派生」的 script 名
+- [x] `ITypeInfo::getBaseTypeId()` + `TypeRegistry::isDerivedFrom()`（单链 parent only）
+- [x] Component strict 模式：拒绝「已注册非 Component 派生」的 script 名
 
 #### S3.x — 其余（与 host 正交）
 
@@ -730,6 +734,7 @@ AYScript/
 | 2026-07-08 | **§1.6 Host 绑定模型**：Logia = host-bound behavior DSL；S2.5 锁 Component host |
 | 2026-07-08 | **§5.6 S3 分阶段**：S3.0 API 穿线（不改 Reflect）；S3.1 System host；S3.2 可选 B-min `getBaseTypeId` |
 | 2026-07-08 | **S3.1 (LG-04) 完成**：第一个非 Component host——ECS `ISystem`（`script MovementSystem { on_update() { ... } }`）。校验 = `hostKind + Reflect name lookup + World registration`（无 `isSubclassOf`）。`self` = `ISystem*` lightuserdata。`ScriptSubSystem::update/fixedUpdate` 调度。新增 `World::findSystemByName`。`unittest/Test_LogiaSystemHost.cpp`（4 用例）+ `examples/movement_system.logia` |
+| 2026-07-08 | **S3.2 (LG-04b) B-min 完成**：Reflect 单链 parent 指针 + `isDerivedFrom()` + Component host strict 模式（`LogiaHostContext::strictInheritance`）。`ITypeInfo::getBaseTypeId()` 默认 0；`AY_FINALIZE_REGISTRATION_METADATA` 写入 `AY_INHERITS` 解析出的 base；strict 模式仅在 `kind==Component && hostType!=nullptr && strictInheritance==true` 时启用，对「已注册但非 hostType 派生」的 script 名产生 hard error。`unittest/ReflectBminTests`（6 用例）+ `Test_LogiaSemantic`（5 用例）。**不**做完整派生图 / `getAllDerived()` / 多继承。 |
 
 ---
 

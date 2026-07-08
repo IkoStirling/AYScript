@@ -41,16 +41,27 @@ enum class LogiaHostKind {
 // new validation. All existing S2.5 diagnostics are preserved verbatim
 // regardless of which fields are set. `hostType == nullptr` means
 // "skip any future subclass check" (the LG-03 default).
+//
+// S3.2 (LG-04b, B-min): when `kind == Component` AND `hostType != nullptr`
+// AND `strictInheritance == true`, the analyzer will hard-reject any
+// `script Name` whose Reflect entry is found but `!isDerivedFrom(Name,
+// hostType)`. The B-min scope is single-chain parent walks only — no
+// full derived-type graph (see design.md §5.6 S3.2).
 struct LogiaHostContext {
     LogiaHostKind kind = LogiaHostKind::Component;
     // Expected base type for `script Name` binding. nullptr disables
-    // the future subclass check (LG-03 / S3.1). When AYReflect grows
-    // a host-kind-aware validation, the analyzer will consult this.
+    // the subclass check (LG-03 / S3.1). When non-null AND
+    // strictInheritance is true AND kind is Component, the analyzer
+    // will hard-reject scripts that are not derived from this type.
     const ayt::reflect::ITypeInfo* hostType = nullptr;
     // Whether the host dispatch will pass a `self` lightuserdata.
     // S2.5 / LG-03 always true (ScriptComponent*). S3.1+ Tool hosts
     // pass false to allow scripts that omit `self.field` access.
     bool expectSelf = true;
+    // S3.2 (LG-04b) B-min: when true, hard-reject script names whose
+    // Reflect type is not derived from `hostType` (Component host only).
+    // Default false to preserve S2.5 / LG-03 / LG-04 behavior.
+    bool strictInheritance = false;
 };
 
 // S2.5 / LG-03 default context: Component host, no subclass check, with self.
@@ -60,6 +71,7 @@ inline LogiaHostContext defaultLogiaHostContext()
         LogiaHostKind::Component,
         nullptr,
         true,
+        false,
     };
 }
 
