@@ -83,6 +83,40 @@ public:
                     const logia::LogiaHostContext& ctx,
                     std::vector<logia::CompilerError>& errors);
 
+    // S3.7a (LG-06b part A) — in-memory reload.
+    //
+    // Replaces the cached module table for `scriptName` with a fresh
+    // compile of `logiaSource` under the same host-context semantics
+    // as loadScript(). The compile cache is *not* wiped — the
+    // (source, ctx, pipelineVersion) key is recomputed, so a reload
+    // with the same source hits the same cache entry (no front-end
+    // re-run). A reload with a *different* source (the typical
+    // hot-reload case) misses the cache and runs the full pipeline,
+    // stamping a new entry; the prior source's entry remains in the
+    // cache for the next call to revert.
+    //
+    // Failure policy (locked): if the new source fails to compile,
+    // `errors` is populated, `hasScript(name)` STAYS true (the prior
+    // good module remains bound), and the function returns false.
+    // This matches the "never break the running game" expectation
+    // of an editor hot-reload: a typo in the .logia file surfaces a
+    // diagnostic to the user but does not detach the component.
+    //
+    // S3.7a is pure-memory: callers supply the new source string.
+    // S3.7b will add `reloadScriptFromFile(path)` that reads from
+    // disk and a FileWatcher-driven coordinator in ScriptSubSystem.
+    bool reloadScript(const std::string& scriptName,
+                      const std::string& logiaSource,
+                      std::vector<logia::CompilerError>& errors);
+
+    // S3.7a — host-context-explicit reload overload. Same semantics
+    // as the 3-arg version, with the same host-context-keyed cache
+    // behavior as the S3.6 4-arg loadScript.
+    bool reloadScript(const std::string& scriptName,
+                      const std::string& logiaSource,
+                      const logia::LogiaHostContext& ctx,
+                      std::vector<logia::CompilerError>& errors);
+
     // === S3.6 (LG-06a) — compile cache observability ===
 
     // Number of loadScript calls that hit the in-memory compile cache

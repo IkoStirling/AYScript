@@ -587,6 +587,62 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     return true;
 }
 
+// ------------------------------------------------------------
+// S3.7a (LG-06b part A) — in-memory reload
+//
+// Implementation strategy: delegate to loadScript (which already
+// erases-then-rebinds the scriptName entry, runs the cache lookup
+// keyed by (source, ctx, pipelineVersion), and is the single source
+// of truth for the compile + load pipeline). The only S3.7a
+// addition is the failure policy: on a compile miss, loadScript
+// itself erases the cached module — which would drop a previously
+// good script on a typo. We capture the prior good state, call
+// loadScript, and if it fails, restore the prior module table.
+//
+// The captured `prior` sol::table is a value-type copy of the
+// sol::state's reference to the original module table. sol2's
+// sol::table is a cheap handle (a lua_State* + stack index), so
+// capturing the prior state is just a copy of the handle and
+// re-inserting it on failure preserves the live module binding.
+// ------------------------------------------------------------
+
+bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
+                                      const std::string& logiaSource,
+                                      std::vector<logia::CompilerError>& errors)
+{
+    // Default-ctx delegator (mirrors the loadScript 3-arg form).
+    return reloadScript(scriptName, logiaSource,
+                        logia::defaultLogiaHostContext(), errors);
+}
+
+bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
+                                      const std::string& logiaSource,
+                                      const logia::LogiaHostContext& ctx,
+                                      std::vector<logia::CompilerError>& errors)
+{
+    // S3.7a failure policy: snapshot the prior module so a failed
+    // reload does not detach the previously-loaded script. A
+    // successful loadScript will overwrite the map entry; a
+    // failed loadScript will erase it — in which case we restore
+    // the snapshot. hasScript(name) therefore stays true across
+    // a failed reload.
+    sol::table prior;
+    bool hadPrior = false;
+    auto priorIt = _impl->scripts.find(scriptName);
+    if (priorIt != _impl->scripts.end()) {
+        prior = priorIt->second;  // sol::table is a cheap handle copy
+        hadPrior = true;
+    }
+
+    const bool ok = loadScript(scriptName, logiaSource, ctx, errors);
+    if (!ok && hadPrior) {
+        // loadScript erased the entry on failure; restore the
+        // prior good module so the running game keeps its binding.
+        _impl->scripts[scriptName] = prior;
+    }
+    return ok;
+}
+
 // S3.6 — compile-cache observability. Counters live on _impl so the
 // public methods delegate without holding a separate state.
 std::size_t LogiaRuntimeBridge::compileCacheHitCount() const noexcept

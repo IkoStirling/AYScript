@@ -374,7 +374,103 @@ sol2 usertype 注册（**S3**）：`ScriptComponent` 子类用 `sol::usertype<T>
 
 - C++ 组件字段标 `Serialize` 的，存档 / 网络与 Logia `self.field` 访问**共享同一份 AYReflect 元数据**——数据布局只定义一次。
 - Logia **不替代** AYSerializer；场景 `.ayscene` 存组件数据，`.logia` 存行为。
-- 因此 Logia **不**再有 `export` 关键字——数据可见性由 C++ 端的 `AY_PROPERTY` + `FieldAttribute` 决定。
+- 因此 Logia **不**再有 `export` 关键字——数据可见性由 C++ 端的 `AY_PROPERTY` + `FieldAttribute` 决定（细则见 **§5.7**）。
+
+### 5.7 C++ → Logia 暴露策略（Script exposure）
+
+> **状态（2026-07-08）**：字段单跳 primitive 读写 **已实现**（S3.3）；方法暴露、attribute 强制、struct 链 **未实现**。本节锁定目标模型与分期，避免与 C++ `public`/`protected`/`private` 混淆。
+
+#### 5.7.1 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| **数据在 C++，行为在 Logia** | 字段用 `AY_PROPERTY` 注册；玩法逻辑写在 `script Name { ... }` |
+| **Logia 只消费 Reflect** | 不在 `.logia` 里重复声明 C++ 成员；语义层查 `ITypeInfo::findField` |
+| **一份元数据，多消费方** | 同一 `FieldAttribute` 位可同时服务 Serializer / Editor / Script / Network |
+| **脚本可见性 ≠ C++ 访问级别** | `public`/`private` 是编译期；脚本侧用 **Reflect attribute** 控制 |
+
+#### 5.7.2 字段（成员）— 当前路径
+
+```
+C++  AY_PROPERTY(Type, name, FieldAttribute::...)
+  →  AY_FINALIZE_REGISTRATION_METADATA(T)
+  →  TypeRegistry / IFieldInfo
+  →  SemanticAnalyzer: self.name 校验 findField
+  →  LuaCodegen (S3.3): ayt_reflect_get/set_field(self, hostTypeName, name, ...)
+  →  LogiaRuntimeBridge: lua_CFunction 读写内存
+```
+
+**S3.3 已实现范围**：
+
+- 仅 **单跳** `self.<primitiveField>`（`resolvedType->getFieldCount() == 0`）
+- 类型白名单：int/Int32、float/Float32、bool/Bool、double/Float64、Int64、UInt32
+- **`self.position.x` 链式 struct** — 显式 defer 到 S3.11
+
+**`AY_PROPERTY` 与 C++ access specifier**：
+
+- 宏展开为普通成员 `Type name;` — 写在 `public:` / `private:` 哪段，C++ 编译器就按哪段检查。
+- Reflect 用 `offsetof` + 成员指针注册，**不记录** C++ access；`private` 段里写 `AY_PROPERTY` 仍会进 TypeRegistry（技术上可行，**不推荐**）。
+- **`AY_PROPERTY` 不支持**：`static` 字段（`static_assert`）、`const` 字段（运行期跳过）。
+
+#### 5.7.3 字段可见性 — `FieldAttribute`（非 public/private）
+
+现有 `FieldAttribute`（`IAYReflect.h`）服务序列化 / 编辑器 / 网络；**尚无 Script 专用位 enforced**。
+
+| 现有 flag | 用途 | AYScript 现状 |
+|-----------|------|---------------|
+| `Serialize` | AYSerializer 存档 | 与 `self.field` **无强制关联** |
+| `Hidden` | Editor 隐藏 | Semantic **未**过滤 |
+| `BlueprintReadOnly` | UE 风格「蓝图只读」 | `ayt_reflect_set_field` **未**检查 |
+| `Transient` | 不序列化 | Script **未**过滤 |
+
+**锁定策略（待实现 — track R1）**：
+
+```cpp
+// 建议在 AYReflect FieldAttribute 新增（或复用 BlueprintReadOnly 语义）：
+//   ScriptVisible  — Logia 可读；semantic + runtime 均检查
+//   ScriptReadOnly — Logia 可读不可写（赋值 / compound assign 拒绝）
+```
+
+- 默认（过渡期）：凡 `findField` 命中即可读写（与 S3.3 相同）；标了 `ScriptReadOnly` / `BlueprintReadOnly` 后 runtime 拒绝 `set_field`。
+- **不**把 C++ `protected` 映射成「仅派生脚本可写」——Logia host 已是具体类型，无 C++ 式继承访问控制。
+
+#### 5.7.4 方法（成员函数）— 未实现
+
+AYReflect **没有** `IMethodInfo` / `AY_METHOD`。C++ 方法（如 `HealthComponent::heal()`）**不能**从 Logia 调用。
+
+**目标语法（锁定）**：与字段统一的 `self.method(args)` — member 解析先查 field，再查 method。
+
+**目标实现（track R2，S3.8 之后或并行）**：
+
+```
+C++  AY_METHOD(void, heal, (Int32 amount), MethodAttribute::ScriptCallable)
+  →  IMethodInfo in TypeRegistry
+  →  SemanticAnalyzer: self.heal(n) 校验
+  →  LuaCodegen: ayt_reflect_call_method(self, type, "heal", ...)
+  →  Bridge: lua_CFunction + 参数 marshalling（先 primitive）
+```
+
+方法必须 **显式** `ScriptCallable`；不做「反射整个 class 所有 public 方法」。
+
+#### 5.7.5 消费方矩阵
+
+| 消费方 | 字段 | 方法 | 阶段 |
+|--------|------|------|------|
+| AYSerializer | `Serialize` / `Transient` | N/A | ✅ |
+| AYEditor Inspector | `Hidden` / `EditAnywhere` / Slider… | 未来 `EditorCallable` | ⏳ |
+| **AYScript Logia** | `ScriptVisible` / `ScriptReadOnly`（R1） | `ScriptCallable`（R2） | 🟡 S3.3 字段 only |
+| AYNetwork | `NetReplicate` | 未来 | ⏳ |
+
+#### 5.7.6 暴露能力 backlog（Reflect consumer track）
+
+| ID | 内容 | 依赖 |
+|----|------|------|
+| **R1** | `ScriptVisible` / `ScriptReadOnly` semantic + `ayt_reflect_set_field` enforce | AYReflect flag |
+| **R2** | `AY_METHOD` + `IMethodInfo` + `ayt_reflect_call_method` | R1 可选 |
+| **R3** | struct 链 `self.position.x`（= S3.11） | R1 |
+| **R4** | sol2 `usertype` 优化（替代部分 C 函数） | 性能需求 |
+
+---
 
 ### 5.6 LogiaHostContext 与 S3 分阶段路线
 
@@ -695,7 +791,8 @@ AYScript/
 - [x] **S3.4** ScriptSubSystem / bootstrap：Component host 注入 bridge + 加载 `.logia` + GameLoop tick — pimpl `LogiaScriptBridgeAdapter` + `bindAndLoad(comp, src, errs)`；tick 走 `World::getAllEntities()` → `entity->onUpdate(dt)`（commit `028a555`）
 - [x] **S3.5** 真实 AYTime 绑定 + 可注入 input 后端（替换 mock）
 - [x] **S3.6** 编译缓存（LG-06a）— 见下锁定决策
-- [ ] **S3.7** 热重载（LG-06b）
+- [x] **S3.7a** 热重载 API（LG-06b part A，pure memory）— 见下锁定决策
+- [ ] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
 - [ ] **S3.8** Editor / CLI Tool host（LG-07）
 - [ ] **S3.9** CLI：`ays-logia compile`（可选）
 - [ ] **S3.10** System host `self.field` 端到端验证（可选）
@@ -709,8 +806,6 @@ AYScript/
 - **测试**：`unittest/Test_LogiaAmbient.cpp`（9 用例：cold delta=0 / tickAmbient publish / total 累加 / 负 dt clamp / SubSystem 端到端 / 默认 mock 行为 / 自定义 provider dispatch / query 计数与 key 字符串 / null 回退）。
 - **未做**：`input.<key>` 与物理键盘/手柄的映射（无 `AYInput` 层）；`event.emit` / `event.subscribe`；`spawn_prefab`；struct chain `self.position.x` reflect。
 
-**Next session:** §13 Prompt **S3.7** (hot reload).
-
 **S3.6 (LG-06a) 锁定决策**（2026-07-08）：
 
 - **缓存粒度**：每 `LogiaRuntimeBridge` 实例独占一份内存缓存（`unordered_map<size_t, CompiledEntry>`，在 `Impl` pimpl 内）。
@@ -722,6 +817,61 @@ AYScript/
 - **`loadScript` 4-arg 重载**（带 `LogiaHostContext&`）公开为正式入口；3-arg 重载委派到 `defaultLogiaHostContext()`，保留 S2.5 / S3.0 / S3.5 caller 的零修改兼容性。
 - **未做**：磁盘持久化（spec `optional`，先跑内存版本；S3.7 文件监听可叠加做按目录哈希落盘）、disk-cache invalidation、TTL eviction、`compileCache` 大小上限（当前无界，依靠 `shutdown()` 清零）。这些在 S3.7 文件路径确认后加入。
 - **测试**（8 用例）：hit/miss on repeat load / hit preserves hasScript + lifecycle behavior / different source miss / different ctx miss / failed compile caches failure / clearCompileCache 保留 modules / resetCounters 不清缓存 / shutdown wipes both。
+
+**S3.7a (LG-06b part A) 锁定决策**（2026-07-08 实现完成后补）：
+
+- **API surface**：`LogiaRuntimeBridge::reloadScript(name, src, errs)`（3-arg 委派到 `defaultLogiaHostContext()`）+ `reloadScript(name, src, ctx, errs)`（4-arg 与 `loadScript` 4-arg 对称）。两个重载均 **不**接触 `ScriptSubSystem`、**不** link AYIO、**不** include `AYFile.h`。文件路径加载 / FileWatcher 推到 S3.7b。
+- **失败策略**（核心锁定）：`reloadScript` 调底层 `loadScript`；loadScript 失败时 `_impl->scripts` 已被它自己 `erase`——S3.7a 在 reload 入口**先快照** `sol::table prior`（sol::table 是 handle 副本，廉价），loadScript 失败后**回填**到 `_impl->scripts[name]`。结果：`hasScript(name) == true` 跨失败 reload 保持；lifecycle 仍可调；旧模块继续跑。errors 仍返回给调用方。
+- **新源码 reload → 重新绑定**：`loadScript` 内部把 `safe_script` 跑出的 module table 写到 `_impl->scripts[name]`，reload 入口不需特别处理。S3.6 的 cache key (`hash(src) ^ hash(ctx) ^ kLogiaPipelineVersion`) 决定是否走 front-end：同源码 reload 命中、源码变 reload 自动 miss。
+- **测试**（6 用例，全为 filesystem-free）：`reload_with_new_source_replaces_module_behavior`（V1→V2，witness `1`→`10`）/ `reload_with_bad_source_keeps_prior_module`（坏源→hasScript 仍 true，V1 逻辑继续，witness `1`→`2`）/ `reload_with_identical_source_hits_compile_cache`（miss 计数不变，hit 计数 +1）/ `reload_then_call_executes_fresh_body`（V2 状态不继承 V1，witness `0`→`10`→`20`）/ `reload_three_arg_uses_default_host_context`（3-arg 委派与 4-arg 走同一 ctx）/ `reload_of_unloaded_script_loads_it`（reload = loadScript 行为，hadPrior 路径跳过 snapshot）。
+- **不**做：FileWatcher、磁盘文件读取、`pollAndApplyReloads`、`ScriptSubSystem` 任何改动、`Test_LogiaHotReload` 任何文件系统依赖。
+- **下一步**：S3.7b 单独 session。在 S3.7a 绿后接入 `ayt::io::FileWatcher`，按 §S3.7b 锁定语义。
+
+**S3.7 (LG-06b) 锁定决策**：
+
+> **实现状态（2026-07-08）**：✅ **S3.7a 已交付**（commit 紧随本文档更新）；`reloadScript` API 落地 + 6 个 unittests 全绿。S3.7b FileWatcher 仍待做。
+
+**分两阶段交付（强制）**：
+
+| 阶段 | 交付物 | 验收 |
+|------|--------|------|
+| **S3.7a** | `LogiaRuntimeBridge::reloadScript(name, src, ctx, errs)`（薄封装 → `loadScript`）；`Test_LogiaHotReload.cpp` **仅 API 路径**（改源码字符串、断言 lifecycle 行为变化） | 全量测试绿；**不** link AYIO；**不**在 SubSystem 构造 FileWatcher |
+| **S3.7b** | `ScriptSubSystem` 接 `ayt::io::FileWatcher`：`watchScriptPath` / `setHotReloadEnabled` / `pollAndApplyReloads()` | S3.7a 绿后再合；可选单独 OS 集成测 |
+
+**`reloadScript` 语义**：
+
+- 与 `loadScript` 相同 pipeline；**源码变化 → S3.6 cache key 变化 → 自动 miss**，无需手动 `clearCompileCache()`。
+- 成功：替换 `_impl->scripts[scriptName]` 模块表；**不**重复注册 ambient / reflect 全局（`initialize()` 只做一次）。
+- 失败：**保留**旧模块与 `hasScript(name)==true`；errors 返回给调用方；log warning。
+- **帧边界 swap**：`pollAndApplyReloads()` 在 `update()` / `fixedUpdate()` **最前**调用（在 `tickAmbient` 之前或之后二选一，锁定 **之前** lifecycle dispatch），本帧 lifecycle 要么全用新模块要么全用旧模块——实现选 **reload 在 dispatch 前**，文档写死。
+
+**FileWatcher 集成（S3.7b only）**：
+
+- **所有权**：`FileWatcher` 只存在于 `ScriptSubSystem` 的 **pimpl**（`HotReloadState`），**不要**放进 `LogiaRuntimeBridge`（避免 bridge TU 拉 AYIO / 析构顺序与 sol 交织）。
+- **读文件**：SubSystem 用 `ayt::io::File::readAllText`；bridge **不** include `AYFile.h`。
+- **注册表**：`normalizedPath → { scriptName, LogiaHostContext, debounceStartMs }`；`bindAndLoad` / System 加载路径时 `watch(path)`。
+- **debounce**：100ms（与 AYShader hot reload 一致）；`Modified`/`Created` 合并。
+- **生命周期（防 segfault 硬规则）**：
+  1. `enableHotReload(true)` → 创建 watcher（若尚无）→ `start()`。
+  2. `shutdown()` **第一行** → `stopWatcher()`（`FileWatcher::stop()` + `clearPending()`）。
+  3. `~ScriptSubSystem()` **必须**调用与 `shutdown()` 相同的 `stopWatcher()`（防止测试未调 `shutdown()` 时 watcher 线程 outlive SubSystem）。
+  4. 顺序：`stopWatcher()` → `_adapter.reset()` → `_bridge.shutdown()`。
+- **主线程**：只用 `pollPending()`；**禁止**在 FileWatcher callback 里 touch bridge / World。
+
+**2026-07-08 失败复盘（归档）**：
+
+- 全量测试 segfault，且移除 `Test_LogiaHotReload` / 注释 `pollAndApplyReloads` / 移除 AYIO link 仍崩 → 说明 **单次 PR 改动面过大**，难以 bisect；回滚后 S3.6 基线 exit 0。
+- 可疑点（未确证）：lazy 构造的 `unique_ptr<FileWatcher>` 在 `~ScriptSubSystem() = default` 路径下未 `stop()`；World/adapter/bridge 析构顺序与 watcher 线程竞态。
+- 附带损害：linter 回滚时曾把 `time.delta`/`time.total` 改成 lambda 而 codegen 仍 emit `time.delta`（无括号）→ S3.5 ambient 14 fail；已在 commit `9cb9893` 修复（codegen 发 `time.delta()`）。
+
+**S3.7 测试计划**：
+
+1. `reloadScript` 改 witness global → 下一帧 `on_update` 读新值。
+2. reload 坏源 → `hasScript` 仍为 true，旧逻辑仍跑。
+3. 同源码 reload → compile cache **hit**（S3.6 计数可观测）。
+4. （S3.7b）scratch 目录 + FileWatcher 集成测 **独立** `TEST_CASE`，失败不阻塞 CI 时可 `#ifdef AYSCRIPT_HOTRELOAD_OS_TEST`。
+
+**Next session:** §13 Prompt **S3.7b**（FileWatcher 集成，仅在 S3.7a 全绿后启动）。
 
 ### Phase S4 — 语法扩展
 
@@ -740,7 +890,7 @@ AYScript/
 | AYReflect | 语义分析、类型/字段注册 |
 | AYEntity | ScriptComponent 基类、子类（带 AY_PROPERTY 字段） |
 | AYGameLoop | 子系统调度 |
-| AYPlatform | FileWatcher（热重载） |
+| AYIO | `File::readAllText` + `FileWatcher`（S3.7b 热重载；**不用** AYConfig stub） |
 
 ---
 
@@ -774,6 +924,8 @@ AYScript/
 | 2026-07-08 | **S3.3 (LG-05) 完成**：`self.<primitiveField>` 单跳走 AYReflect 真实读写。Bridge 注册 `ayt_reflect_get_field` / `ayt_reflect_set_field`（`lua_CFunction`，lua_register）；codegen 单跳 primitive leaf 改发 `ayt_reflect_*_field(self, "<type>", "<f>", ...)`；`ScriptDecl::hostTypeName` 由 SemanticAnalyzer stamp；compound assignment 拆分「读 + 算 + 写」。`unittest/Test_LogiaReflectRuntime.cpp`（5 用例：helpers 可见 / 单跳读 / 单跳写 int+float+bool / codegen 字符串包含 reflect 调用 / 未知 type 安全）。`AYScript_Test` 237/237 PASS。**不**做 struct subfield 链 (`self.position.x`)、non-primitive 字段。 |
 | 2026-07-08 | **S3.5 完成**：ambient `time.*` / `input.*` 真实化。`LogiaRuntimeBridge::tickAmbient(dt)` 由 `ScriptSubSystem::update` / `fixedUpdate` 在 dispatch 前调用一次，`time.delta` = 最近 publish、`time.total` = 累加 scaled 流逝；负 dt clamp 到 0。`input.is_pressed` / `input.is_just_pressed` 改走可注入 `LogiaRuntimeBridge::InputProvider*`：默认 = 文件局部 `MockInputProvider`（保留 S1 jump-only 行为），`setInputProvider(p)` / `nullptr` 回退走均不崩。**未**接真实 `AYInput`（`AYInput/` 仅 `.git`，目录空）/ `AYDevice` 输入轮询——记入 §6.5 TODO。`unittest/Test_LogiaAmbient.cpp`（9 用例）+ `examples/player_controller.logia` 现在可在 ScriptSubSystem tick 内用 `time.delta` 而非依赖旧的全局 mock。 |
 | 2026-07-08 | **S3.6 完成（LG-06a）**：每 `LogiaRuntimeBridge` 实例独占内存编译缓存。缓存 key = `hash(source) ^ hash(LogiaHostContext) ^ kLogiaPipelineVersion`（splitmix64-style 三重混合）；host context 必须入 key（Component vs System 同源不同诊断）+ pipeline version 必须入 key（codegen 形状变化 bump 常量，强制全量失效）。只缓存 **编译结果**（`generatedLua` + `compileOk`），sol::state 运行产物每次仍跑（shutdown 同生同灭）。失败也缓存：同一坏源重复 loadScript → hit + non-empty errors，跳过 Lex/Parser/Semantic。新公开 API：`loadScript(name, src, ctx, errs)` 4-arg 重载 + 三个观测接口 `compileCacheHitCount/MissCount/Counters/clearCompileCache`。3-arg 重载委派到 `defaultLogiaHostContext()`，S2.5 / S3.0 / S3.5 caller 零修改。`unittest/Test_LogiaCompileCache.cpp`（8 用例）。**未做**磁盘持久化、TTL、cache size 上限——spec optional，先跑内存版本，等 S3.7 文件路径策略定了再决定是否叠加磁盘。 |
+| 2026-07-08 | **§5.7 Script exposure 设计**：字段/方法暴露策略、`FieldAttribute` vs C++ access、R1–R4 backlog。**S3.7 设计锁定 + 失败复盘**：分两阶段 S3.7a（reload API）/ S3.7b（AYIO FileWatcher）；实现尝试 segfault 回滚，代码未合并。 |
+| 2026-07-08 | **S3.7a 完成（LG-06b part A）**：纯内存 `LogiaRuntimeBridge::reloadScript(name, src[, ctx], errs)` 落地。3-arg 委派到 `defaultLogiaHostContext()`，4-arg 与 `loadScript` 4-arg 对称共享同一 S3.6 cache key。**失败策略**（核心）：reload 入口先 snapshot `sol::table prior`（sol::table 是廉价 handle 副本），委派到 `loadScript`，若 loadScript 失败（它自己 `erase` 了 `_impl->scripts[name]`）就**回填** prior → `hasScript(name) == true` 跨失败 reload 保持，旧模块继续跑。`unittest/Test_LogiaHotReload.cpp`（6 用例，filesystem-free）：reload 新源改 witness / 坏源保持旧模块 / 同源 reload 命中 S3.6 缓存 / reload 后 lifecycle 见新 body / 3-arg 走 default ctx / reload 之前未加载的 script 走 loadScript 路径。**未做** FileWatcher、`reloadScriptFromFile`、`ScriptSubSystem` 任何改动、CMake link AYIO——全部推到 S3.7b。 |
 
 ---
 
@@ -892,25 +1044,58 @@ Acceptance:
 
 ---
 
-### Prompt S3.7 — LG-06b Hot reload
+### Prompt S3.7a — LG-06b Hot reload API (no FileWatcher)
 
 ```
-Implement AYScript S3.7 / LG-06 part B: .logia hot reload.
+Implement AYScript S3.7a ONLY: reloadScript API + unit tests. NO FileWatcher yet.
 
 Read first:
-- AYRuntime/AYScript/design.md §1.1 hot reload goal
-- AYFoundation/AYConfig or AYIO FileWatcher if available
-- S3.6 compile cache API (must land first)
+- AYRuntime/AYScript/design.md § S3.7 locked decisions (S3.7a / S3.7b split)
+- LogiaRuntimeBridge::loadScript (S3.6 cache behavior)
+- DO NOT link AYIO in this session.
 
 Scope (DO):
-1. Watch configured script directory for .logia changes.
-2. On change: invalidate cache entry, recompile, replace LogiaRuntimeBridge module table for that script name.
-3. In-flight lifecycle calls: document behavior (finish current frame vs immediate swap).
-4. Unittest: simulate reload by calling reload API directly (no real filesystem if flaky).
+1. LogiaRuntimeBridge::reloadScript(name, src, ctx, errs) — delegates to loadScript; document fail-keeps-old-module.
+2. Test_LogiaHotReload.cpp: reload changes on_update witness; bad reload keeps old module; cache hit on same source reload.
+3. Run full AYScript_Test — must exit 0 before ending session.
+
+Scope (DO NOT):
+- ScriptSubSystem FileWatcher / pollAndApplyReloads
+- reloadScriptFromFile / AYFile.h in bridge
+- Lazy FileWatcher in SubSystem destructor paths
 
 Acceptance:
-- Edit .logia on disk → next tick runs new logic without process restart.
-- No leak / double-register of Lua globals.
+- All existing tests green + new hot-reload API tests green.
+- Zero segfault on full suite.
+```
+
+---
+
+### Prompt S3.7b — LG-06b FileWatcher wiring
+
+```
+Implement AYScript S3.7b: wire ayt::io::FileWatcher into ScriptSubSystem.
+
+Prerequisite: S3.7a merged and full AYScript_Test green.
+
+Read first:
+- AYRuntime/AYScript/design.md § S3.7 lifecycle rules (stopWatcher before bridge shutdown)
+- AYFoundation/AYIO/include/AYFileWatcher.h + unittest/Test_FileWatcher.cpp
+- AYShader pollHotReload debounce pattern (reference only)
+
+Scope (DO):
+1. HotReloadState pimpl on ScriptSubSystem: watchScriptPath, enableHotReload, pollAndApplyReloads at start of update().
+2. CMake: link AYIO PRIVATE on AYScript.
+3. shutdown() AND ~ScriptSubSystem() both call stopWatcher() first.
+4. Optional OS integration test behind ifdef.
+
+Scope (DO NOT):
+- Put FileWatcher inside LogiaRuntimeBridge
+- Touch time.delta / time.total registration shape without updating AYLuaCodegen
+
+Acceptance:
+- S3.7a tests still green.
+- Edit .logia on disk → next tick new logic (manual or OS test).
 ```
 
 ---
