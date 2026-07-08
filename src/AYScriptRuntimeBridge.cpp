@@ -35,23 +35,41 @@ namespace ayt::script
 // ------------------------------------------------------------
 // Engine API mocks
 //
-// S1 ships minimal stubs so the codegen output can be exercised
-// end-to-end. S3 replaces these with real AYInput/AYTime bindings.
+// S1 shipped minimal stubs so the codegen output can be exercised
+// end-to-end. S3.5 replaces these with real-input plumbing:
+//
+//   - `time.delta` / `time.total` now read from the bridge's
+//     `tickAmbient(dt)` accumulator, which ScriptSubSystem drives
+//     with the authoritative scaled delta from GameLoop. No more
+//     zero-everywhere mock.
+//   - `input.is_pressed` / `input.is_just_pressed` now route
+//     through an injectable InputProvider*; default is the
+//     MockInputProvider below (jump-only). Production hosts can
+//     plug in a real AYDevice / OS-level poll by calling
+//     setInputProvider().
+//
+// Keeping a mock as the default keeps AYScript_Test headless-
+// runnable on CI without an HWND.
 // ------------------------------------------------------------
 
 namespace {
 
-bool mockIsPressed(const std::string& key)
-{
-    // Minimal mock: always returns true for "jump" so tests can observe
-    // conditional branches without wiring real input.
-    return key == "jump";
-}
+class MockInputProvider final
+    : public ayt::script::LogiaRuntimeBridge::InputProvider {
+public:
+    bool isPressed(const std::string& key) const override {
+        // Mimics S1 behavior so legacy unittests remain stable;
+        // only the named jump key is treated as held.
+        return key == "jump";
+    }
+    bool isJustPressed(const std::string& /*key*/) const override {
+        return false;
+    }
+};
 
-bool mockIsJustPressed(const std::string& /*key*/)
-{
-    return false;
-}
+MockInputProvider g_defaultInputProvider;
+
+} // namespace
 
 // ------------------------------------------------------------
 // LG-05 / S3.3 — AYReflect-backed self.field read/write
@@ -219,6 +237,20 @@ struct LogiaRuntimeBridge::Impl {
     // scriptName → module table (the table returned by the chunk)
     std::unordered_map<std::string, sol::table> scripts;
 
+    // S3.5: ambient time/input state, owned by the bridge.
+    // Populated by tickAmbient() before any lifecycle dispatch;
+    // read by `time.delta` / `time.total` Lua accessors. The
+    // ScriptSubSystem is the only legitimate writer — tests can
+    // poke the values directly through the public setters.
+    float _currentDelta  = 0.0f;
+    float _totalElapsed  = 0.0f;
+
+    // S3.5: injectable input backend. Default points at the
+    // file-local MockInputProvider defined in the anon namespace
+    // above. setInputProvider() swaps it out; lifetime is the
+    // caller's (test or production host).
+    LogiaRuntimeBridge::InputProvider* _input = &g_defaultInputProvider;
+
     bool initialized = false;
 
     Impl()
@@ -251,10 +283,36 @@ struct LogiaRuntimeBridge::Impl {
         };
         lua["log"] = logTbl;
 
-        // input table → mocks (S3 will replace with real AYInput)
+        // S3.5: time table reads the bridge-owned `_currentDelta` /
+        // `_totalElapsed`. Bound via lambda that captures `this`
+        // (the bridge Impl) — the script cannot mutate the
+        // accumulator; only tickAmbient() can. time.delta is the
+        // scaled frame delta; time.total is accumulated scaled
+        // elapsed. Real-source = ScriptSubSystem::update(dt) →
+        // bridge.tickAmbient(dt).
+        auto timeTbl = lua.create_table();
+        timeTbl["delta"] = [this]() -> double {
+            return static_cast<double>(_currentDelta);
+        };
+        timeTbl["total"] = [this]() -> double {
+            return static_cast<double>(_totalElapsed);
+        };
+        lua["time"] = timeTbl;
+
+        // S3.5: input table defers to the injectable provider.
+        // Lambdas capture `this` so swapping providers takes
+        // effect immediately for subsequent lifecycle calls (no
+        // need to rebuild the table). Tests assert this in
+        // Test_LogiaAmbient.cpp.
         auto inputTbl = lua.create_table();
-        inputTbl["is_pressed"]      = &mockIsPressed;
-        inputTbl["is_just_pressed"] = &mockIsJustPressed;
+        inputTbl["is_pressed"] = [this](const std::string& k) -> bool {
+            auto* p = _input ? _input : &g_defaultInputProvider;
+            return p->isPressed(k);
+        };
+        inputTbl["is_just_pressed"] = [this](const std::string& k) -> bool {
+            auto* p = _input ? _input : &g_defaultInputProvider;
+            return p->isJustPressed(k);
+        };
         lua["input"] = inputTbl;
 
         // LG-05 / S3.3: AYReflect-backed self.field read/write.
@@ -412,6 +470,38 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
         return false;
     }
     return true;
+}
+
+// ------------------------------------------------------------
+// S3.5 — ambient API: tick -> time.delta/time.total
+// ------------------------------------------------------------
+
+void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
+{
+    if (scaledDelta < 0.0f) scaledDelta = 0.0f;
+    _impl->_currentDelta = scaledDelta;
+    _impl->_totalElapsed += scaledDelta;
+}
+
+float LogiaRuntimeBridge::currentDelta() const noexcept
+{
+    return _impl ? _impl->_currentDelta : 0.0f;
+}
+
+float LogiaRuntimeBridge::totalElapsed() const noexcept
+{
+    return _impl ? _impl->_totalElapsed : 0.0f;
+}
+
+void LogiaRuntimeBridge::setInputProvider(InputProvider* provider) noexcept
+{
+    if (!_impl) return;
+    _impl->_input = provider ? provider : &g_defaultInputProvider;
+}
+
+LogiaRuntimeBridge::InputProvider* LogiaRuntimeBridge::inputProvider() const noexcept
+{
+    return _impl ? _impl->_input : &g_defaultInputProvider;
 }
 
 void* LogiaRuntimeBridge::implHandle()

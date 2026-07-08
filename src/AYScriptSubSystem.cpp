@@ -74,6 +74,12 @@ bool ScriptSubSystem::initialize()
 
 void ScriptSubSystem::update(float deltaTime)
 {
+    // S3.5: publish the per-tick scaled delta to the bridge BEFORE
+    // any lifecycle dispatch. The `time.delta` / `time.total`
+    // ambient table reads from the accumulator populated here —
+    // ScriptSubSystem is the canonical source so all hosts (System
+    // + Component) see the same authoritative value.
+    _bridge.tickAmbient(deltaTime);
     // S3.1 (LG-04): drive Logia System-host scripts.
     tickLogiaSystems(_bridge, deltaTime);
     // S3.4: drive Logia Component-host scripts via the Entity loop.
@@ -82,6 +88,12 @@ void ScriptSubSystem::update(float deltaTime)
 
 void ScriptSubSystem::fixedUpdate(float fixedDeltaTime)
 {
+    // S3.5: fixedUpdate also feeds the ambient accumulator so a
+    // host that opts into fixed ticks (via SubSystemDescriptor)
+    // sees the fixed dt in `time.delta` instead of the variable
+    // one. Component-host Lifecycle dispatched from
+    // tickComponentHosts inherits the same accumulator.
+    _bridge.tickAmbient(fixedDeltaTime);
     // Same dispatch as update() — Logia System hosts opt into the
     // fixed tick via their host-side ISystem::setPriority / descriptor
     // wiring. Component host ticks get the fixed dt too.

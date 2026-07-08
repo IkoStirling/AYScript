@@ -69,6 +69,35 @@ public:
                        void* receiver = nullptr,
                        void* arg2 = nullptr);
 
+    // === S3.5 — ambient API real-time bindings (was: mock in S1) ===
+
+    // Plumb the per-tick scaled delta (and accumulate elapsed time)
+    // before any lifecycle call that should observe them.
+    // ScriptSubSystem::update/fixedUpdate must call this so the
+    // `time.delta` / `time.total` ambient table reads from the
+    // tick's authoritative source rather than a global mock.
+    void tickAmbient(float scaledDelta);
+
+    // Current scaled delta in seconds. Reflects the most recent
+    // tickAmbient() call. Reads are cheap (plain float load).
+    [[nodiscard]] float currentDelta() const noexcept;
+    // Accumulated scaled time across all tickAmbient() calls.
+    [[nodiscard]] float totalElapsed() const noexcept;
+
+    // Injectable input backend. S3.5 ships a default mock so the
+    // unittests can run without an HWND — but production hosts can
+    // plug in a real AYDevice / OS-level poll by registering a
+    // different provider. Provider ownership: bridge holds a raw
+    // pointer; lifetime is the caller's responsibility.
+    class InputProvider {
+    public:
+        virtual ~InputProvider() = default;
+        virtual bool isPressed(const std::string& key) const = 0;
+        virtual bool isJustPressed(const std::string& key) const = 0;
+    };
+    void setInputProvider(InputProvider* provider) noexcept;
+    [[nodiscard]] InputProvider* inputProvider() const noexcept;
+
     // Internal access for tests.
     void* implHandle();
 
