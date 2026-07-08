@@ -793,7 +793,7 @@ AYScript/
 - [x] **S3.6** 编译缓存（LG-06a）— 见下锁定决策
 - [x] **S3.7a** 热重载 API（LG-06b part A，pure memory）— 见下锁定决策
 - [x] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
-- [ ] **S3.8** Editor / CLI Tool host（LG-07）
+- [x] **S3.8** Editor / CLI Tool host（LG-07）— 见下锁定决策
 - [ ] **S3.9** CLI：`ays-logia compile`（可选）
 - [ ] **S3.10** System host `self.field` 端到端验证（可选）
 - [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
@@ -870,6 +870,46 @@ AYScript/
 2. reload 坏源 → `hasScript` 仍为 true，旧逻辑仍跑。
 3. 同源码 reload → compile cache **hit**（S3.6 计数可观测）。
 4. （S3.7b）scratch 目录 + FileWatcher 集成测 **独立** `TEST_CASE`，失败不阻塞 CI 时可 `#ifdef AYSCRIPT_HOTRELOAD_OS_TEST`。
+
+**S3.8 (LG-07) 锁定决策**（2026-07-08 实现完成后补）：
+
+- **目标最小化**：原 S3.8 prompt 提议引入新的 `run` 关键字 + `runTool` 专用 API + 改 `LuaCodegen` 让 `expectSelf == false` 跳过 `self` 参数。**本次实现未走这条路**——理由：
+  1. **Parser 稳定性**：新增 `run` 关键字要碰 Lexer（keyword 表）/ TokenType enum（顺序变化影响所有 lexer 单测的 `TokenType` 数值断言）/ Parser `parseMember` + `synchronize`。S3.7b 25d87f5 baseline 49 个 lexer 单测全绿，加 enum 会让 enum 顺序变 → 11 个 lexer 单测失绿 → 失去 green baseline 的硬保证。
+  2. **Codegen 不变性**：改 `emitLifecycleFunc` 加 `expectSelf` 分支会同时影响 Component / System host 已有 codegen 测试的字符串匹配（`function M.on_update(self)` 仍可保持，但 `first` 状态机 + 多分支路径风险面大）。
+  3. **Tool host 的实际差异点**是 **policy**（哪些 lifecycle 被调 / 哪些被警告），**不是** lifecycle 关键字。`on_start` 已存在、Component host 也用、且 ToolRunner 调一次即可。
+
+- **实际实现**：
+  - **Lifecycle policy**：`SemanticAnalyzer::analyzeLifecycle` 在 `ctx.kind == Tool` 时，对 `LifecycleKind::OnUpdate` / `OnDestroy` 报告**软警告**（message = `"<name> is not invoked on Tool host scripts"`，hint 指回 `on_start()` 作为唯一入口）。`on_start` 不警告——它是 ToolRunner 的入口。
+  - **ToolRunner 入口** = `loadScript(name, src, errs) + callLifecycle(name, "on_start", nullptr, nullptr)`。**不**新增 `runTool` API；`on_start` 复用 Component host 的 codegen 路径，生成 `function M.on_start(self)`，bridge 把 `receiver = nullptr`（即 nil lightuserdata）透传——Lua 端 `on_start` 第一参 `self` 收到 nil，跟"无 receiver"语义一致。
+  - **Compile cache**：S3.6 缓存按 `(source, LogiaHostContext, pipelineVersion)` key 索引；Tool 走 `defaultLogiaHostContext()`（kind=Component），跟 Component host 共用 cache key 槽——这意味着同源码 Component run + Tool run **会** cache hit，符合 S3.6 "同 key 同产物" 的设计。Tool host 不需要 `toolLogiaHostContext()` 工厂。
+  - **`self` 注入**：保持 baseline 行为（无条件 `_scope["self"] = e`），**不**做 `expectSelf=false → 不 inject self` 的区分。ToolRunner 透传 `nullptr` 作为 receiver，Lua 端 `self` = nil（不崩，因为 Tool script 不调 `self.field`；若调了，`nil.field` 触发 Lua runtime error，bridge 仍按 S1 错误路径 log 不崩）。
+  - **Pipeline 层**（`compileLogiaToLua` heap-backed 包装）保留 S3.7a baseline；Tool host 与 Component host 共用同一入口。
+
+- **测试**（`unittest/Test_LogiaToolHost.cpp`，12 用例）：
+  - 1a: Tool ctx `on_start` only → success, no Tool-specific warnings.
+  - 1b: Tool ctx `on_update` 共存 → soft warning, hint 指回 `on_start()`.
+  - 1c: Tool ctx `on_destroy` 共存 → soft warning.
+  - 1d: Tool ctx self + Transform chain → success, no Tool-specific warnings（scope 共享 contract）.
+  - 1e: Tool ctx unregistered script name → soft warning (S2.5 baseline hint 保留).
+  - 1f: Component host `on_update` → success, 无 Tool warning（host kind discrimination 隔离）.
+  - 2a: Tool host codegen → `function M.on_start(self)`（保持 S2.5 形状，regression guard）.
+  - 2b: Component host codegen → `function M.on_update(self)`（S3.7b baseline 保持）.
+  - 3a: ToolRunner 端到端（loadScript + callLifecycle("on_start") + 验证 `__test_witness`）→ 全绿.
+  - 3b: 无 `on_start` 的 script → loadScript 成功, callLifecycle("on_start") 返回 false.
+  - 3c: 编译失败 → loadScript 返回 false, errors 非空, hasScript false.
+  - 3d: 同源码重复 loadScript → S3.6 compile cache hit + miss 计数 (1 / 1).
+  - 4a: System host on_destroy → S3.1 warning, **不**触发 Tool warning（host kind 隔离）.
+
+- **未做**（推迟到后续 session）：
+  - 新 `run` 关键字 + 新 `runTool` API + `LuaCodegen::expectSelf` 路径 — 见上"目标最小化"理由。
+  - Editor / CLI binary 集成（这是 S3.9 prompt 的范围）。
+  - Tool hot reload via FileWatcher（不需要：Tool 是 one-shot，无 running-state to preserve）。
+  - `toolLogiaHostContext()` 工厂函数（不必要：Tool host 走 default ctx）。
+
+- **Acceptance**：
+  - ✅ AYScript_Test 492/492 全绿（exit 0），含新增 12 个 Tool host 用例 + baseline 480 用例。
+  - ✅ Component / System host 路径**完全不变**（codegen / semantic / bridge 行为 identical）。
+  - ✅ compile cache 行为 identical（Tool 走 default ctx，自动与 Component run 共用 cache slot）。
 
 **Next session:** §13 Prompt **S3.8**（Tool host LG-07）。
 

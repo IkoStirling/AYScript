@@ -10,7 +10,7 @@
 #include "AYScriptRuntimeBridge.h"
 
 #include "logia/AYLogia.h"
-#include "logia/AYLuaCodegen.h"
+#include "logia/AYLogiaPipeline.h"
 
 #define SOL_ALL_SAFETIES_ON 1
 #define SOL_SAFE_NUMERICS   1
@@ -526,30 +526,14 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
             return false;
         }
     } else {
-        // Cache miss — run the full pipeline.
-
-        // 1. Lex + parse via existing S0 Compiler.
-        logia::Compiler compiler;
-        auto compiled = compiler.compile(logiaSource, ctx);
-        if (!compiled.success) {
-            errors = std::move(compiled.errors);
-            _impl->scripts.erase(scriptName);
-            // Cache the failure so a repeat call hits the same
-            // diagnostic instead of re-running the front end.
-            _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
-                /*generatedLua*/ std::string{},
-                /*compileOk*/    false,
-            };
-            return false;
-        }
-
-        // 2. Generate Lua source.
+        // Cache miss — run the full pipeline (heap-backed; see
+        // compileLogiaToLua in AYLogiaPipeline.h).
         logia::LuaCodegenOptions opts;
         opts.scriptName = scriptName;
-        logia::LuaCodegen codegen(opts);
-        auto gen = codegen.generate(*compiled.program);
-        if (!gen.success) {
-            errors = std::move(gen.errors);
+        logia::LogiaToLuaResult pipeline =
+            logia::compileLogiaToLua(logiaSource, ctx, opts);
+        if (!pipeline.success) {
+            errors = std::move(pipeline.errors);
             _impl->scripts.erase(scriptName);
             _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
                 std::string{},
@@ -558,7 +542,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
             return false;
         }
 
-        luaSrc = std::move(gen.source);
+        luaSrc = std::move(pipeline.lua);
         luaOk  = true;
 
         // Populate the cache BEFORE running the Lua chunk so a

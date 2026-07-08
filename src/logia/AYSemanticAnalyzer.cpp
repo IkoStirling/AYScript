@@ -369,6 +369,33 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         report(d);
     }
 
+    // S3.8 (LG-07) — Tool host policy. A Tool script is a run-only
+    // one-shot (editor / CLI) whose entry point is `on_start`. Other
+    // lifecycle methods (`on_update`, `on_destroy`) are never
+    // invoked by the ToolRunner — emit soft warnings so legacy
+    // refactors from Component / System hosts keep parsing. The
+    // shape mirrors the S3.1 System-on_destroy policy above.
+    if (_ctx.kind == LogiaHostKind::Tool) {
+        const char* name = nullptr;
+        if (fn.kind == LifecycleKind::OnUpdate) {
+            name = "on_update";
+        } else if (fn.kind == LifecycleKind::OnDestroy) {
+            name = "on_destroy";
+        }
+        if (name) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Warning;
+            d.errorCode = ErrorCode::InvalidStatement;
+            d.message = std::string(name) +
+                        " is not invoked on Tool host scripts";
+            d.hint = "Tool host runs once via the on_start() entry point; "
+                     "use `on_start()` for the one-shot body, or move this "
+                     "script to a Component / System host if you need "
+                     "tick-driven lifecycle";
+            report(d);
+        }
+    }
+
     for (auto& s : fn.body) {
         if (s) analyzeStmt(*s);
     }
