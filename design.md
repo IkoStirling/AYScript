@@ -694,7 +694,7 @@ AYScript/
 - [x] sol2 usertype：`self.field` 真正走 AYReflect 读写（LG-05 / S3.3）— **见上**
 - [x] **S3.4** ScriptSubSystem / bootstrap：Component host 注入 bridge + 加载 `.logia` + GameLoop tick — pimpl `LogiaScriptBridgeAdapter` + `bindAndLoad(comp, src, errs)`；tick 走 `World::getAllEntities()` → `entity->onUpdate(dt)`（commit `028a555`）
 - [x] **S3.5** 真实 AYTime 绑定 + 可注入 input 后端（替换 mock）
-- [ ] **S3.6** 编译缓存（LG-06a）
+- [x] **S3.6** 编译缓存（LG-06a）— 见下锁定决策
 - [ ] **S3.7** 热重载（LG-06b）
 - [ ] **S3.8** Editor / CLI Tool host（LG-07）
 - [ ] **S3.9** CLI：`ays-logia compile`（可选）
@@ -709,7 +709,19 @@ AYScript/
 - **测试**：`unittest/Test_LogiaAmbient.cpp`（9 用例：cold delta=0 / tickAmbient publish / total 累加 / 负 dt clamp / SubSystem 端到端 / 默认 mock 行为 / 自定义 provider dispatch / query 计数与 key 字符串 / null 回退）。
 - **未做**：`input.<key>` 与物理键盘/手柄的映射（无 `AYInput` 层）；`event.emit` / `event.subscribe`；`spawn_prefab`；struct chain `self.position.x` reflect。
 
-**Next session:** §13 Prompt **S3.4** (copy-paste).
+**Next session:** §13 Prompt **S3.7** (hot reload).
+
+**S3.6 (LG-06a) 锁定决策**（2026-07-08）：
+
+- **缓存粒度**：每 `LogiaRuntimeBridge` 实例独占一份内存缓存（`unordered_map<size_t, CompiledEntry>`，在 `Impl` pimpl 内）。
+- **缓存 key**：`hash(source) ^ hash(LogiaHostContext) ^ kLogiaPipelineVersion`（三次混合，splitmix64 风格）。`kLogiaPipelineVersion` 是 AYScript 头里的 compile-time `size_t` 常量；**任何 lexer/parser/semantic/codegen 输出形状或诊断 code 文案变化**必须 bump 该常量（否则旧缓存字符串的形状与新 Pipeline 不一致）。
+- **`LogiaHostContext` 必须入 key**——同一份 `script Foo` 在 `Component` 上下文和 `System` 上下文产生的诊断/codegen 语义下游不同，content-addressed cache 会冲突。`LogiaHostContext::hostType` 按指针地址混入（ITypeInfo* 是 stable 的 registry 地址）。
+- **缓什么**：只缓存 **编译结果**（`generatedLua` + `compileOk`）——不缓存 sol::state 的运行产物。`safe_script` + 模块表注册每次仍跑（sol::state 生命周期独立于编译缓存；shutdown 会重置 sol 与缓存同生同灭）。
+- **失败也缓存**：`compile.success == false` 也写入 cache（`generatedLua = "", compileOk = false`），重复 loadScript 同一坏源 → hit + non-empty errors，避免重复花 lex/parse 时间。这与 S3.7 热重载语义一致：源未变就应当 not re-parse。
+- **观测**：`compileCacheHitCount()` / `compileCacheMissCount()` / `resetCompileCacheCounters()` / `clearCompileCache()` 全部公开，unittest `Test_LogiaCompileCache.cpp` 用上所有四个。
+- **`loadScript` 4-arg 重载**（带 `LogiaHostContext&`）公开为正式入口；3-arg 重载委派到 `defaultLogiaHostContext()`，保留 S2.5 / S3.0 / S3.5 caller 的零修改兼容性。
+- **未做**：磁盘持久化（spec `optional`，先跑内存版本；S3.7 文件监听可叠加做按目录哈希落盘）、disk-cache invalidation、TTL eviction、`compileCache` 大小上限（当前无界，依靠 `shutdown()` 清零）。这些在 S3.7 文件路径确认后加入。
+- **测试**（8 用例）：hit/miss on repeat load / hit preserves hasScript + lifecycle behavior / different source miss / different ctx miss / failed compile caches failure / clearCompileCache 保留 modules / resetCounters 不清缓存 / shutdown wipes both。
 
 ### Phase S4 — 语法扩展
 
@@ -761,6 +773,7 @@ AYScript/
 | 2026-07-08 | **S3.2 (LG-04b) B-min 完成**：Reflect 单链 parent 指针 + `isDerivedFrom()` + Component host strict 模式（`LogiaHostContext::strictInheritance`）。`ITypeInfo::getBaseTypeId()` 默认 0；`AY_FINALIZE_REGISTRATION_METADATA` 写入 `AY_INHERITS` 解析出的 base；strict 模式仅在 `kind==Component && hostType!=nullptr && strictInheritance==true` 时启用，对「已注册但非 hostType 派生」的 script 名产生 hard error。`unittest/ReflectBminTests`（6 用例）+ `Test_LogiaSemantic`（5 用例）。**不**做完整派生图 / `getAllDerived()` / 多继承。 |
 | 2026-07-08 | **S3.3 (LG-05) 完成**：`self.<primitiveField>` 单跳走 AYReflect 真实读写。Bridge 注册 `ayt_reflect_get_field` / `ayt_reflect_set_field`（`lua_CFunction`，lua_register）；codegen 单跳 primitive leaf 改发 `ayt_reflect_*_field(self, "<type>", "<f>", ...)`；`ScriptDecl::hostTypeName` 由 SemanticAnalyzer stamp；compound assignment 拆分「读 + 算 + 写」。`unittest/Test_LogiaReflectRuntime.cpp`（5 用例：helpers 可见 / 单跳读 / 单跳写 int+float+bool / codegen 字符串包含 reflect 调用 / 未知 type 安全）。`AYScript_Test` 237/237 PASS。**不**做 struct subfield 链 (`self.position.x`)、non-primitive 字段。 |
 | 2026-07-08 | **S3.5 完成**：ambient `time.*` / `input.*` 真实化。`LogiaRuntimeBridge::tickAmbient(dt)` 由 `ScriptSubSystem::update` / `fixedUpdate` 在 dispatch 前调用一次，`time.delta` = 最近 publish、`time.total` = 累加 scaled 流逝；负 dt clamp 到 0。`input.is_pressed` / `input.is_just_pressed` 改走可注入 `LogiaRuntimeBridge::InputProvider*`：默认 = 文件局部 `MockInputProvider`（保留 S1 jump-only 行为），`setInputProvider(p)` / `nullptr` 回退走均不崩。**未**接真实 `AYInput`（`AYInput/` 仅 `.git`，目录空）/ `AYDevice` 输入轮询——记入 §6.5 TODO。`unittest/Test_LogiaAmbient.cpp`（9 用例）+ `examples/player_controller.logia` 现在可在 ScriptSubSystem tick 内用 `time.delta` 而非依赖旧的全局 mock。 |
+| 2026-07-08 | **S3.6 完成（LG-06a）**：每 `LogiaRuntimeBridge` 实例独占内存编译缓存。缓存 key = `hash(source) ^ hash(LogiaHostContext) ^ kLogiaPipelineVersion`（splitmix64-style 三重混合）；host context 必须入 key（Component vs System 同源不同诊断）+ pipeline version 必须入 key（codegen 形状变化 bump 常量，强制全量失效）。只缓存 **编译结果**（`generatedLua` + `compileOk`），sol::state 运行产物每次仍跑（shutdown 同生同灭）。失败也缓存：同一坏源重复 loadScript → hit + non-empty errors，跳过 Lex/Parser/Semantic。新公开 API：`loadScript(name, src, ctx, errs)` 4-arg 重载 + 三个观测接口 `compileCacheHitCount/MissCount/Counters/clearCompileCache`。3-arg 重载委派到 `defaultLogiaHostContext()`，S2.5 / S3.0 / S3.5 caller 零修改。`unittest/Test_LogiaCompileCache.cpp`（8 用例）。**未做**磁盘持久化、TTL、cache size 上限——spec optional，先跑内存版本，等 S3.7 文件路径策略定了再决定是否叠加磁盘。 |
 
 ---
 

@@ -6,9 +6,32 @@
 #include <vector>
 
 #include "logia/AYCompilerError.h"
+#include "logia/AYLogia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
 namespace ayt::script
 {
+
+// S3.6 (LG-06a) — compile pipeline version stamp.
+//
+// Bump this constant whenever anything that affects the generated Lua
+// output shape or the loadScript error surface changes — Lexer/Parser,
+// SemanticAnalyzer diagnostics (Warning/Error code numbers or hint
+// wording), LuaCodegen emission (snake_case method names, time.*,
+// input.*, ayt_reflect_*_field). A bump invalidates every existing
+// in-memory compile cache entry.
+//
+// The stamp is intentionally a raw constant (not a date string) so
+// it's cheap to fold into the cache key hash.
+constexpr std::size_t kLogiaPipelineVersion = 1u;
+
+// S3.6 — fold LogiaHostContext fields into the compile cache key so
+// that the same source compiled under different host kinds (Component
+// vs System vs Tool) does not collide on the cache. `hostType` is a
+// pointer in the S3.0 API; we mix its address in rather than the
+// underlying type name because the cache key is value-level only.
+// Future S3.x may rekey on type id if two callers end up with the
+// same name but different ITypeInfo*.
+std::size_t hashLogiaHostContext(const logia::LogiaHostContext& ctx);
 
 // LogiaRuntimeBridge
 //
@@ -38,9 +61,49 @@ public:
     //
     // Returns true on success. On failure, `errors` is populated with the
     // Logia compiler errors and `hasScript(name)` returns false.
+    //
+    // S3.6 (LG-06a): when the cached Lua source for
+    // (source, hostContext, pipelineVersion) matches, this skips
+    // Lexer/Parser/Semantic/Codegen and re-executes the cached Lua
+    // chunk (Lua state must be re-bound after sol::state lifecycle
+    // changes; the chunk itself is text and survives). The host
+    // context is the bridge's default (LogiaHostKind::Component) — for
+    // non-default contexts use the overload below.
     bool loadScript(const std::string& scriptName,
                     const std::string& logiaSource,
                     std::vector<logia::CompilerError>& errors);
+
+    // S3.6 (LG-06a) — host-context-explicit overload. Production
+    // hosts that bind to S3.1+ script kinds (System / Tool /
+    // EventHandler) pass their LogiaHostContext here so the cached
+    // Lua source is keyed by the host kind plus strictInheritance
+    // bit. Same return contract as the 3-arg overload.
+    bool loadScript(const std::string& scriptName,
+                    const std::string& logiaSource,
+                    const logia::LogiaHostContext& ctx,
+                    std::vector<logia::CompilerError>& errors);
+
+    // === S3.6 (LG-06a) — compile cache observability ===
+
+    // Number of loadScript calls that hit the in-memory compile cache
+    // (skipped Lexer/Parser/Semantic/Codegen and used the cached Lua
+    // source). Reset by shutdown() / clearCompileCache(). Exposed so
+    // unit tests can assert cache-hit behavior without reaching into
+    // private state.
+    [[nodiscard]] std::size_t compileCacheHitCount() const noexcept;
+
+    // Number of loadScript calls that missed the cache (full pipeline
+    // ran; result cached for next time).
+    [[nodiscard]] std::size_t compileCacheMissCount() const noexcept;
+
+    // Reset all per-instance counters. Entries themselves stay — useful
+    // for distinguishing "cached source never ran" from "ran N times".
+    void resetCompileCacheCounters() noexcept;
+
+    // Drop every cached compilation. Module tables in `_scripts` are
+    // preserved (the bridge's runtime contract: hasScript stays true
+    // for whatever is already loaded). Called by shutdown().
+    void clearCompileCache() noexcept;
 
     // Look up a previously-loaded script.
     [[nodiscard]] bool hasScript(const std::string& scriptName) const;
