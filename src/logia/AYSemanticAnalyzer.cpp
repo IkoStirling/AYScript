@@ -61,6 +61,53 @@ const std::unordered_set<std::string>& ambientIdentifiers()
     return s;
 }
 
+// S3.10: register primitive types in AYReflect so `resolveTypeName`
+// stamps a non-null ITypeInfo on primitive field accesses
+// (`self.moveSpeed` where moveSpeed is `AY_PROPERTY(float, ...)`).
+// Without this, the analyzer's `analyzeMemberExpr` leaves
+// `m->resolvedType` as nullptr and the codegen rewrite to
+// `ayt_reflect_set_field(self, ..., ...)` is skipped (the helper
+// gates on `resolvedType->getFieldCount() == 0`, which would crash
+// on null). Idempotent — safe to call from every analyzer ctor.
+template <typename T>
+void registerPrimitive(const char* name)
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType(name) != nullptr) return;
+    auto* info = new ayt::reflect::TypeInfoImpl<T>(
+        name,
+        ayt::reflect::detail::defaultCreate<T>,
+        ayt::reflect::detail::defaultDestroy<T>,
+        ayt::reflect::detail::defaultCopy<T>);
+    reg.registerTypeInfo(name, info);
+}
+
+void ensurePrimitiveTypesRegistered()
+{
+    registerPrimitive<int32_t>("int");
+    registerPrimitive<int32_t>("Int32");
+    registerPrimitive<int64_t>("Int64");
+    registerPrimitive<float>("float");
+    registerPrimitive<float>("Float32");
+    registerPrimitive<double>("double");
+    registerPrimitive<double>("Float64");
+    registerPrimitive<bool>("bool");
+    registerPrimitive<bool>("Bool");
+}
+
+// S3.10: static-init guard so consumers that depend on AYReflect
+// builtins (e.g. the System-host test fixture's MovementSystemRegistrar
+// in Test_LogiaSystemHost.cpp, which calls `reg.findType("float")` at
+// static init time) see a populated registry regardless of TU init
+// order. The guard runs once on first access and is MT-safe by C++11
+// static-init rules.
+namespace {
+struct PrimitiveBootstrap {
+    PrimitiveBootstrap() { ensurePrimitiveTypesRegistered(); }
+};
+static PrimitiveBootstrap g_primitiveBootstrap;
+} // namespace
+
 // Explicitly register known AYEntity component types with AYReflect.
 void ensureAYEntityTypesRegistered()
 {
@@ -132,6 +179,14 @@ SemanticAnalyzer::SemanticAnalyzer(SemanticOptions options, const LogiaHostConte
     _registryImpl = &ayt::reflect::TypeRegistryImpl::instance();
     _registry     = _registryImpl;
     ensureAYEntityTypesRegistered();
+    // S3.10: also ensure the primitive types (int / float / bool /
+    // double / int64 / their PascalCase aliases) are registered so
+    // the analyzer's `resolveTypeName` can stamp `resolvedType` on
+    // `self.<primitiveField>` MemberExpr leaves. Without this, the
+    // codegen rewrite `self.field = X → ayt_reflect_set_field(...)`
+    // is skipped (the helper guards on resolvedType->getFieldCount()
+    // == 0, which can't be evaluated on null). Idempotent.
+    ensurePrimitiveTypesRegistered();
 }
 
 SemanticAnalyzer::~SemanticAnalyzer() = default;

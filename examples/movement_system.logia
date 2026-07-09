@@ -1,11 +1,20 @@
-// movement_system.logia — example for AYScript S3.1 (LG-04) System host.
+// movement_system.logia — example for AYScript S3.1 (LG-04) System host
+// + S3.10 (LG-05 cross-host usertype binding).
 //
 // A minimal `script MovementSystem { on_update() { ... } }` that
-// increments a tick counter and (when self usertype binding lands in
-// S3.x) would read C++ fields via `self.moveSpeed`. The script's name
-// matches a C++ ISystem subclass registered with AY_SYSTEM, so the
-// ScriptSubSystem per-tick dispatcher invokes its `on_update` once per
-// tick.
+// increments a tick counter and reads/writes the host's `moveSpeed`
+// AY_PROPERTY field via the S3.10 codegen rewrite:
+//   self.moveSpeed += dt
+// lowers to:
+//   ayt_reflect_get_field(self, "MovementSystem", "moveSpeed")
+//   → ayt_reflect_set_field(self, "MovementSystem", "moveSpeed", ...)
+// which the bridge routes through AYReflect's offset-based read/write.
+//
+// The script's name matches a C++ ISystem subclass registered with
+// AY_SYSTEM, so the ScriptSubSystem per-tick dispatcher invokes its
+// `on_update` once per tick. `self` is the ISystem* lightuserdata;
+// the AYReflect call sees it as `void*` (the bridge doesn't care
+// about the C++ type, only that the field's offset resolves).
 
 script MovementSystem {
     var tick_counter: int = 0
@@ -14,12 +23,10 @@ script MovementSystem {
         tick_counter = 0
     }
 
-    on_update() {
+    on_update(dt: float) {
         tick_counter = tick_counter + 1
-        // S3.1 caveat: `self` is a lightuserdata opaque to Lua until
-        // S3.x wires sol2::usertype. Reads/writes compile and pass
-        // semantic checks (AY_PROPERTY field is registered), but the
-        // runtime field access is no-op until usertype binding lands.
-        self.moveSpeed = self.moveSpeed + 0.0
+        // S3.10: this now reads + writes the C++ MovementSystem::moveSpeed
+        // field through the AYReflect offset. No more usertype caveat.
+        self.moveSpeed = self.moveSpeed + dt
     }
 }

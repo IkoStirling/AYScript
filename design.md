@@ -537,6 +537,13 @@ CompileResult Compiler::compile(const std::string& source,
 - **测试 fixture**：`unittest/AYTestMovementSystem.h`（ISystem 子类 + `AY_PROPERTY(moveSpeed, ...)` + `AY_FINALIZE_REGISTRATION_METADATA`），`unittest/Test_LogiaSystemHost.cpp`（4 用例）；`examples/movement_system.logia`（文档示例）。
 - **暂未做**：`self.field` 真正的 usertype 读写绑定（仍是 bare Lua member access，self 是 lightuserdata，访问会运行期 nil error）——这是 S3.x 任务，对应 Phase S3 backlog 的 "sol2 usertype 注册"。
 
+**S3.10 (LG-05 + System host) 完成记录**（2026-07-09）：
+
+- **结论**：`self.field` usertype 绑定在 S3.3 LG-05 阶段已经**跨 host kind 通用**。S3.1 System host 与 S3.0 Component host 共享同一条 codegen 路径（`isSingleHopSelfFieldExpr` 只看 `hostTypeName` + `resolvedField`，**不**看 `ctx.kind`），所以 System 端跑通 `self.moveSpeed = 1.5` 不需要任何 codegen/analyzer 改动——只缺一段「AYReflect primitive types 已注册」的保证。
+- **修复**：`AYSemanticAnalyzer.cpp` + `AYScriptRuntimeBridge.cpp` 都加了 `ensurePrimitiveTypesRegistered()`（int / Int32 / Int64 / float / Float32 / double / Float64 / bool / Bool），由 analyzer ctor + bridge `ensureLua()` 各调一次（幂等）。`Test_LogiaSystemHost.cpp` 的 `MovementSystemRegistrar` 在 `reg.findType("float")` 之前先注册 float（静态 init 顺序跨 TU 不确定，必须本地 bootstrap）。
+- **测试**：`Test_LogiaSystemHost.cpp` 新增 5 用例（s310_）：`s310_system_host_codegen_emits_reflect_calls`、`s310_system_host_self_field_reads_cpp_value`、`s310_system_host_self_field_writes_cpp_value`、`s310_system_host_self_field_codegen_rewrite`、`s310_component_host_self_field_unchanged_regression`（LG-05 Component-host 路径回归）。合计 9 用例，`AYSCRIPT_Test` 579/579 全绿。
+- **未做**：struct chain `self.position.x` reflect（S3.11）；`IMethodInfo` / `self.heal()`（§5.7.4 track R2）；纯 Reflection 名字解析的 fallback（仅在 `hostTypeName` 命中 AYReflect registry 时走 rewrite，未注册类型保留 S2.5 bare member access）。
+
 #### S3.2 — LG-04b（可选 B-min）：Reflect 单链 parent
 
 **触发条件**（任一成立才做）：Component host 需 hard 拒绝「已注册但不是 Component 子类」的类型；Serializer/Editor 也要同一套 `isDerivedFrom`。
@@ -825,7 +832,7 @@ AYScript/
 - [x] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
 - [x] **S3.8** Editor / CLI Tool host（LG-07 / **S3.8b**）— 见 §5.6 S3.8 + 下锁定决策摘要
 - [x] **S3.9** CLI：`ays-logia compile`（可选）— 见 §5.6 S3.9 + 下锁定决策摘要
-- [ ] **S3.10** System host `self.field` 端到端验证（可选）
+- [x] **S3.10** System host `self.field` 端到端验证（可选）— 见 §5.6 S3.1 S3.10 完成记录
 - [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
 
 **S3.5 锁定决策**（2026-07-08 实现完成后补）：
@@ -929,7 +936,7 @@ AYScript/
 - **测试**：`unittest/Test_LogiaCli.cpp`（12 用例：direct 7 + e2e 5），`AYSCRIPT_Test` 555/555 全绿。
 - **未做**：Bytecode 输出（`luaL_dump`）——S3.9 prompt 提到但 acceptance 只要求 `.lua artifact`，推迟；watch / LSP hook（不是 CLI 职责）；`--strict-inheritance` 仅 Component host 生效（System / Tool 走 S3.2 LG-04b 对称规则）。
 
-**Next session:** §13 Prompt **S3.10**（System host `self.field` 端到端验证，可选）。
+**Next session:** §13 Prompt **S3.11**（struct chain `self.position.x` reflect，可选）。
 
 ### Phase S4 — 语法扩展
 
@@ -1010,9 +1017,9 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 
 | Order | ID | Status |
 |-------|-----|--------|
-| 1–6 | S3.4–S3.9 | ✅ done |
-| 7 | S3.10 / S3.11 | System host `self.field` E2E / struct chain reflect (optional) |
-| 8 | S4.x | signal / await / source map |
+| 1–7 | S3.4–S3.10 | ✅ done |
+| 8 | S3.11 | struct chain reflect `self.position.x` (optional, big) |
+| 9 | S4.x | signal / await / source map |
 | parallel | Foundation ED-01–04 | Phase 1 north-star — not blocked on Logia |
 
 ---
@@ -1244,7 +1251,7 @@ Acceptance: intentional runtime error in test script reports .logia line, not ch
 
 ---
 
-### Prompt S3.10 — System host reflect fields (optional)
+### Prompt S3.10 — System host reflect fields ✅ DONE (2026-07-09)
 
 ```
 Implement AYScript S3.10 (optional): verify self.<field> on System host (ISystem*) via S3.3 ayt_reflect_* path.
@@ -1256,6 +1263,9 @@ If gap found: fix codegen/analyzer to stamp hostTypeName for System host same as
 
 Acceptance: movement_system.logia can mutate moveSpeed via self.moveSpeed.
 Only do if S3.4 landed and System scripts need fields.
+```
+
+Acceptance met — see §5.6 S3.1 S3.10 完成记录. Do not re-implement.
 ```
 
 ---

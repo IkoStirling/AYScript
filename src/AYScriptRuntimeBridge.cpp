@@ -117,6 +117,48 @@ public:
 
 MockInputProvider g_defaultInputProvider;
 
+// ------------------------------------------------------------
+// S3.10 — AYReflect primitive type registration.
+//
+// The codegen rewrite for `self.<primitiveField>` and the bridge's
+// `pushFieldPrimitive` both gate on the field's stored ITypeInfo*
+// (not just its name). Built-in primitives (int, float, bool, ...)
+// aren't registered by AYReflect's static-init macros — consumers
+// are expected to register them somewhere. AYScript registers them
+// here so any host (Component, System, Tool) that emits
+// `ayt_reflect_get_field(self, "<Type>", "<primitiveField>")` finds
+// a non-null ITypeInfo and the bridge can `lua_pushnumber` the right
+// primitive type. Idempotent (findType() guard) so multiple bridge
+// instances don't double-register.
+// ------------------------------------------------------------
+
+template <typename T>
+void registerPrimitiveIfMissing(const char* name)
+{
+    using ayt::reflect::TypeRegistryImpl;
+    auto& reg = TypeRegistryImpl::instance();
+    if (reg.findType(name) != nullptr) return;
+    auto* info = new ayt::reflect::TypeInfoImpl<T>(
+        name,
+        ayt::reflect::detail::defaultCreate<T>,
+        ayt::reflect::detail::defaultDestroy<T>,
+        ayt::reflect::detail::defaultCopy<T>);
+    reg.registerTypeInfo(name, info);
+}
+
+void ensureBuiltinTypesRegistered()
+{
+    registerPrimitiveIfMissing<int32_t>("int");
+    registerPrimitiveIfMissing<int32_t>("Int32");
+    registerPrimitiveIfMissing<int64_t>("Int64");
+    registerPrimitiveIfMissing<float>("float");
+    registerPrimitiveIfMissing<float>("Float32");
+    registerPrimitiveIfMissing<double>("double");
+    registerPrimitiveIfMissing<double>("Float64");
+    registerPrimitiveIfMissing<bool>("bool");
+    registerPrimitiveIfMissing<bool>("Bool");
+}
+
 } // namespace
 
 // ------------------------------------------------------------
@@ -340,6 +382,11 @@ struct LogiaRuntimeBridge::Impl {
             sol::lib::table,
             sol::lib::math,
             sol::lib::utf8);
+        // S3.10: register int/float/bool/... so any host (Component,
+        // System, Tool) emitting ayt_reflect_*_field calls finds
+        // a non-null ITypeInfo for the field. Idempotent across
+        // multiple ensureLua() invocations (findType guard inside).
+        ensureBuiltinTypesRegistered();
         registerEngineApi();
         _luaLive = true;
     }
