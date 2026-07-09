@@ -824,7 +824,7 @@ AYScript/
 - [x] **S3.7a** 热重载 API（LG-06b part A，pure memory）— 见下锁定决策
 - [x] **S3.7b** 热重载 FileWatcher 集成（LG-06b part B）— 见下锁定决策
 - [x] **S3.8** Editor / CLI Tool host（LG-07 / **S3.8b**）— 见 §5.6 S3.8 + 下锁定决策摘要
-- [ ] **S3.9** CLI：`ays-logia compile`（可选）
+- [x] **S3.9** CLI：`ays-logia compile`（可选）— 见 §5.6 S3.9 + 下锁定决策摘要
 - [ ] **S3.10** System host `self.field` 端到端验证（可选）
 - [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
 
@@ -915,7 +915,21 @@ AYScript/
   - Tool hot reload（one-shot 不需要）。
   - `examples/build_tool.logia`（可选）。
 
-**Next session:** §13 Prompt **S3.9**（CLI `ays-logia compile`）。
+**S3.9 锁定决策**（2026-07-09 实现完成后补）：
+
+- **范围**：CLI 驱动 Logia compile pipeline，离线校验 + 编辑器 build 动作；**不进** Editor critical path（Editor 走 in-process bridge，跟 S3.8b 的 `runTool` 共用）。
+- **结构**：`cli/CliCompile.{h,cpp}`（共享编译入口，单元测试不走 fork）+ `cli/main.cpp`（argv 解析 / 输出 / exit code）+ `cli/CMakeLists.txt`（仅 link AYScript，**不**链 sol2/Lua runtime）。
+- **API**：`ays-logia compile <file> [--host component|system|tool] [--strict-inheritance] [-o out.lua]`。不声明 `--host` 默认 `Component`（与 `defaultLogiaHostContext()` 对齐）；`--host tool` 隐式设 `expectSelf=false`。
+- **诊断格式**：`path:line:col: severity: message`（severity ∈ `error` / `warning` / `note`）；`note:` 是 hint 行的 tag。stderr 输出，grep-friendly。warnings 不 flip exit code。
+- **Exit codes**：0 = success（含 warnings）；1 = compile / 写盘错误；2 = bad usage（未知 flag、缺 subcommand、缺 `<file>`）。
+- **CLI 校验顺序**：`<file>` 位置参数**先**校验（以 `-` 开头且非 `-h/--help` 一律按 unknown flag 处理，exit 2），再扫剩余 argv。理由：避免 `compile --typo` 静默退化成 "could not open file '--typo'"，给 CI / editor 更精准的 signal。
+- **Parser 错误投影**：`Compiler::compile` 现在把 parser 错误也写入 `CompileResult::diagnostics`（旧路径只写 `errors` 旧结构）。CLI 单次 `for (d : diagnostics)` 就能打印所有 parser + semantic + codegen failure。
+- **End-to-end 测试**：Win32 `CreateProcess` + `CreatePipe` 捕获 stdout/stderr，`GetExitCodeProcess` 读真 exit code（绕过 cmd.exe 把 inner exit code 屏蔽成 0 的坑）。直接用 `compileFromCli()` 的 unit test 覆盖快路径；e2e fork 路径覆盖 argv + 输出 + exit code。
+- **Acceptance**：`ays-logia compile examples/player_controller.logia` 打印 warnings on stderr + 写 Lua artifact on stdout，exit 0；坏 source 打印 3 个 `file:line:col: error:` 行 + exit 1；`compile --no-such-flag` 打印 Usage + exit 2。
+- **测试**：`unittest/Test_LogiaCli.cpp`（12 用例：direct 7 + e2e 5），`AYSCRIPT_Test` 555/555 全绿。
+- **未做**：Bytecode 输出（`luaL_dump`）——S3.9 prompt 提到但 acceptance 只要求 `.lua artifact`，推迟；watch / LSP hook（不是 CLI 职责）；`--strict-inheritance` 仅 Component host 生效（System / Tool 走 S3.2 LG-04b 对称规则）。
+
+**Next session:** §13 Prompt **S3.10**（System host `self.field` 端到端验证，可选）。
 
 ### Phase S4 — 语法扩展
 
@@ -973,6 +987,7 @@ AYScript/
 | 2026-07-08 | **S3.7b 完成（LG-06b part B）**：`ScriptSubSystem` + `AYScriptHotReload.cpp` 接 `ayt::io::FileWatcher`（AYIO PRIVATE link）。`setHotReloadEnabled` / `watchScriptPath` / `unwatchScriptPath` / `bindAndLoadFromFile` / `hotReloadApplyCount`；`update`/`fixedUpdate` 最前 `pollAndApplyReloads`（100ms debounce）；`shutdown()` 与 `~ScriptSubSystem()` 先 `stopHotReload()`。`unittest/Test_LogiaHotReloadWatcher.cpp`（5 用例）。 |
 | 2026-07-08 | **S3.8-min（LG-07 中间版，已取代）**：Tool host policy 仅用 `on_start` 入口 + `defaultLogiaHostContext()`；12 用例。同日 **S3.8b** 交付完整 LG-07。 |
 | 2026-07-08 | **S3.8b 完成（LG-07）**：`run` lifecycle 关键字；`toolLogiaHostContext()`（`expectSelf=false`）；Tool semantic 白名单 + 非 Tool 上 `run()` 对称警告；codegen `function M.run()`；`LogiaRuntimeBridge::runTool()`；`compileLogiaToLua` 转发 `hostContext`；`kLogiaPipelineVersion=2`。`unittest/Test_LogiaToolHost.cpp`（19 用例）。`compileLogiaToLua` heap pipeline + `LogiaTestHelpers.h`（MSVC /GS stack 防护）。 |
+| 2026-07-09 | **S3.9 完成（CLI `ays-logia compile`）**：`cli/CliCompile.{h,cpp}` 共享编译入口 + `cli/main.cpp`（argv / 输出 / exit code）+ `cli/CMakeLists.txt`（只 link AYScript，不链 sol2/Lua runtime）；`Compiler::compile` 把 parser errors 投影进 `diagnostics` 让 CLI 单次迭代覆盖全诊断；Win32 `CreateProcess` + `CreatePipe` e2e 测试（绕 cmd.exe exit code 屏蔽）；`unittest/Test_LogiaCli.cpp` 12 用例；`AYSCRIPT_Test` 555/555 全绿。CLI **不进** Editor critical path（Editor 仍走 S3.8b `runTool` in-process）。 |
 
 ---
 
@@ -987,7 +1002,7 @@ AYScript/
 
 ## 13. Session prompts (copy-paste) — post S3.3
 
-**Done through S3.8b:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · **S3.8b LG-07** (`run` + `runTool` + `toolLogiaHostContext`).
+**Done through S3.9:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · **S3.9 CLI** (`ays-logia compile`).
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 
@@ -995,9 +1010,9 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 
 | Order | ID | Status |
 |-------|-----|--------|
-| 1–5 | S3.4–S3.8b | ✅ done |
-| **6** | **S3.9** | CLI `ays-logia compile` (optional) — **next** |
-| 7 | S4.x | signal / await / source map |
+| 1–6 | S3.4–S3.9 | ✅ done |
+| 7 | S3.10 / S3.11 | System host `self.field` E2E / struct chain reflect (optional) |
+| 8 | S4.x | signal / await / source map |
 | parallel | Foundation ED-01–04 | Phase 1 north-star — not blocked on Logia |
 
 ---
@@ -1158,7 +1173,7 @@ Delivered as **S3.8b**: `run()` keyword, `toolLogiaHostContext()`, `expectSelf` 
 
 ---
 
-### Prompt S3.9 — CLI ays-logia compile (optional) ← **NEXT**
+### Prompt S3.9 — CLI ays-logia compile ✅ DONE (2026-07-09)
 
 ```
 Implement AYScript S3.9: optional CLI `ays-logia compile` for CI/editor.
@@ -1183,6 +1198,8 @@ Acceptance:
 - `ays-logia compile examples/player_controller.logia` → writes valid Lua or prints errors.
 - `ays-logia compile tool.logia --host tool` → output contains `function M.run()` (no self).
 - `ays-logia compile bad.logia` → exit 1, non-empty stderr.
+
+Acceptance met — see §5.6 S3.9 锁定决策摘要. Do not re-implement.
 ```
 
 ---
