@@ -17,6 +17,7 @@ namespace ayt::reflect
 {
 class ITypeInfo;
 class IFieldInfo;
+class IMethodInfo;
 } // namespace ayt::reflect
 
 namespace ayt::script::logia
@@ -51,6 +52,16 @@ public:
     // includes here).
     const ayt::reflect::ITypeInfo*   resolvedType  = nullptr;
     const ayt::reflect::IFieldInfo*  resolvedField = nullptr;
+    // S3.12 (track R2 §5.7.4): set on CallExpr when the callee is
+    // `self.method(...)` (i.e. MemberExpr on self) and the analyzer
+    // resolved `method` to a registered IMethodInfo*. Codegen reads
+    // this to emit `ayt_reflect_call_method(self, "<Type>", "<m>")`
+    // instead of bare Lua dispatch.
+    const ayt::reflect::IMethodInfo* resolvedMethod = nullptr;
+    // Owning type name for the resolved method (the AYReflect
+    // registry name of `self`). Codegen embeds this as the second
+    // stack arg. nullptr when unresolved.
+    const char*                      resolvedMethodOwnerName = nullptr;
     const void*                      resolvedDecl  = nullptr;
 };
 

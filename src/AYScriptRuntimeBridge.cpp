@@ -219,6 +219,47 @@ const ayt::reflect::IFieldInfo* lookupField(const std::string& typeName,
     return field;
 }
 
+// =====================================================================
+// S3.12 / track R2 §5.7.4 — method-call reflect lookup
+// =====================================================================
+// Mirrors the field cache shape. The bridge holds (typeName, methodName)
+// keys against a global IMethodInfo* registry. The cache is per-process
+// (function-local static); the AYScript runtime's lifetime is the
+// program's, so the map is also program-lifetime.
+struct MethodKey {
+    std::string typeName;
+    std::string methodName;
+    bool operator==(const MethodKey& o) const {
+        return typeName == o.typeName && methodName == o.methodName;
+    }
+};
+struct MethodKeyHash {
+    size_t operator()(const MethodKey& k) const {
+        return std::hash<std::string>{}(k.typeName) ^
+               (std::hash<std::string>{}(k.methodName) << 1);
+    }
+};
+std::unordered_map<MethodKey, const ayt::reflect::IMethodInfo*, MethodKeyHash>& methodCache()
+{
+    static std::unordered_map<MethodKey, const ayt::reflect::IMethodInfo*, MethodKeyHash> c;
+    return c;
+}
+
+const ayt::reflect::IMethodInfo* lookupMethod(const std::string& typeName,
+                                              const std::string& methodName)
+{
+    MethodKey k{typeName, methodName};
+    auto& cache = methodCache();
+    auto it = cache.find(k);
+    if (it != cache.end()) return it->second;
+    auto* typeInfo = ayt::reflect::TypeRegistryImpl::instance().findType(typeName.c_str());
+    if (!typeInfo) return nullptr;
+    auto* method = typeInfo->findMethod(methodName.c_str());
+    if (!method) return nullptr;
+    cache[k] = method;
+    return method;
+}
+
 // Push a primitive (int/float/bool/double/int64) onto the Lua
 // stack from a `void*` field pointer. Caller is responsible for
 // the type tag — returns 1 on success, 0 on miss. Used only by
@@ -473,6 +514,128 @@ int ayt_reflect_set_field_chain_c(lua_State* L)
     return 0;
 }
 
+// =====================================================================
+// S3.12 (track R2 §5.7.4) — self.method(args) reflect call bridge
+// =====================================================================
+// Lua args:
+//   arg 1          self:lightuserdata (the C++ host pointer)
+//   arg 2          typeName:string ("<Type>" — AYReflect registry name)
+//   arg 3          methodName:string
+//   arg 4..N       zero or more primitive args
+//
+// Returns:
+//   - For void methods: nothing on the stack (return value 0).
+//   - For primitive-return methods: pushes one Lua value (int/float/
+//     bool/double/int64) and returns 1.
+//
+// Errors:
+//   - If the method is unknown or arg count mismatches, pushes nil
+//     and returns 1 (fails closed — Logia scripts do not crash on
+//     reflection miss; the analyzer would have caught the unknown
+//     name earlier in compile-time reflection).
+//
+// Argument / return type tags recognized (mirrors pushFieldPrimitive
+// dispatch in §S3.10 — see above): "int"/"Int32", "float"/"Float32",
+// "bool"/"Bool", "double"/"Float64", "Int64".
+int ayt_reflect_call_method_c(lua_State* L)
+{
+    int nargs = lua_gettop(L);
+    if (nargs < 3 || !lua_islightuserdata(L, 1) || !lua_isstring(L, 2) || !lua_isstring(L, 3)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    void* selfPtr = lua_touserdata(L, 1);
+    std::string typeName   = lua_tostring(L, 2);
+    std::string methodName = lua_tostring(L, 3);
+
+    auto* method = lookupMethod(typeName, methodName);
+    if (!method || selfPtr == nullptr) {
+        ayt::log::error("ayt_reflect_call_method: %s.%s (no method or null self)",
+                        typeName.c_str(), methodName.c_str());
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const size_t expected = method->getParamCount();
+    int got = nargs - 3;
+    if (static_cast<size_t>(got) != expected) {
+        ayt::log::error("ayt_reflect_call_method: %s.%s (arg count mismatch: expected %zu, got %d)",
+                        typeName.c_str(), methodName.c_str(), expected, got);
+        lua_pushnil(L);
+        return 1;
+    }
+
+    // Allocate per-arg slots, populate from Lua stack by type tag.
+    // All slots are 8 bytes (max of all supported primitives) so the
+    // raw memcpy paths inside MethodInfoImpl<T,Ret,Args...>::readArg
+    // can read the full sizeof(ArgT) for any of int/Int32/float/
+    // Float32/bool/Bool/double/Float64/Int64.
+    std::vector<uint64_t> argSlots(expected, 0);
+    std::vector<const void*> argPtrs(expected, nullptr);
+    for (size_t i = 0; i < expected; ++i) {
+        int stackIdx = static_cast<int>(i) + 4;
+        auto* paramType = method->getParamType(i);
+        const char* tname = paramType ? paramType->getName() : "int";
+        argPtrs[i] = &argSlots[i];
+        auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
+        if (eq("int") || eq("Int32")) {
+            int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+            std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+        } else if (eq("float") || eq("Float32")) {
+            float v = static_cast<float>(lua_tonumber(L, stackIdx));
+            std::memcpy(&argSlots[i], &v, sizeof(float));
+        } else if (eq("bool") || eq("Bool")) {
+            uint8_t v = lua_toboolean(L, stackIdx) ? 1u : 0u;
+            std::memcpy(&argSlots[i], &v, sizeof(uint8_t));
+        } else if (eq("double") || eq("Float64")) {
+            double v = lua_tonumber(L, stackIdx);
+            std::memcpy(&argSlots[i], &v, sizeof(double));
+        } else if (eq("Int64")) {
+            int64_t v = static_cast<int64_t>(lua_tointeger(L, stackIdx));
+            std::memcpy(&argSlots[i], &v, sizeof(int64_t));
+        } else {
+            // Unknown type tag — treat as int. (Analyzer should have
+            // caught non-primitive args at compile time.)
+            int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+            std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+        }
+    }
+
+    const void* retPtr = method->invoke(selfPtr, argPtrs.data());
+    auto* retType = method->getReturnType();
+    if (!retType || retPtr == nullptr) {
+        // void method
+        return 0;
+    }
+
+    // Push the return value onto the Lua stack using the same dispatch
+    // as pushFieldPrimitive. The retPtr points into a thread-local
+    // buffer owned by MethodInfoImpl — valid until the next invoke()
+    // call, which is fine because the bridge copies the bytes into
+    // a Lua primitive before any further script execution.
+    const char* tname = retType->getName();
+    auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
+    if (eq("int") || eq("Int32")) {
+        int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
+        lua_pushinteger(L, static_cast<lua_Integer>(v));
+    } else if (eq("float") || eq("Float32")) {
+        float v = 0.0f; std::memcpy(&v, retPtr, sizeof(float));
+        lua_pushnumber(L, static_cast<lua_Number>(v));
+    } else if (eq("bool") || eq("Bool")) {
+        bool v = false; std::memcpy(&v, retPtr, sizeof(bool));
+        lua_pushboolean(L, v);
+    } else if (eq("double") || eq("Float64")) {
+        double v = 0.0; std::memcpy(&v, retPtr, sizeof(double));
+        lua_pushnumber(L, static_cast<lua_Number>(v));
+    } else if (eq("Int64")) {
+        int64_t v = 0; std::memcpy(&v, retPtr, sizeof(int64_t));
+        lua_pushinteger(L, static_cast<lua_Integer>(v));
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 // ------------------------------------------------------------
 // Impl
 // ------------------------------------------------------------
@@ -612,6 +775,11 @@ struct LogiaRuntimeBridge::Impl {
                      &ayt_reflect_get_field_chain_c);
         lua_register(lua, "ayt_reflect_set_field_chain",
                      &ayt_reflect_set_field_chain_c);
+        // S3.12 (track R2 §5.7.4): method-call reflect path. Stack
+        // signature (self, typeName, methodName, args...). Returns
+        // 0 for void methods or 1 with the return value pushed.
+        lua_register(lua, "ayt_reflect_call_method",
+                     &ayt_reflect_call_method_c);
 
         // Test-only witness: scripts can assign a string here to make
         // observable side effects for unit tests. Production code

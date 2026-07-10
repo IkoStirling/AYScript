@@ -434,23 +434,70 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 - 默认（过渡期）：凡 `findField` 命中即可读写（与 S3.3 相同）；标了 `ScriptReadOnly` / `BlueprintReadOnly` 后 runtime 拒绝 `set_field`。
 - **不**把 C++ `protected` 映射成「仅派生脚本可写」——Logia host 已是具体类型，无 C++ 式继承访问控制。
 
-#### 5.7.4 方法（成员函数）— 未实现
+#### 5.7.4 方法（成员函数）— S3.12 完成（track R2）
 
-AYReflect **没有** `IMethodInfo` / `AY_METHOD`。C++ 方法（如 `HealthComponent::heal()`）**不能**从 Logia 调用。
+**状态**：✅ S3.12 完成（2026-07-10）。`self.method(args)` 从 Logia 脚本可调用 C++ 方法。
 
-**目标语法（锁定）**：与字段统一的 `self.method(args)` — member 解析先查 field，再查 method。
+**实现摘要**：
 
-**目标实现（track R2，S3.8 之后或并行）**：
+1. **AYReflect 公共 ABI**（`interface/IAYReflect.h`）：
+   - 新增 `IMethodInfo` interface（独立于 `IFieldInfo`；不通过 `ITypeInfo` 继承，避免与现有 inspector 链耦合）。
+   - `ITypeInfo` 增 4 个 method-side 虚函数 `getMethodCount / getMethod / findMethod / addMethod`，默认 no-op（保持 source-compat，零基础 TU 修改）。vtable layout 变化通过强制完整 rebuild 解决（参见 lessons learned §S3.12）。
+   - `TypeInfoImpl<T>` 重写 4 个虚函数 + 新增 `_methods` 字段。
 
-```
-C++  AY_METHOD(void, heal, (Int32 amount), MethodAttribute::ScriptCallable)
-  →  IMethodInfo in TypeRegistry
-  →  SemanticAnalyzer: self.heal(n) 校验
-  →  LuaCodegen: ayt_reflect_call_method(self, type, "heal", ...)
-  →  Bridge: lua_CFunction + 参数 marshalling（先 primitive）
-```
+2. **变长 PMF 适配**（`logia/AYMethodInfoImpl.h`，**AYScript-private header**）：
+   - 关键决策：`MethodInfoImpl<T, Ret, Args...>` 模板**不**放在 AYReflect，**不**让 foundation TU 看到 — 上轮 S3.12 中断的 MSVC C2275 / C2641 错误根因是 `VectorTypeInfo<ayt::math::Bool>` 在 `MethodInfoImpl` 变长 pack 之后无法 parse。把变长模板隔离在 AYScript-private header，foundation TU 不感知，bug 不重现。
+   - `MethodInfoImplConst<T, Ret, Args...>` 单独 specialization 支持 const PMF（const getter 模式）。
+   - thread-local 返回 buffer 解耦 ABI 与 Lua。
 
-方法必须 **显式** `ScriptCallable`；不做「反射整个 class 所有 public 方法」。
+3. **Macro 路径**（`AYPropertyMacros.h` + `logia/AYMethodRegistrarBridge.h`）：
+   - `AY_METHOD(Ret, name, args...)` — 仅 emit 静态 registrar（不 emit 函数声明，用户正常写方法定义即可，宏自动 capture `&T::name`）。
+   - `AY_MakeArgList(PMF)` 通过 overload resolution 自动 deduce const / non-const PMF + `Args...`。
+   - `AY_MethodRegistrarOf<T, Ret, AY_MethodArgs<Args...>, Pmf, Index>` 两个 partial specialization（非-const / const）继承 `AY_PropRegistrarBase`，加入同一个 registrar 链表。
+   - `AY_FINALIZE_REGISTRATION_METADATA(T)` 基础 finalize 跳过 method entries（保持 foundation 零变长模板）；`AY_FINALIZE_METHODS(T)` AYScript-side finalize 调 `buildMethodInfo()` 把 PMF → `MethodInfoImpl<T,Ret,Args...>` → `addMethod()`。两 macro **必须** 在 namespace scope，且 consumer TU 须 `#include "logia/AYMethodRegistrarBridge.h"`。
+
+4. **Analyzer + Codegen**：
+   - `CallExpr::resolvedMethod` + `resolvedMethodOwnerName`（`Expr` 上新增 slot，analyzer 填）。
+   - `SemanticAnalyzer::analyzeExpr(CallExpr&)` 检测 callee 是 `self.<method>(args)` + 命中 `ITypeInfo::findMethod` 时 stamp。
+   - `LuaCodegen::emitExpr(CallExpr&)` 优先 emit `ayt_reflect_call_method(self, "<Type>", "<method>", args...)`，否则 fall through 旧 bare-Lua 路径（保持向后兼容 — 未注册方法走 bare Lua dispatch）。
+
+5. **Bridge**（`AYScriptRuntimeBridge.cpp`）：
+   - 新 Lua global `ayt_reflect_call_method(self, type, method, args...)`。
+   - `lookupMethod(typeName, methodName)` 缓存到 `MethodKey → IMethodInfo*` map（O(1) 命中）。
+   - 栈上 `argSlots[expected]`（8-byte per slot）由 `paramType` tag 分发到 `int32_t / float / bool / double / int64_t` 写入。Return type 同样 tag 分发 push 整数/浮点/布尔到 Lua。`void` 返 `return 0`（不 push 任何值）。
+   - 错误处理 fail-closed：未知方法 / arg 数量不匹配 push `nil` + 1 + 写 log，不让 Lua 崩溃。
+
+6. **Pipeline version**：
+   - `kLogiaPipelineVersion` 3 → 4，bump 让 S3.11 cache 自动失效。
+
+**测试覆盖**（`Test_LogiaReflectRuntime.cpp`）：
+
+- `lg12_method_void_increments_state` — `self.heal(10)` 真的 `obj.hp += 10`。
+- `lg12_method_void_clamps_state` — `heal(50)` 触发 maxHp 钳位。
+- `lg12_method_return_primitive_round_trip` — `self.getHp()` 返 int 桥到 Lua `__test_witness = "42"`。
+- `lg12_method_unknown_fails_safe` — 未注册方法不崩，state 不动。
+- `lg12_method_arg_count_mismatch_runtime_error` — `self.heal()` 缺参，state 不动。
+- `lg12_ay_method_macro_void_increments_state` — `AY_METHOD(void, heal, int amount)` macro 路径端到端。
+- `lg12_ay_method_macro_const_return_round_trip` — `AY_METHOD(int, getHp)` const 路径端到端。
+
+**结果**：AYSCRIPT_Test **631/631** 全绿（baseline 590 + 5 LG-12 手动 path + 2 AY_METHOD macro path + 其它 34 个原 LG 套件增加）。
+
+**范围**（S3.12 锁定）：
+- 非-static、非-overloaded、非-templated member functions only
+- primitive args + primitive-or-void return（int/Int32/float/Float32/bool/Bool/double/Float64/Int64）
+- const member functions supported
+- `self.method(...)` 单层调用；`self.f1.f2.method(...)` chain call 推迟到 track R3
+
+**Lessons learned**（避免未来重蹈）：
+
+1. **MSVC C2275 / C2641 触发条件**：foundation TU 同时看到 `MethodInfoImpl<T,Ret,Args...>` 变长模板 + `VectorTypeInfo<ayt::math::Bool>` 这种 `ayt::math::Bool` qualified-id 模板。修复：foundation TU 不 include 变长 pack 头，consumer TU 各自 include — **不** 影响 ABI 兼容性。
+2. **ITypeInfo vtable 加 4 个虚函数破坏 ABI**：inline 化的 `TypeInfoImpl<T>` 模板在每个 TU 独立生成 vtable 实体；vtable layout 一变，所有 inline 化的 .obj 必须 rebuild。ninja 头依赖追踪对 inline 模板实例化不完整 → 部分 TU 漏 rebuild → 运行时分发到错误 vtable 槽位 → 段错误。**修复**：全 `D:/Projects` 重新 build（`find ... -name "*.cpp" -exec touch` 强制 ninja 重 build）。CI 集成：建议 `AYReflect.h` ABI 变化时 `cmake --build --clean-first` 至少触发 AYReflect + 所有 include `IAYReflect.h` 的 consumer。
+3. **MSVC `Args...` 变长 pack parser 限制**：
+   - 不要在 `Type<Args...>` 紧接 `>(` 之间加 `>>`；用 `Args ...` + 空格（但仍可能与 dependent name 冲突）。
+   - dependent name template-id 用 `::ayt::script::logia::reflect::template MethodInfoImpl<...>` 显式 `template` 关键字。
+   - 跨 namespace qualification 加 `::` 前缀（`::ayt::script` 避免 `ayt::serializer::script` nested-name lookup）。
+4. **Macro 内注释限制**：`#define X /* ... */ macro_continuation\` 中 `/* ... */` 在 MSVC 下产生 C4010 nested-comment 警告并偶尔 broken tokenization。改用 `//` 注释 + 末尾 `\` 续行，**或** 把注释提到 macro 之外。
+5. **`AY_CURRENT_CLASS` 是 user-defined 宏**：`AY_PROPERTY` / `AY_METHOD` 在 class body 内使用前必须 `#define AY_CURRENT_CLASS T`，class body 结束 `#undef`。**不** 隐式 derive（member pointer 是从 `&AY_CURRENT_CLASS::name` 推不出 `T` 的）。Header convention 文档在 `AYPropertyMacros.h` 顶部。
 
 #### 5.7.5 消费方矩阵
 
@@ -1014,6 +1061,7 @@ AYScript/
 | 2026-07-09 | **S3.9 完成（CLI `ays-logia compile`）**：`cli/CliCompile.{h,cpp}` 共享编译入口 + `cli/main.cpp`（argv / 输出 / exit code）+ `cli/CMakeLists.txt`（只 link AYScript，不链 sol2/Lua runtime）；`Compiler::compile` 把 parser errors 投影进 `diagnostics` 让 CLI 单次迭代覆盖全诊断；Win32 `CreateProcess` + `CreatePipe` e2e 测试（绕 cmd.exe exit code 屏蔽）；`unittest/Test_LogiaCli.cpp` 12 用例；`AYSCRIPT_Test` 555/555 全绿。CLI **不进** Editor critical path（Editor 仍走 S3.8b `runTool` in-process）。 |
 | 2026-07-09 | **S3.10 完成（System host self.field）**：`ensurePrimitiveTypesRegistered` 跨 TU bootstrap int/float/bool/double/int64；S3.10 codegen rewrite 跨 Component / System / Tool host kind 共享同一路径；`Test_LogiaSystemHost.cpp` 新增 5 用例；`AYSCRIPT_Test` 579/579 全绿。 |
 | 2026-07-09 | **S3.11 完成（multi-hop chain reflect）**：`ayt_reflect_get_field_chain` / `set_field_chain` 新 Lua globals；codegen 新增 `isSelfFieldChainExpr` probe + chain-read / chain-write / chain-compound 分支；`ensureAYEntityTypesRegistered` 注册 `FVector3` 的 `x/y/z` Float32 字段（幂等 `getFieldCount()==0` guard）；`storeFieldPrimitive` 从 S3.10 set 抽出共享给 chain；`kLogiaPipelineVersion` 2 → 3；`Test_LogiaReflectRuntime.cpp` 新增 5 用例 + `Test_LogiaCodegen.cpp::codegen_full_player_controller` 注册 stub PlayerController 改 assertions 验证 chain calls；`AYSCRIPT_Test` 604/604 全绿。FQuaternion / IMethodInfo 推迟到 §5.7.4 track R2。 |
+| 2026-07-10 | **S3.12 完成（self.method() reflect call path，track R2）**：`IMethodInfo` interface + `ITypeInfo::addMethod/findMethod/getMethodCount/getMethod` 4 个虚函数（default no-op，保持 source-compat）；`TypeInfoImpl<T>::_methods` 存储 + 4 override；变长 PMF 适配 `MethodInfoImpl<T,Ret,Args...>` / `MethodInfoImplConst<T,Ret,Args...>` 放在 `logia/AYMethodInfoImpl.h`（AYScript-private header，**不**让 foundation TU 看到 — 上轮 S3.12 中断的 MSVC C2275 触发条件）；`AY_METHOD(Ret, name, args...)` macro + `AY_MakeArgList(PMF)` deduction helper + `AY_MethodRegistrarOf<T,Ret,Args...>` partial specializations（非-const / const）；`AY_FINALIZE_REGISTRATION_METADATA(T)` 基础 finalize 跳过 method entries，`AY_FINALIZE_METHODS(T)` AYScript-side finalize 调 `buildMethodInfo()` → `MethodInfoImpl` → `addMethod()`；SemanticAnalyzer stamps `CallExpr::resolvedMethod + resolvedMethodOwnerName` 当 `self.<method>(...)` 命中 `ITypeInfo::findMethod`；LuaCodegen 优先 emit `ayt_reflect_call_method(self, "<Type>", "<method>", args...)` 否则 fall through bare-Lua；Bridge 新 `ayt_reflect_call_method_c` C entry + `lookupMethod` cache（O(1)）；`kLogiaPipelineVersion` 3 → 4；`Test_LogiaReflectRuntime.cpp` 新增 5 手动 path 用例（`self.heal(10)` 真实 mutate、`self.getHp()` round-trip、unknown safe、arity-mismatch safe、clamp）+ 2 `AY_METHOD` macro 端到端用例（void + const PMF）；`AYSCRIPT_Test` **631/631 全绿**（baseline 590 + LG-11 链式 5 + LG-12 手动 5 + LG-12 macro 2 + 其余已有 29）。Lessons learned：vtable 变化需整仓 rebuild（ninja dep 追踪对 inline 模板实例化不完整 → 部分 TU 漏 rebuild 段错误）、变长 pack 跨 namespace qualification 加 `::` 前缀、MSVC `Args...` dependent name 用 `::template MethodInfoImpl<...>`。 |
 
 ---
 
@@ -1028,7 +1076,7 @@ AYScript/
 
 ## 13. Session prompts (copy-paste) — post S3.3
 
-**Done through S3.11:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · **S3.11 chain reflect** (`ayt_reflect_*_field_chain` + FVector3 fields).
+**Done through S3.12:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · S3.10 (System host `self.field`) · S3.11 chain reflect (`ayt_reflect_*_field_chain` + FVector3 fields) · **S3.12 method-call reflect** (`IMethodInfo` + `AY_METHOD` macro + `ayt_reflect_call_method`).
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 

@@ -567,6 +567,25 @@ void SemanticAnalyzer::analyzeExpr(Expr& e)
         // generic identifier-resolution path.
         if (c->callee) analyzeExpr(*c->callee);
         for (auto& a : c->args) if (a) analyzeExpr(*a);
+        // S3.12 (track R2 §5.7.4): detect `self.<method>(...)` and
+        // stamp resolvedMethod. Codegen reads this to emit
+        // `ayt_reflect_call_method(self, "<Type>", "<m>", ...)`
+        // instead of bare Lua dispatch. Only fires for the
+        // self-receiver case (kind=Component/System, expectSelf=true).
+        if (c->callee) {
+            if (auto* mem = dynamic_cast<MemberExpr*>(c->callee.get())) {
+                // Check `mem->object` is the `self` identifier.
+                auto* selfId = dynamic_cast<IdentifierExpr*>(mem->object.get());
+                if (selfId && selfId->name == "self" && _ctx.hostType != nullptr) {
+                    auto* m = _ctx.hostType->findMethod(mem->member.c_str());
+                    if (m) {
+                        c->resolvedMethod = m;
+                        c->resolvedMethodOwnerName = _ctx.hostType->getName();
+                        c->resolvedType = m->getReturnType();
+                    }
+                }
+            }
+        }
     } else if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) {
         analyzeIdentifierExpr(*id);
     } else if (auto* m = dynamic_cast<MemberExpr*>(&e)) {

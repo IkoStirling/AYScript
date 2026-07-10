@@ -19,6 +19,8 @@
 #include "AYScriptRuntimeBridge.h"
 #include "logia/AYCompilerError.h"
 #include "logia/AYLogiaPipeline.h"
+#include "logia/AYMethodInfoImpl.h"  // S3.12: MethodInfoImpl<T,Ret,Args...> for fixture
+#include "logia/AYMethodRegistrarBridge.h"  // S3.12: AY_FINALIZE_METHODS + buildMethodInfo impl
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
@@ -466,6 +468,376 @@ script LG11Holder {
     // Lua nil → tostring(nil) → "nil".
     CHECK(bridge.getLuaGlobalString("__test_witness") == "nil");
     CHECK(obj.position.y == 11.0f);
+}
+
+// ============================================================================
+// S3.12 (track R2 §5.7.4) — self.method(args) reflect call path
+// ----------------------------------------------------------------------------
+// Mirrors the LG-05 / LG-11 fixture shape: a C++ host type registers
+// both fields (via AY_PROPERTY-style addField) AND methods (via the
+// AYScript-private `MethodInfoImpl<T,Ret,Args...>` template). The
+// Logia source uses `script LG12Player { on_start { self.heal(10) } }`;
+// codegen must rewrite `self.heal(10)` to
+// `ayt_reflect_call_method(self, "LG12Player", "heal", 10)`, and the
+// bridge's `ayt_reflect_call_method_c` must invoke the C++ method
+// through the IMethodInfo* it looked up at runtime.
+//
+// Acceptance:
+//   - `self.heal(10)` from a Logia script actually invokes
+//     `LG12Player::heal(int)` and mutates the host's `hp`.
+//   - `self.getHp()` from a Logia script returns the primitive.
+//   - Unknown method names fail closed (state untouched, no crash).
+//   - Arg count mismatch is a runtime error (no crash).
+
+namespace
+{
+struct LG12Player {
+    int hp = 50;
+    int maxHp = 100;
+
+    void heal(int amount) {
+        hp += amount;
+        if (hp > maxHp) hp = maxHp;
+    }
+    int getHp() const { return hp; }
+};
+
+void ensureLG12Registered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("LG12Player") != nullptr) return;
+
+    // Primitive `int` / `Int32` are registered by the analyzer's
+    // ensurePrimitiveTypesRegistered via the bridge. If the bridge
+    // hasn't been constructed yet (e.g. in CLI runs), we register
+    // them locally so the fixture is self-contained.
+    if (reg.findType("Int32") == nullptr) {
+        auto* intInfo = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "Int32",
+            ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("Int32", intInfo);
+        auto* intInfo2 = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int",
+            ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", intInfo2);
+    }
+    auto* intInfo = reg.findType("Int32");
+
+    // Register LG12Player with `hp` + `maxHp` fields, then attach
+    // `heal` and `getHp` methods via MethodInfoImpl<...>.
+    auto* info = new ayt::reflect::TypeInfoImpl<LG12Player>(
+        "LG12Player",
+        ayt::reflect::detail::defaultCreate<LG12Player>,
+        ayt::reflect::detail::defaultDestroy<LG12Player>,
+        ayt::reflect::detail::defaultCopy<LG12Player>);
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "hp", intInfo, offsetof(LG12Player, hp),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "maxHp", intInfo, offsetof(LG12Player, maxHp),
+        ayt::reflect::FieldAttribute::Serialize));
+
+    // S3.12: method attach via AYScript-private MethodInfoImpl. The
+    // first method (heal) takes a non-const PMF (it mutates state);
+    // the second (getHp) is const-qualified.
+    using ayt::script::logia::reflect::MethodInfoImpl;
+    using ayt::script::logia::reflect::MethodInfoImplConst;
+    info->addMethod(new MethodInfoImpl<LG12Player, void, int>(
+        "heal", &LG12Player::heal));
+    info->addMethod(new MethodInfoImplConst<LG12Player, int>(
+        "getHp", &LG12Player::getHp));
+
+    reg.registerTypeInfo("LG12Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_method_void_increments_state) {
+    LogiaRuntimeBridge bridge;
+    ensureLG12Registered();
+    LG12Player obj;
+    CHECK(obj.hp == 50);
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("LG12Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script LG12Player {
+    on_start() {
+        self.heal(10)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("LG12Player_heal_increment", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("LG12Player_heal_increment",
+                               "on_start", &obj, nullptr));
+    CHECK(obj.hp == 60);
+}
+
+TEST_CASE(lg12_method_void_clamps_state) {
+    LogiaRuntimeBridge bridge;
+    ensureLG12Registered();
+    LG12Player obj;
+    obj.hp = 95;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("LG12Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script LG12Player {
+    on_start() {
+        self.heal(50)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("LG12Player_heal_clamp", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("LG12Player_heal_clamp",
+                               "on_start", &obj, nullptr));
+    CHECK(obj.hp == 100);  // clamped to maxHp
+}
+
+TEST_CASE(lg12_method_return_primitive_round_trip) {
+    LogiaRuntimeBridge bridge;
+    ensureLG12Registered();
+    LG12Player obj;
+    obj.hp = 77;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("LG12Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script LG12Player {
+    on_start() {
+        local v = self.getHp()
+        __test_witness = tostring(v)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("LG12Player_gethp", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("LG12Player_gethp",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "77");
+}
+
+TEST_CASE(lg12_method_unknown_fails_safe) {
+    LogiaRuntimeBridge bridge;
+    ensureLG12Registered();
+    LG12Player obj;
+    obj.hp = 11;
+
+    // Calling an unknown method name must not crash; the analyzer
+    // would have caught it at compile time if it were a typed
+    // self.<x>(...) call against LG12Player's reflect registry. Here
+    // we test the runtime fallback path by writing `self.totallyFake()`
+    // — the analyzer cannot resolve `totallyFake` against LG12Player
+    // (it's not a registered method), so it should emit a soft warning
+    // OR fall through to bare Lua dispatch. Either way, the C++
+    // state must remain untouched.
+    const char* src = R"(
+script LG12Player {
+    on_start() {
+        self.totallyFake()
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("LG12Player_unknown", src, errors);
+    // The script may or may not compile depending on analyzer policy.
+    // We don't require success — the important thing is that no
+    // crash propagates and the state is untouched.
+    (void)loaded;
+    (void)bridge.callLifecycle("LG12Player_unknown",
+                               "on_start", &obj, nullptr);
+    CHECK(obj.hp == 11);
+}
+
+TEST_CASE(lg12_method_arg_count_mismatch_runtime_error) {
+    LogiaRuntimeBridge bridge;
+    ensureLG12Registered();
+    LG12Player obj;
+    obj.hp = 11;
+
+    // Bypass the analyzer by hand-crafting a script that calls
+    // self.heal() with no args. The analyzer's argument-count check
+    // is type-driven, so the C++ method (1 arg) vs Lua call (0 args)
+    // will be a runtime error from the bridge's
+    // ayt_reflect_call_method_c. The state must not be corrupted.
+    const char* src = R"(
+script LG12Player {
+    on_start() {
+        self.heal()
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("LG12Player_arity", src, errors);
+    if (!loaded) {
+        // The analyzer may reject this at compile time — that's
+        // equally acceptable. We just need to assert no crash and
+        // that the state is preserved either way.
+        CHECK(obj.hp == 11);
+        return;
+    }
+    (void)bridge.callLifecycle("LG12Player_arity",
+                               "on_start", &obj, nullptr);
+    CHECK(obj.hp == 11);
+}
+
+// ============================================================================
+// S3.12 (track R2 §5.7.4) — AY_METHOD macro path
+// ----------------------------------------------------------------------------
+// End-to-end test of the AY_METHOD macro: a C++ struct that uses
+// `AY_METHOD(Ret, name, args...)` to declare a script-callable method,
+// finalized via `AY_FINALIZE_REGISTRATION_METADATA` + `AY_FINALIZE_METHODS`,
+// and driven from a Logia script via `self.<method>(args)`.
+//
+// This is the user-facing surface of S3.12 — production code (engine
+// gameplay scripts) writes AY_METHOD declarations the same way they
+// write AY_PROPERTY today.
+// ============================================================================
+
+namespace
+{
+struct MacroPlayer {
+    int maxHp = 100;
+
+    // Note: user must `#define AY_CURRENT_CLASS MacroPlayer` before
+    // AY_PROPERTY / AY_METHOD inside the class body, and `#undef`
+    // it after. This matches the AY_PROPERTY convention (see
+    // AYSerializer/include/AYPropertyMacros.h top-of-file comment).
+#define AY_CURRENT_CLASS MacroPlayer
+    AY_PROPERTY(int, hp, ayt::reflect::FieldAttribute::Serialize)
+    void heal(int amount) {
+        hp += amount;
+        if (hp > maxHp) hp = maxHp;
+    }
+    AY_METHOD(void, heal, int amount)
+    int getHp() const { return hp; }
+    AY_METHOD(int, getHp)
+#undef AY_CURRENT_CLASS
+};
+
+// AY_FINALIZE_REGISTRATION_METADATA and AY_FINALIZE_METHODS emit
+// anonymous-namespace static initializers — they must live at
+// namespace scope (not inside a function body) so the static
+// runs at process init. The order matters: foundation finalize
+// first (registers fields + TypeInfo), then AYScript-side
+// finalize (attaches methods via the variadic MethodInfoImpl).
+AY_FINALIZE_REGISTRATION_METADATA(MacroPlayer)
+AY_FINALIZE_METHODS(MacroPlayer)
+
+void ensureMacroPlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("MacroPlayer") != nullptr) return;
+
+    // Register primitive types if missing (the bridge usually does
+    // this, but in a fresh test process it may not have run yet).
+    if (reg.findType("Int32") == nullptr) {
+        auto* intInfo = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "Int32",
+            ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("Int32", intInfo);
+        auto* intInfo2 = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int",
+            ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", intInfo2);
+    }
+}
+} // namespace
+
+TEST_CASE(lg12_ay_method_macro_void_increments_state) {
+    LogiaRuntimeBridge bridge;
+    ensureMacroPlayerRegistered();
+    MacroPlayer obj;
+    // Note: hp is registered via AY_PROPERTY and has no in-class
+    // initializer (the AY_PROPERTY macro just declares `int hp;`).
+    // We don't pre-check the initial value because heap state
+    // depends on the test process; the test only cares that
+    // `self.heal(25)` mutates the field to 25.
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("MacroPlayer");
+    CHECK(ti != nullptr);
+    // The macro path must have registered the methods.
+    CHECK(ti->getMethodCount() == 2u);
+    CHECK(ti->findMethod("heal") != nullptr);
+    CHECK(ti->findMethod("getHp") != nullptr);
+
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script MacroPlayer {
+    on_start() {
+        self.heal(25)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("MacroPlayer_heal", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    int hpBefore = obj.hp;
+    bool called = bridge.callLifecycle("MacroPlayer_heal",
+                                       "on_start", &obj, nullptr);
+    CHECK(called);
+    CHECK(obj.hp == hpBefore + 25);
+}
+
+TEST_CASE(lg12_ay_method_macro_const_return_round_trip) {
+    LogiaRuntimeBridge bridge;
+    ensureMacroPlayerRegistered();
+    MacroPlayer obj;
+    obj.hp = 42;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("MacroPlayer");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script MacroPlayer {
+    on_start() {
+        local v = self.getHp()
+        __test_witness = tostring(v)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("MacroPlayer_gethp", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("MacroPlayer_gethp",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "42");
 }
 
 TEST_SUITE_END

@@ -442,6 +442,28 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* c = dynamic_cast<const CallExpr*>(&expr)) {
+        // S3.12 (track R2 §5.7.4): `self.method(args)` rewrites to
+        // `ayt_reflect_call_method(self, "<Type>", "<method>", args...)`.
+        // The analyzer stamps CallExpr::resolvedMethod only when the
+        // callee is a MemberExpr on self AND the method exists on the
+        // host type's reflect registry; otherwise the analyzer leaves
+        // resolvedMethod=null and codegen falls back to bare Lua
+        // dispatch (which still works for non-reflected method names
+        // — they just won't actually invoke the C++ method).
+        if (c->resolvedMethod != nullptr
+            && c->resolvedMethodOwnerName != nullptr) {
+            std::string out = "ayt_reflect_call_method(self, \"";
+            out += c->resolvedMethodOwnerName;
+            out += "\", \"";
+            out += c->resolvedMethod->getName();
+            out += "\"";
+            for (const auto& a : c->args) {
+                out += ", ";
+                out += emitExpr(*a);
+            }
+            out += ")";
+            return out;
+        }
         std::string callee = emitExpr(*c->callee);
         std::string out;
         out += callee;
