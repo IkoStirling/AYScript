@@ -11,6 +11,13 @@
 //
 // Logia `var` is for script-internal Lua state only (pure local); C++
 // fields are declared on the C++ side and accessed through `self`.
+//
+// S3.11: `self.position.{x,y}` (struct chain) compiles down to
+// `ayt_reflect_get_field_chain(self, "PlayerController", "position",
+// "y")` etc., and the assignments to
+// `ayt_reflect_set_field_chain(...)`. The C++ side's
+// `PlayerController::position.{x,y}` actually mutates at runtime —
+// no more "runtime no-op" caveat.
 
 script PlayerController {
     var tick_counter: int = 0

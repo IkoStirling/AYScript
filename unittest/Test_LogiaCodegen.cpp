@@ -7,6 +7,13 @@
 #include "AYScript.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
+#include "logia/AYSemanticAnalyzer.h"
+
+#include "IAYReflect.h"
+#include "AYReflect.h"
+#include "AYReflectMacros.h"
+
+#include <AYMathTypes.h>
 
 #include <string>
 
@@ -189,6 +196,54 @@ script Foo {
 
 TEST_CASE(codegen_full_player_controller) {
     // The canonical example from examples/player_controller.logia (S2.5 form).
+    //
+    // S3.11: register a stub PlayerController AYReflect type so the
+    // chain codegen rewrite actually fires. Without this the
+    // hostTypeName is empty and codegen keeps the legacy bare-Lua
+    // form (see earlier revisions of this test).
+    {
+        auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+        if (reg.findType("PlayerController") == nullptr) {
+            // Ensure FVector3 fields are registered (S3.11) so the
+            // chain resolve at `self.position.y` walks through.
+            // Calling the analyzer ctor is the public hook; it
+            // calls ensureAYEntityTypesRegistered internally.
+            ayt::script::logia::SemanticAnalyzer sem;
+            (void)sem;
+            // Now register the stub. We re-fetch FVector3 from the
+            // registry — the analyzer's S3.11 path populates its
+            // x/y/z fields.
+            auto* fvec3 = reg.findType("FVector3");
+            auto* floatInfo = reg.findType("float");
+            struct PCStub {
+                ayt::math::FVector3 position;
+                float speed = 0.0f;
+                float jump_force = 0.0f;
+            };
+            auto* stubInfo = new ayt::reflect::TypeInfoImpl<PCStub>(
+                "PlayerController",
+                ayt::reflect::detail::defaultCreate<PCStub>,
+                ayt::reflect::detail::defaultDestroy<PCStub>,
+                ayt::reflect::detail::defaultCopy<PCStub>);
+            if (fvec3) {
+                stubInfo->addField(new ayt::reflect::FieldInfoImpl(
+                    "position", fvec3,
+                    offsetof(PCStub, position),
+                    ayt::reflect::FieldAttribute::Serialize));
+            }
+            if (floatInfo) {
+                stubInfo->addField(new ayt::reflect::FieldInfoImpl(
+                    "speed", floatInfo, offsetof(PCStub, speed),
+                    ayt::reflect::FieldAttribute::Serialize));
+                stubInfo->addField(new ayt::reflect::FieldInfoImpl(
+                    "jump_force", floatInfo,
+                    offsetof(PCStub, jump_force),
+                    ayt::reflect::FieldAttribute::Serialize));
+            }
+            reg.registerTypeInfo("PlayerController", stubInfo);
+        }
+    }
+
     const char* src = R"(
 script PlayerController {
     var tick_counter: int = 0
@@ -223,10 +278,22 @@ script PlayerController {
     CHECK(containsFlat(lua, "then"));
     CHECK(containsFlat(lua, "end"));
     CHECK(containsFlat(lua, "input.is_pressed(\"jump\")"));
-    CHECK(containsFlat(lua, "self.position.y"));
-    CHECK(containsFlat(lua, "self.speed"));
-    CHECK(containsFlat(lua, "self.jump_force"));
-    CHECK(contains(lua, "__tmp_"));
+    // S3.11: chain reflect calls replace the legacy bare-Lua
+    // member access. `self.position.y = self.position.y + ...` now
+    // lowers to a get_chain + arithmetic + set_chain sequence.
+    CHECK(contains(lua,
+        "ayt_reflect_get_field_chain(self, \"PlayerController\", \"position\", \"y\")"));
+    CHECK(contains(lua,
+        "ayt_reflect_set_field_chain(self, \"PlayerController\", \"position\", \"y\""));
+    CHECK(contains(lua,
+        "ayt_reflect_get_field_chain(self, \"PlayerController\", \"position\", \"x\")"));
+    CHECK(contains(lua,
+        "ayt_reflect_set_field_chain(self, \"PlayerController\", \"position\", \"x\""));
+    // S3.10 single-hop chain stays on the S3.10 helpers.
+    CHECK(contains(lua, "ayt_reflect_get_field(self, \"PlayerController\", \"jump_force\")"));
+    CHECK(contains(lua, "ayt_reflect_get_field(self, \"PlayerController\", \"speed\")"));
+    // The legacy `__tmp_` lowering is gone — chain rewrites replace it.
+    CHECK_FALSE(contains(lua, "__tmp_"));
 }
 
 TEST_SUITE_END

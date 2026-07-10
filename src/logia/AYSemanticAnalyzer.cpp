@@ -123,6 +123,34 @@ void ensureAYEntityTypesRegistered()
             ayt::reflect::detail::defaultCopy<ayt::math::FVector3>);
         reg.registerTypeInfo("FVector3", fVec3);
     }
+    // S3.11: register FVector3's primitive fields so the analyzer's
+    // `analyzeMemberExpr` stamps `resolvedField` + `resolvedType=Float32`
+    // on `self.position.x` leaves. Without this, the chain probe in
+    // codegen never fires (leaf has null resolvedType) and the
+    // legacy `__tmp_lhs` path is emitted — runtime no-op on the
+    // lightuserdata receiver. Idempotent: re-entry guards on
+    // `getFieldCount() == 0` so a partial prior registration is
+    // completed on the next analyzer ctor. Field type is registered
+    // as "Float32" to match `pushFieldPrimitive`'s dispatch (which
+    // accepts both "float" and "Float32"). FQuaternion fields are
+    // out of S3.11 scope (added by §5.7.4 track R2).
+    if (fVec3 && fVec3->getFieldCount() == 0) {
+        auto* floatInfo = reg.findType("float");
+        if (floatInfo) {
+            fVec3->addField(new ayt::reflect::FieldInfoImpl(
+                "x", floatInfo,
+                offsetof(ayt::math::FVector3, x),
+                ayt::reflect::FieldAttribute::Serialize));
+            fVec3->addField(new ayt::reflect::FieldInfoImpl(
+                "y", floatInfo,
+                offsetof(ayt::math::FVector3, y),
+                ayt::reflect::FieldAttribute::Serialize));
+            fVec3->addField(new ayt::reflect::FieldInfoImpl(
+                "z", floatInfo,
+                offsetof(ayt::math::FVector3, z),
+                ayt::reflect::FieldAttribute::Serialize));
+        }
+    }
     auto* fQuat = reg.findType<ayt::math::FQuaternion>();
     if (!fQuat) {
         fQuat = new ayt::reflect::TypeInfoImpl<ayt::math::FQuaternion>(

@@ -18,6 +18,7 @@
 #include "AYScript.h"
 #include "AYScriptRuntimeBridge.h"
 #include "logia/AYCompilerError.h"
+#include "logia/AYLogiaPipeline.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
@@ -268,6 +269,203 @@ script LG05ScoreHolder {
     CHECK(bridge.getLuaGlobalString("__test_witness") == "still_alive");
     // The real fields were never touched.
     CHECK(obj.score == 11);
+}
+
+// ============================================================================
+// S3.11 — multi-hop struct chain reflect
+// ----------------------------------------------------------------------------
+// Mirror of the LG-05 single-hop fixture, but with a nested struct
+// (`LG11Holder.position` is an `LG11Inner` carrying three floats).
+// All chain reads / writes go through the S3.11
+// `ayt_reflect_*_field_chain` helpers. Acceptance:
+// "movement_system.logia-style scripts can mutate moveSpeed via
+// self.moveSpeed" generalized to `self.<field1>.<field2>` chains.
+
+namespace
+{
+struct LG11Inner {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+};
+
+struct LG11Holder {
+    LG11Inner position;
+};
+
+// Inline registrar: each test calls this at the start (it's idempotent
+// across calls and across tests). Static-init order across TUs is
+// undefined; the LG-05 fixture used a TU-scope static and got lucky.
+// Inlining avoids the static-init dependency entirely.
+void ensureLG11Registered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("LG11Holder") != nullptr) return;
+
+    // Primitive `float` is registered by the analyzer's
+    // ensurePrimitiveTypesRegistered via g_primitiveBootstrap static
+    // init. If the bridge hasn't initialized yet, this returns null
+    // and we skip — but the bridge is constructed in each test's
+    // first line so the order is fine.
+    auto* floatInfo = reg.findType("float");
+    if (!floatInfo) return;
+
+    // Register LG11Inner with x/y/z fields.
+    auto* innerInfo = new ayt::reflect::TypeInfoImpl<LG11Inner>(
+        "LG11Inner",
+        ayt::reflect::detail::defaultCreate<LG11Inner>,
+        ayt::reflect::detail::defaultDestroy<LG11Inner>,
+        ayt::reflect::detail::defaultCopy<LG11Inner>);
+    innerInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "x", floatInfo, offsetof(LG11Inner, x),
+        ayt::reflect::FieldAttribute::Serialize));
+    innerInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "y", floatInfo, offsetof(LG11Inner, y),
+        ayt::reflect::FieldAttribute::Serialize));
+    innerInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "z", floatInfo, offsetof(LG11Inner, z),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("LG11Inner", innerInfo);
+
+    // Register LG11Holder with a single `position` field of type
+    // LG11Inner. This is the host type — the Logia source binds
+    // `script LG11Holder`.
+    auto* holderInfo = new ayt::reflect::TypeInfoImpl<LG11Holder>(
+        "LG11Holder",
+        ayt::reflect::detail::defaultCreate<LG11Holder>,
+        ayt::reflect::detail::defaultDestroy<LG11Holder>,
+        ayt::reflect::detail::defaultCopy<LG11Holder>);
+    holderInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "position", innerInfo, offsetof(LG11Holder, position),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("LG11Holder", holderInfo);
+}
+} // namespace
+
+TEST_CASE(lg11_chain_read_round_trip) {
+    ensureLG11Registered();
+    LogiaRuntimeBridge bridge;
+    LG11Holder obj;
+    obj.position.y = 3.5f;
+
+    std::vector<CompilerError> errors;
+    const char* src = R"(
+script LG11Holder {
+    on_start() {
+        local v = ayt_reflect_get_field_chain(self, "LG11Holder", "position", "y")
+        __test_witness = tostring(v)
+    }
+}
+)";
+    CHECK(loadSource(bridge, "LG11Holder_chain_read", src, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("LG11Holder_chain_read", "on_start",
+                               &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "3.5");
+}
+
+TEST_CASE(lg11_chain_write_round_trip) {
+    ensureLG11Registered();
+    LogiaRuntimeBridge bridge;
+    LG11Holder obj;
+    obj.position.x = 0.0f;
+
+    std::vector<CompilerError> errors;
+    const char* src = R"(
+script LG11Holder {
+    on_start() {
+        ayt_reflect_set_field_chain(self, "LG11Holder", "position", "x", 12.0)
+    }
+}
+)";
+    CHECK(loadSource(bridge, "LG11Holder_chain_write", src, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("LG11Holder_chain_write", "on_start",
+                               &obj, nullptr));
+    // Acceptance: "C++ reads back mutated value".
+    CHECK(obj.position.x == 12.0f);
+}
+
+TEST_CASE(lg11_chain_compound_assign) {
+    // `self.position.x = self.position.x + 4.0` is the canonical chain
+    // compound-assign path. Both halves of the RHS are chain reads
+    // routed through `ayt_reflect_get_field_chain`.
+    ensureLG11Registered();
+    LogiaRuntimeBridge bridge;
+    LG11Holder obj;
+    obj.position.x = 1.0f;
+
+    std::vector<CompilerError> errors;
+    const char* src = R"(
+script LG11Holder {
+    on_start() {
+        self.position.x = self.position.x + 4.0
+    }
+}
+)";
+    CHECK(loadSource(bridge, "LG11Holder_chain_compound", src, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("LG11Holder_chain_compound", "on_start",
+                               &obj, nullptr));
+    CHECK(obj.position.x == 5.0f);
+}
+
+TEST_CASE(lg11_chain_unknown_leaf_safe) {
+    // Chain leaf names an unknown field on the struct type. The
+    // helper should fail-safe (return nil / log error) — no crash,
+    // the C++ field stays at its pre-call value.
+    ensureLG11Registered();
+    LogiaRuntimeBridge bridge;
+    LG11Holder obj;
+    obj.position.x = 7.0f;
+
+    std::vector<CompilerError> errors;
+    const char* src = R"(
+script LG11Holder {
+    on_start() {
+        ayt_reflect_set_field_chain(self, "LG11Holder", "position", "nope", 999.0)
+        __test_witness = "still_alive"
+    }
+}
+)";
+    CHECK(loadSource(bridge, "LG11Holder_chain_unknown", src, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("LG11Holder_chain_unknown", "on_start",
+                               &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "still_alive");
+    // The real field was never touched.
+    CHECK(obj.position.x == 7.0f);
+}
+
+TEST_CASE(lg11_chain_intermediate_unknown_safe) {
+    // Chain intermediate hop names an unknown struct field. Same
+    // fail-safe — return nil, C++ field untouched.
+    ensureLG11Registered();
+    LogiaRuntimeBridge bridge;
+    LG11Holder obj;
+    obj.position.y = 11.0f;
+
+    std::vector<CompilerError> errors;
+    const char* src = R"(
+script LG11Holder {
+    on_start() {
+        local v = ayt_reflect_get_field_chain(self, "LG11Holder", "no_such_struct_field", "y")
+        __test_witness = tostring(v)
+    }
+}
+)";
+    CHECK(loadSource(bridge, "LG11Holder_chain_bad_intermediate", src, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("LG11Holder_chain_bad_intermediate",
+                               "on_start", &obj, nullptr));
+    // Lua nil → tostring(nil) → "nil".
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "nil");
+    CHECK(obj.position.y == 11.0f);
 }
 
 TEST_SUITE_END

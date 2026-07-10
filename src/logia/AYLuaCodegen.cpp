@@ -317,6 +317,72 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                 return;
             }
 
+            // S3.11: multi-hop `self.<f1>.<f2>...<leaf> = <rhs>` and
+            // `self.<...> <op>= <rhs>` lower to the chain reflect
+            // helpers, parallel to the S3.10 single-hop blocks
+            // above. The RHS itself can contain chain reads
+            // (e.g. `self.position.y + self.jump_force * dt`),
+            // which `emitExpr` recursively rewrites via Step 3 +
+            // the existing single-hop MemberExpr rule.
+            std::vector<std::string> chainNames;
+            std::size_t hops = 0;
+            if (!_currentHostTypeName.empty()
+                && isSelfFieldChainExpr(*bin->left, chainNames, hops)) {
+                if (op == TokenType::Equal) {
+                    std::string rhs = emitExpr(*bin->right);
+                    indent();
+                    _out += "ayt_reflect_set_field_chain(self, \"";
+                    _out += _currentHostTypeName;
+                    _out += "\"";
+                    for (const auto& n : chainNames) {
+                        _out += ", \"";
+                        _out += n;
+                        _out += "\"";
+                    }
+                    _out += ", ";
+                    _out += rhs;
+                    _out += ")\n";
+                } else {
+                    // Compound assign on chain: get → op → set, all
+                    // via the chain helpers.
+                    std::string rhs = emitExpr(*bin->right);
+                    std::string tmp = freshTmp("chain_compound");
+                    std::string opName = tokenOpName(op);
+                    // local __tmp = get_chain(self, "...", "f1", ..., "leaf") <op> rhs
+                    indent();
+                    _out += "local ";
+                    _out += tmp;
+                    _out += " = ayt_reflect_get_field_chain(self, \"";
+                    _out += _currentHostTypeName;
+                    _out += "\"";
+                    for (const auto& n : chainNames) {
+                        _out += ", \"";
+                        _out += n;
+                        _out += "\"";
+                    }
+                    _out += ") ";
+                    // strip trailing '=' from opName (e.g. "+=" -> "+")
+                    _out += opName.substr(0, opName.size() - 1);
+                    _out += " ";
+                    _out += rhs;
+                    _out += "\n";
+                    // ayt_reflect_set_field_chain(self, "...", "f1", ..., "leaf", __tmp)
+                    indent();
+                    _out += "ayt_reflect_set_field_chain(self, \"";
+                    _out += _currentHostTypeName;
+                    _out += "\"";
+                    for (const auto& n : chainNames) {
+                        _out += ", \"";
+                        _out += n;
+                        _out += "\"";
+                    }
+                    _out += ", ";
+                    _out += tmp;
+                    _out += ")\n";
+                }
+                return;
+            }
+
             std::string rhs;
             if (op == TokenType::Equal) {
                 rhs = emitExpr(*bin->right);
@@ -390,6 +456,28 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* m = dynamic_cast<const MemberExpr*>(&expr)) {
+        // S3.11 (LG-05 extended): multi-hop `self.<f1>.<f2>...<leaf>`
+        // rewrites to `ayt_reflect_get_field_chain(self, "<Host>",
+        // "<f1>", ..., "<leaf>")`. Probe before the single-hop gate
+        // because the chain probe is more restrictive (>=2 hops,
+        // every node resolvedField-stamped, leaf primitive) — single-
+        // hop stays on the S3.10 path below.
+        std::vector<std::string> chainNames;
+        std::size_t hops = 0;
+        if (!_currentHostTypeName.empty()
+            && isSelfFieldChainExpr(*m, chainNames, hops)) {
+            std::string out;
+            out += "ayt_reflect_get_field_chain(self, \"";
+            out += _currentHostTypeName;
+            out += "\"";
+            for (const auto& n : chainNames) {
+                out += ", \"";
+                out += n;
+                out += "\"";
+            }
+            out += ")";
+            return out;
+        }
         // LG-05 / S3.3 — AYReflect-backed read: single-hop
         // `self.<primitiveField>` rewrites to the bridge's
         // reflect call. The `resolvedField` stamp comes from
@@ -538,6 +626,57 @@ std::string LuaCodegen::singleHopSelfFieldName(const Expr& e)
 {
     auto* m = dynamic_cast<const MemberExpr*>(&e);
     return m ? m->member : std::string();
+}
+
+// S3.11: probe a multi-hop `self.<f1>.<f2>...<leaf>` chain. Returns
+// true and fills `fieldNames` (root→leaf order) when every MemberExpr
+// in the chain has `resolvedField != nullptr` (analyzer stamped the
+// AYReflect IFieldInfo for each hop) and the leaf's resolvedType is
+// a primitive (getFieldCount() == 0). `hopCount >= 2` gate keeps
+// `self.field` (single hop) on the existing S3.10 path; otherwise
+// every chain would be re-routed to the new helpers and S3.10 tests
+// would see different codegen output.
+bool LuaCodegen::isSelfFieldChainExpr(const Expr& e,
+                                     std::vector<std::string>& fieldNames,
+                                     std::size_t& hopCount)
+{
+    fieldNames.clear();
+    hopCount = 0;
+
+    // Walk the chain from the leaf inward; collect names in reverse.
+    std::vector<std::string> reversed;
+    const Expr* cur = &e;
+    while (auto* m = dynamic_cast<const MemberExpr*>(cur)) {
+        if (m->resolvedField == nullptr) {
+            return false;  // analyzer couldn't resolve this hop
+        }
+        reversed.push_back(m->member);
+        ++hopCount;
+        cur = m->object.get();
+    }
+
+    // The root must be the `self` identifier (NOT another member expr,
+    // NOT an arbitrary expression — chain must be `self.*`).
+    auto* rootId = dynamic_cast<const IdentifierExpr*>(cur);
+    if (!rootId || rootId->name != "self") {
+        return false;
+    }
+
+    // Require primitive leaf so the runtime helper can call
+    // pushFieldPrimitive on the final hop.
+    auto* leafM = dynamic_cast<const MemberExpr*>(&e);
+    if (!leafM || leafM->resolvedType == nullptr
+        || leafM->resolvedType->getFieldCount() != 0) {
+        return false;
+    }
+
+    if (hopCount < 2) {
+        return false;  // single-hop stays on the S3.10 path
+    }
+
+    // Reverse to root→leaf order.
+    fieldNames.assign(reversed.rbegin(), reversed.rend());
+    return true;
 }
 
 std::string LuaCodegen::emitCompoundRhs(const Expr& target,

@@ -535,14 +535,31 @@ CompileResult Compiler::compile(const std::string& source,
 - **调度入口**：`ScriptSubSystem::update(float dt)` / `fixedUpdate(float dt)` 遍历 `World::instance().systemCount()`，对 `getSystemNameAt(i) == bridge.hasScript(name)` 的 system 调 `callLifecycle(name, "on_update", systemPtr, &dt)`。
 - **新增 `World::findSystemByName(name)`**（`AYRuntime/AYEntity/include/AYWorld.h`）——S3.1 之前 World 没有按名查 system 的公共入口。
 - **测试 fixture**：`unittest/AYTestMovementSystem.h`（ISystem 子类 + `AY_PROPERTY(moveSpeed, ...)` + `AY_FINALIZE_REGISTRATION_METADATA`），`unittest/Test_LogiaSystemHost.cpp`（4 用例）；`examples/movement_system.logia`（文档示例）。
-- **暂未做**：`self.field` 真正的 usertype 读写绑定（仍是 bare Lua member access，self 是 lightuserdata，访问会运行期 nil error）——这是 S3.x 任务，对应 Phase S3 backlog 的 "sol2 usertype 注册"。
+- **S3.10 完成**：`self.field`（单跳 primitive）现在通过 `ayt_reflect_get_field` / `set_field` 真正读写 AY_PROPERTY 字段 — 见下文完成记录。
+- **S3.11 完成**：`self.<f1>.<f2>...` 链式（multi-hop struct）通过 `ayt_reflect_*_field_chain` 读写 — 见下文完成记录。
+- **未做**：sol2 usertype 直通（继续隐藏 self 的 lightuserdata 语义）；`self.position.x = self.position.y + self.z` 三段以上链（当前只支持 2-hop；扩展只需 codegen + helper 同形扩展）。
 
 **S3.10 (LG-05 + System host) 完成记录**（2026-07-09）：
 
 - **结论**：`self.field` usertype 绑定在 S3.3 LG-05 阶段已经**跨 host kind 通用**。S3.1 System host 与 S3.0 Component host 共享同一条 codegen 路径（`isSingleHopSelfFieldExpr` 只看 `hostTypeName` + `resolvedField`，**不**看 `ctx.kind`），所以 System 端跑通 `self.moveSpeed = 1.5` 不需要任何 codegen/analyzer 改动——只缺一段「AYReflect primitive types 已注册」的保证。
 - **修复**：`AYSemanticAnalyzer.cpp` + `AYScriptRuntimeBridge.cpp` 都加了 `ensurePrimitiveTypesRegistered()`（int / Int32 / Int64 / float / Float32 / double / Float64 / bool / Bool），由 analyzer ctor + bridge `ensureLua()` 各调一次（幂等）。`Test_LogiaSystemHost.cpp` 的 `MovementSystemRegistrar` 在 `reg.findType("float")` 之前先注册 float（静态 init 顺序跨 TU 不确定，必须本地 bootstrap）。
 - **测试**：`Test_LogiaSystemHost.cpp` 新增 5 用例（s310_）：`s310_system_host_codegen_emits_reflect_calls`、`s310_system_host_self_field_reads_cpp_value`、`s310_system_host_self_field_writes_cpp_value`、`s310_system_host_self_field_codegen_rewrite`、`s310_component_host_self_field_unchanged_regression`（LG-05 Component-host 路径回归）。合计 9 用例，`AYSCRIPT_Test` 579/579 全绿。
-- **未做**：struct chain `self.position.x` reflect（S3.11）；`IMethodInfo` / `self.heal()`（§5.7.4 track R2）；纯 Reflection 名字解析的 fallback（仅在 `hostTypeName` 命中 AYReflect registry 时走 rewrite，未注册类型保留 S2.5 bare member access）。
+- **未做**：struct chain `self.position.x` reflect（S3.11 完成）；`IMethodInfo` / `self.heal()`（§5.7.4 track R2）；纯 Reflection 名字解析的 fallback（仅在 `hostTypeName` 命中 AYReflect registry 时走 rewrite，未注册类型保留 S2.5 bare member access）。
+
+**S3.11 (LG-05 multi-hop chain) 完成记录**（2026-07-09）：
+
+- **结论**：原 S3.10 锁定决策里把 multi-hop chain 标为 "runtime no-op，out of S3.3 scope"——这次收回。`self.<f1>.<f2>...<leaf>` 通过新的 `ayt_reflect_get_field_chain` / `set_field_chain` 真正读写 C++ 嵌套 struct 字段，跨 Component / System / Tool host kind。`examples/player_controller.logia` 的 `self.position.y = self.position.y + self.jump_force * dt` 现在确实修改 `PlayerController::position.y`。
+- **范围**：只支持 2-hop（`self.<intermediate>.<leaf>`）+ primitive leaf（int / float / double / bool / int64）；`FQuaternion`（4 维 quaternion w/x/y/z）推迟到 §5.7.4 track R2（与 IMethodInfo 一起）。
+- **机制**：
+  - **Analyzer (`ensureAYEntityTypesRegistered`)**：注册 `FVector3` 的 `x/y/z` Float32 字段（带 `getFieldCount()==0` 幂等 guard，避免重入覆盖）。这是 `analyzeMemberExpr` 能沿链 stamp `resolvedField` + `resolvedType` 到叶子的前提。
+  - **Codegen**：`isSelfFieldChainExpr(e, names, hops)` probe（>= 2 hops、每跳 `resolvedField != nullptr`、叶子 primitive）。chain 命中则发 `ayt_reflect_*_field_chain(self, "<Host>", "f1", ..., "fN")`（codegen 把整条链烤进 args）；单跳维持 S3.10 `ayt_reflect_*_field(self, "<Host>", "f")`。直接赋值与 `+= -= *= /=` 都走 chain helper。
+  - **Bridge (`ayt_reflect_get/set_field_chain_c`)**：variadic 收 chain args，从 `3..nargs-1` 逐跳查 `lookupField(typeName, fieldName)`、`ptr = field->get(ptr)`、`typeName = field->getType()->getName()`；叶子复用 `pushFieldPrimitive`（读）或 `storeFieldPrimitive`（写，写是从 S3.10 set 里抽出来的共享 helper）。fail-safe：unknown field 返回 nil / log error，不崩、不污染 C++ 字段。
+  - **kLogiaPipelineVersion 2 → 3**：cache key 失效重灌（codegen 输出形状变了）。
+- **测试**：
+  - `Test_LogiaReflectRuntime.cpp` 新增 5 用例（`LG11Inner` / `LG11Holder` 嵌套 fixture）：read round-trip、write round-trip、compound assign、unknown leaf safe、unknown intermediate safe。**Inline registrar**（每测试首行 `ensureLG11Registered()`）取代 TU-scope static——后者跨 TU 静态 init 顺序不可靠，导致 `LG11Holder in reg=0`。
+  - `Test_LogiaCodegen.cpp::codegen_full_player_controller` 注册 stub `PlayerController`（`PCStub { FVector3 position; float speed, jump_force; }`），改 assertions 验证 chain reflect calls（`ayt_reflect_get_field_chain(self, "PlayerController", "position", "y")` 等）+ `CHECK_FALSE(__tmp_)`。Legacy bare Lua fallback 消失。
+  - baseline 579 + 5 chain + 1 codegen update = **604/604 全绿**。Component / System / Tool 三种 host + LG-05 单跳路径零回归。
+- **未做**：FQuaternion（推迟到 track R2）；sol2 usertype（继续隐藏 self 为 lightuserdata，桥端走 offset arithmetic）；3+ 段链（codegen / helper 同形扩展即可，预留接口未实现）；`IMethodInfo`（§5.7.4 track R2）。
 
 #### S3.2 — LG-04b（可选 B-min）：Reflect 单链 parent
 
@@ -833,7 +850,7 @@ AYScript/
 - [x] **S3.8** Editor / CLI Tool host（LG-07 / **S3.8b**）— 见 §5.6 S3.8 + 下锁定决策摘要
 - [x] **S3.9** CLI：`ays-logia compile`（可选）— 见 §5.6 S3.9 + 下锁定决策摘要
 - [x] **S3.10** System host `self.field` 端到端验证（可选）— 见 §5.6 S3.1 S3.10 完成记录
-- [ ] **S3.11** struct 链式 reflect `self.position.x`（可选，大）
+- [x] **S3.11** struct 链式 reflect `self.position.x`（可选，大）— 见 §5.6 S3.11 完成记录
 
 **S3.5 锁定决策**（2026-07-08 实现完成后补）：
 
@@ -995,6 +1012,8 @@ AYScript/
 | 2026-07-08 | **S3.8-min（LG-07 中间版，已取代）**：Tool host policy 仅用 `on_start` 入口 + `defaultLogiaHostContext()`；12 用例。同日 **S3.8b** 交付完整 LG-07。 |
 | 2026-07-08 | **S3.8b 完成（LG-07）**：`run` lifecycle 关键字；`toolLogiaHostContext()`（`expectSelf=false`）；Tool semantic 白名单 + 非 Tool 上 `run()` 对称警告；codegen `function M.run()`；`LogiaRuntimeBridge::runTool()`；`compileLogiaToLua` 转发 `hostContext`；`kLogiaPipelineVersion=2`。`unittest/Test_LogiaToolHost.cpp`（19 用例）。`compileLogiaToLua` heap pipeline + `LogiaTestHelpers.h`（MSVC /GS stack 防护）。 |
 | 2026-07-09 | **S3.9 完成（CLI `ays-logia compile`）**：`cli/CliCompile.{h,cpp}` 共享编译入口 + `cli/main.cpp`（argv / 输出 / exit code）+ `cli/CMakeLists.txt`（只 link AYScript，不链 sol2/Lua runtime）；`Compiler::compile` 把 parser errors 投影进 `diagnostics` 让 CLI 单次迭代覆盖全诊断；Win32 `CreateProcess` + `CreatePipe` e2e 测试（绕 cmd.exe exit code 屏蔽）；`unittest/Test_LogiaCli.cpp` 12 用例；`AYSCRIPT_Test` 555/555 全绿。CLI **不进** Editor critical path（Editor 仍走 S3.8b `runTool` in-process）。 |
+| 2026-07-09 | **S3.10 完成（System host self.field）**：`ensurePrimitiveTypesRegistered` 跨 TU bootstrap int/float/bool/double/int64；S3.10 codegen rewrite 跨 Component / System / Tool host kind 共享同一路径；`Test_LogiaSystemHost.cpp` 新增 5 用例；`AYSCRIPT_Test` 579/579 全绿。 |
+| 2026-07-09 | **S3.11 完成（multi-hop chain reflect）**：`ayt_reflect_get_field_chain` / `set_field_chain` 新 Lua globals；codegen 新增 `isSelfFieldChainExpr` probe + chain-read / chain-write / chain-compound 分支；`ensureAYEntityTypesRegistered` 注册 `FVector3` 的 `x/y/z` Float32 字段（幂等 `getFieldCount()==0` guard）；`storeFieldPrimitive` 从 S3.10 set 抽出共享给 chain；`kLogiaPipelineVersion` 2 → 3；`Test_LogiaReflectRuntime.cpp` 新增 5 用例 + `Test_LogiaCodegen.cpp::codegen_full_player_controller` 注册 stub PlayerController 改 assertions 验证 chain calls；`AYSCRIPT_Test` 604/604 全绿。FQuaternion / IMethodInfo 推迟到 §5.7.4 track R2。 |
 
 ---
 
@@ -1009,7 +1028,7 @@ AYScript/
 
 ## 13. Session prompts (copy-paste) — post S3.3
 
-**Done through S3.9:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · **S3.9 CLI** (`ays-logia compile`).
+**Done through S3.11:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · **S3.11 chain reflect** (`ayt_reflect_*_field_chain` + FVector3 fields).
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 
@@ -1017,8 +1036,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 
 | Order | ID | Status |
 |-------|-----|--------|
-| 1–7 | S3.4–S3.10 | ✅ done |
-| 8 | S3.11 | struct chain reflect `self.position.x` (optional, big) |
+| 1–8 | S3.4–S3.11 | ✅ done |
 | 9 | S4.x | signal / await / source map |
 | parallel | Foundation ED-01–04 | Phase 1 north-star — not blocked on Logia |
 
@@ -1270,7 +1288,7 @@ Acceptance met — see §5.6 S3.1 S3.10 完成记录. Do not re-implement.
 
 ---
 
-### Prompt S3.11 — Struct chain reflect (optional, large)
+### Prompt S3.11 — Struct chain reflect ✅ DONE (2026-07-09)
 
 ```
 Implement AYScript S3.11 (optional): chained struct field reflect (self.position.x).
@@ -1281,4 +1299,7 @@ DO: recursive reflect walk for AY_PROPERTY struct fields; codegen nested get/set
 Acceptance: round-trip vec3 field on test component; document perf limits.
 
 Gate: only after S3.4 + S3.5 stable; high complexity — confirm with tech lead before starting.
+```
+
+Acceptance met — see §5.6 S3.11 完成记录. 604/604 green. Do not re-implement.
 ```

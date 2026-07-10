@@ -29,7 +29,10 @@ namespace ayt::script
 //       Tool host policy + Tool-kind codegen branch
 //       (`function M.run()` without `self` when
 //       ctx.expectSelf == false).
-constexpr std::size_t kLogiaPipelineVersion = 2u;
+//   3 — S3.11: multi-hop struct-chain reflect
+//       (`ayt_reflect_get_field_chain` / `set_field_chain`)
+//       + FVector3 fields registered in AYReflect.
+constexpr std::size_t kLogiaPipelineVersion = 3u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

@@ -87,6 +87,16 @@ private:
     static bool isSingleHopSelfFieldExpr(const Expr& e);
     static std::string singleHopSelfFieldName(const Expr& e);
 
+    // S3.11: multi-hop self chain probe. Returns true and fills
+    // `fieldNames` (root→leaf order) when `e` is a chain
+    // `self.<f1>.<f2>...<leaf>` where every MemberExpr node has
+    // `resolvedField != nullptr` and the leaf type is a primitive
+    // (getFieldCount() == 0). Requires hopCount >= 2 — single-hop
+    // matches keep using the S3.10 path.
+    static bool isSelfFieldChainExpr(const Expr& e,
+                                     std::vector<std::string>& fieldNames,
+                                     std::size_t& hopCount);
+
     // Helpers
     void line(const std::string& s = {});
     void indent();

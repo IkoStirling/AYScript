@@ -177,6 +177,14 @@ void ensureBuiltinTypesRegistered()
 // retains pointers indefinitely but they never get freed.
 // ------------------------------------------------------------
 
+// Forward decl: shared leaf primitive-store used by the single-hop
+// `ayt_reflect_set_field_c` (S3.10) and the chain variant
+// `ayt_reflect_set_field_chain_c` (S3.11).
+int storeFieldPrimitive(lua_State* L,
+                        const ayt::reflect::IFieldInfo* field,
+                        void* fieldPtr,
+                        int valueStackIdx);
+
 struct FieldKey {
     std::string typeName;
     std::string fieldName;
@@ -283,6 +291,26 @@ int ayt_reflect_set_field_c(lua_State* L)
         return 0;
     }
     void* fieldPtr = field->get(selfPtr);
+    if (storeFieldPrimitive(L, field, fieldPtr, 4) == 0) {
+        ayt::log::error("ayt_reflect_set_field: %s.%s (unsupported or null type)",
+                        typeName.c_str(), fieldName.c_str());
+        return 0;
+    }
+    return 0;
+}
+
+// S3.11 — extract the leaf primitive-store switch from
+// ayt_reflect_set_field_c so the chain helper can reuse it. Returns
+// 1 on success, 0 on unknown type / null type.
+//
+// `valueStackIdx` is the absolute Lua stack index of the value to
+// store. Callers must validate `valueStackIdx <= lua_gettop(L)` before
+// calling.
+int storeFieldPrimitive(lua_State* L,
+                        const ayt::reflect::IFieldInfo* field,
+                        void* fieldPtr,
+                        int valueStackIdx)
+{
     auto* type = field->getType();
     if (!type) return 0;
     const char* tname = type->getName();
@@ -290,27 +318,158 @@ int ayt_reflect_set_field_c(lua_State* L)
     auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
 
     if (eq("int") || eq("Int32")) {
-        *static_cast<int32_t*>(fieldPtr) = static_cast<int32_t>(lua_tointeger(L, 4));
-        return 0;
+        *static_cast<int32_t*>(fieldPtr) =
+            static_cast<int32_t>(lua_tointeger(L, valueStackIdx));
+        return 1;
     }
     if (eq("float") || eq("Float32")) {
-        *static_cast<float*>(fieldPtr) = static_cast<float>(lua_tonumber(L, 4));
-        return 0;
+        *static_cast<float*>(fieldPtr) =
+            static_cast<float>(lua_tonumber(L, valueStackIdx));
+        return 1;
     }
     if (eq("bool") || eq("Bool")) {
-        *static_cast<bool*>(fieldPtr) = (lua_toboolean(L, 4) != 0);
-        return 0;
+        *static_cast<bool*>(fieldPtr) = (lua_toboolean(L, valueStackIdx) != 0);
+        return 1;
     }
     if (eq("double") || eq("Float64")) {
-        *static_cast<double*>(fieldPtr) = static_cast<double>(lua_tonumber(L, 4));
-        return 0;
+        *static_cast<double*>(fieldPtr) =
+            static_cast<double>(lua_tonumber(L, valueStackIdx));
+        return 1;
     }
     if (eq("Int64")) {
-        *static_cast<int64_t*>(fieldPtr) = static_cast<int64_t>(lua_tointeger(L, 4));
+        *static_cast<int64_t*>(fieldPtr) =
+            static_cast<int64_t>(lua_tointeger(L, valueStackIdx));
+        return 1;
+    }
+    return 0;
+}
+
+// S3.11 — multi-hop struct chain read.
+//
+// Lua args:
+//   arg 1        self:lightuserdata
+//   arg 2        rootType:string (the script's host type name)
+//   arg 3..N     one or more field names (root→leaf order)
+//
+// Walk: for i = 3..N-1 the field at index i is an *intermediate*
+// hop whose type resolves to the next hop's typeName; the last field
+// (arg N) is the leaf primitive. Intermediate hops use
+// field->get(selfPtr) to advance the pointer + re-derive the next
+// typeName from field->getType()->getName(). The leaf hop reuses
+// pushFieldPrimitive (existing S3.10 dispatch).
+//
+// Returns nil on any unknown field / null self / type-name miss —
+// mirrors the S3.10 fail-safe so a typo in the codegen-emitted chain
+// doesn't crash the runtime.
+int ayt_reflect_get_field_chain_c(lua_State* L)
+{
+    int nargs = lua_gettop(L);
+    if (nargs < 4 || !lua_islightuserdata(L, 1) || !lua_isstring(L, 2)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    // Validate every arg is a string.
+    for (int i = 3; i <= nargs; ++i) {
+        if (!lua_isstring(L, i)) {
+            lua_pushnil(L);
+            return 1;
+        }
+    }
+    void* ptr = lua_touserdata(L, 1);
+    std::string typeName = lua_tostring(L, 2);
+
+    // Intermediate hops (3..nargs-1): each lookupField advances the
+    // pointer; the field's getType() name feeds the next lookup.
+    for (int i = 3; i < nargs; ++i) {
+        std::string fieldName = lua_tostring(L, i);
+        auto* field = lookupField(typeName, fieldName);
+        if (!field || ptr == nullptr) {
+            lua_pushnil(L);
+            return 1;
+        }
+        ptr = field->get(ptr);
+        auto* fieldType = field->getType();
+        if (!fieldType || !fieldType->getName()) {
+            lua_pushnil(L);
+            return 1;
+        }
+        typeName = fieldType->getName();
+    }
+
+    // Leaf hop.
+    std::string leafName = lua_tostring(L, nargs);
+    auto* leaf = lookupField(typeName, leafName);
+    if (!leaf || ptr == nullptr) {
+        lua_pushnil(L);
+        return 1;
+    }
+    void* leafPtr = leaf->get(ptr);
+    if (pushFieldPrimitive(L, leaf, leafPtr) == 0) {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
+// S3.11 — multi-hop struct chain write.
+//
+// Lua args:
+//   arg 1          self:lightuserdata
+//   arg 2          rootType:string
+//   arg 3..N-1     one or more field names (root→leaf order)
+//   arg N          value to store at the leaf
+//
+// Same walk as the get chain. The leaf hop dispatches on the
+// field's ITypeInfo name to write the Lua value at the leaf
+// address; intermediate hops are read-only offset math.
+int ayt_reflect_set_field_chain_c(lua_State* L)
+{
+    int nargs = lua_gettop(L);
+    // Minimum: (self, rootType, field1, value) -> 4 args.
+    if (nargs < 4 || !lua_islightuserdata(L, 1) || !lua_isstring(L, 2)) {
         return 0;
     }
-    ayt::log::error("ayt_reflect_set_field: %s.%s unsupported type %s",
-                    typeName.c_str(), fieldName.c_str(), tname);
+    for (int i = 3; i < nargs; ++i) {
+        if (!lua_isstring(L, i)) {
+            ayt::log::error("ayt_reflect_set_field_chain: non-string field name");
+            return 0;
+        }
+    }
+    int valueIdx = nargs;
+    void* ptr = lua_touserdata(L, 1);
+    std::string typeName = lua_tostring(L, 2);
+
+    // Intermediate hops (3..nargs-2): same walk as get_chain. The
+    // leaf field name is at index (nargs - 1).
+    int lastFieldIdx = nargs - 1;
+    for (int i = 3; i < lastFieldIdx; ++i) {
+        std::string fieldName = lua_tostring(L, i);
+        auto* field = lookupField(typeName, fieldName);
+        if (!field || ptr == nullptr) {
+            ayt::log::error("ayt_reflect_set_field_chain: %s.%s (unknown)",
+                            typeName.c_str(), fieldName.c_str());
+            return 0;
+        }
+        ptr = field->get(ptr);
+        auto* fieldType = field->getType();
+        if (!fieldType || !fieldType->getName()) {
+            return 0;
+        }
+        typeName = fieldType->getName();
+    }
+
+    std::string leafName = lua_tostring(L, lastFieldIdx);
+    auto* leaf = lookupField(typeName, leafName);
+    if (!leaf || ptr == nullptr) {
+        ayt::log::error("ayt_reflect_set_field_chain: %s.%s (unknown leaf)",
+                        typeName.c_str(), leafName.c_str());
+        return 0;
+    }
+    void* leafPtr = leaf->get(ptr);
+    if (storeFieldPrimitive(L, leaf, leafPtr, valueIdx) == 0) {
+        ayt::log::error("ayt_reflect_set_field_chain: %s.%s (unsupported leaf type)",
+                        typeName.c_str(), leafName.c_str());
+        return 0;
+    }
     return 0;
 }
 
@@ -445,6 +604,14 @@ struct LogiaRuntimeBridge::Impl {
         // against AYReflect's TypeRegistry at runtime.
         lua_register(lua, "ayt_reflect_get_field", &ayt_reflect_get_field_c);
         lua_register(lua, "ayt_reflect_set_field", &ayt_reflect_set_field_c);
+        // S3.11: multi-hop struct chain reflect (LG-05 extension).
+        // Chain is baked into Lua args; the bridge walks offset
+        // arithmetic via repeated field->get() and re-derives each
+        // intermediate type name from the field's ITypeInfo name.
+        lua_register(lua, "ayt_reflect_get_field_chain",
+                     &ayt_reflect_get_field_chain_c);
+        lua_register(lua, "ayt_reflect_set_field_chain",
+                     &ayt_reflect_set_field_chain_c);
 
         // Test-only witness: scripts can assign a string here to make
         // observable side effects for unit tests. Production code
