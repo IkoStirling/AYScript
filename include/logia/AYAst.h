@@ -119,6 +119,27 @@ public:
     ExprPtr index;
 };
 
+// S3.12+R3: table literal `{k1=v1, k2=v2, ...}`. Produced by the
+// parser when it sees a `{` after an expression position. Each
+// entry is `(key_expr, value_expr)`; the analyzer / codegen
+// builds a Lua table on the stack and indexes it by string key.
+// We use ExprPtr (not Token-based key) so the key can be any
+// expression — but in S3.12+R3 the analyzer only stamps `key`
+// for IdentifierExpr (field-name lookup). Anonymous entries
+// (no `=`, just `value`) are stored as `(nullptr, value_expr)`.
+// Currently not used by the parser; reserved for R3.5+ where the
+// parser will produce table-literal nodes.
+class TableExpr : public Expr {
+public:
+    struct Entry {
+        ExprPtr key;     // nullptr for array-style positional entry
+        ExprPtr value;
+    };
+    TableExpr(std::vector<Entry> entries)
+        : entries(std::move(entries)) {}
+    std::vector<Entry> entries;
+};
+
 class Stmt {
 public:
     virtual ~Stmt() = default;

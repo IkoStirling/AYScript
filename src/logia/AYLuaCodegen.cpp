@@ -560,6 +560,40 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         }
         return "nil";
     }
+    if (auto* t = dynamic_cast<const TableExpr*>(&expr)) {
+        // S3.12+R3: emit `{k1=v1, k2=v2, ...}` where each `ki`
+        // is a bareword identifier. Lua's table-constructor record
+        // syntax `name=value` requires the key to be an identifier
+        // (no quotes). The bridge reads each key with lua_getfield
+        // after the table is on the stack; lua_getfield works on
+        // both quoted-string and bareword table keys.
+        std::string out = "{";
+        for (size_t i = 0; i < t->entries.size(); ++i) {
+            if (i > 0) out += ", ";
+            const auto& e = t->entries[i];
+            if (e.key) {
+                // Identifier key — emit as bareword (no quotes).
+                std::string keyName;
+                if (auto* id = dynamic_cast<const IdentifierExpr*>(e.key.get())) {
+                    keyName = id->name;
+                } else {
+                    // R3.0 only supports identifier keys; otherwise
+                    // emit as `[expr] = value` syntax (Lua generic
+                    // table constructor).
+                    out += "[";
+                    out += emitExpr(*e.key);
+                    out += "] = ";
+                    out += emitExpr(*e.value);
+                    continue;
+                }
+                out += keyName;
+                out += " = ";
+            }
+            out += emitExpr(*e.value);
+        }
+        out += "}";
+        return out;
+    }
     errorAt(Token{}, "Unsupported expression in codegen");
     return "nil";
 }

@@ -537,6 +537,35 @@ int ayt_reflect_set_field_chain_c(lua_State* L)
 // Argument / return type tags recognized (mirrors pushFieldPrimitive
 // dispatch in §S3.10 — see above): "int"/"Int32", "float"/"Float32",
 // "bool"/"Bool", "double"/"Float64", "Int64".
+// =====================================================================
+// S3.12 (track R2 §5.7.4) — self.method(args) reflect call bridge
+// =====================================================================
+// S3.12+R3 extends the S3.12 dispatch to support:
+//   - std::string args + return (R3)
+//   - const-ref / const-ptr args to arbitrary types (R3) —
+//     bridge heap-allocates the target T, fills fields from a
+//     Lua table via field-by-field marshalling, passes &T.
+//   - by-value struct return (R3) — bridge reads fields via
+//     pushFieldPrimitive and builds a Lua table.
+//   - enum args / return (R3) — int-cast on the underlying type.
+//
+// Slot convention (uniform):
+//   args[I] = pointer to a heap- or stack-allocated value matching
+//   the parameter's PMF type. readArg in MethodInfoImpl dereferences.
+//   Primitives live in stack-allocated 8-byte slots. std::string
+//   and struct args live in heap-allocated slots; the cleanup
+//   queue (`cleanupQueue`) holds delete lambdas run unconditionally
+//   after invoke() returns. Const-ref / const-ptr args reuse the
+//   same heap slot; the PMF takes a reference/pointer into it.
+//
+// Limitations (R3.0):
+//   - std::string fields inside a struct fail closed (pushField-
+//     Primitive / storeFieldPrimitive reject std::string; pushed
+//     to R3.5 with placement-new design).
+//   - Table-literal in arg position requires pre-assigned `local`.
+//   - No nested struct fields inside struct args/return.
+//   - No std::vector / std::array args (track R4).
+// =====================================================================
 int ayt_reflect_call_method_c(lua_State* L)
 {
     int nargs = lua_gettop(L);
@@ -565,73 +594,183 @@ int ayt_reflect_call_method_c(lua_State* L)
         return 1;
     }
 
-    // Allocate per-arg slots, populate from Lua stack by type tag.
-    // All slots are 8 bytes (max of all supported primitives) so the
-    // raw memcpy paths inside MethodInfoImpl<T,Ret,Args...>::readArg
-    // can read the full sizeof(ArgT) for any of int/Int32/float/
-    // Float32/bool/Bool/double/Float64/Int64.
+    // Per-call slot container. Stack slots for primitives (8 bytes
+    // each — sufficient for int/Int32/float/Float32/bool/Bool/double/
+    // Float64/Int64 and the underlying types of enums). Heap slots
+    // for std::string and structs (lifetime managed by cleanupQueue).
     std::vector<uint64_t> argSlots(expected, 0);
     std::vector<const void*> argPtrs(expected, nullptr);
+
+    // Cleanup queue — every heap allocation registered here is freed
+    // after invoke() returns, regardless of whether invoke succeeded.
+    // Uses a manual cleanup struct to avoid std::function heap alloc
+    // and to keep the type-erased destructor keyed on the heap
+    // pointer's actual type.
+    struct HeapSlot {
+        void* ptr = nullptr;
+        void (*deleter)(void*) = nullptr;
+    };
+    std::vector<HeapSlot> cleanup;
+    auto registerCleanup = [&](void* p, void (*d)(void*)) {
+        cleanup.push_back({p, d});
+    };
+
+    // Marshal each Lua arg into its slot. Dispatch is by ITypeInfo
+    // tag. Note: MethodInfoImpl's readArg dereferences args[I] as
+    // the appropriate PMF parameter type — see
+    // AYMethodInfoImpl.h file-level comment.
     for (size_t i = 0; i < expected; ++i) {
         int stackIdx = static_cast<int>(i) + 4;
         auto* paramType = method->getParamType(i);
         const char* tname = paramType ? paramType->getName() : "int";
-        argPtrs[i] = &argSlots[i];
-        auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
-        if (eq("int") || eq("Int32")) {
+
+        // S3.12 + R3 primitive dispatch: write the value into the
+        // stack slot and set argPtrs[i] = &argSlots[i].
+        // R3 dispatch: heap-allocate std::string or struct, fill
+        // from the Lua table, and set argPtrs[i] = heap pointer.
+        if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0) {
             int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
             std::memcpy(&argSlots[i], &v, sizeof(int32_t));
-        } else if (eq("float") || eq("Float32")) {
+            argPtrs[i] = &argSlots[i];
+        } else if (std::strcmp(tname, "float") == 0 || std::strcmp(tname, "Float32") == 0) {
             float v = static_cast<float>(lua_tonumber(L, stackIdx));
             std::memcpy(&argSlots[i], &v, sizeof(float));
-        } else if (eq("bool") || eq("Bool")) {
+            argPtrs[i] = &argSlots[i];
+        } else if (std::strcmp(tname, "bool") == 0 || std::strcmp(tname, "Bool") == 0) {
             uint8_t v = lua_toboolean(L, stackIdx) ? 1u : 0u;
             std::memcpy(&argSlots[i], &v, sizeof(uint8_t));
-        } else if (eq("double") || eq("Float64")) {
+            argPtrs[i] = &argSlots[i];
+        } else if (std::strcmp(tname, "double") == 0 || std::strcmp(tname, "Float64") == 0) {
             double v = lua_tonumber(L, stackIdx);
             std::memcpy(&argSlots[i], &v, sizeof(double));
-        } else if (eq("Int64")) {
+            argPtrs[i] = &argSlots[i];
+        } else if (std::strcmp(tname, "Int64") == 0) {
             int64_t v = static_cast<int64_t>(lua_tointeger(L, stackIdx));
             std::memcpy(&argSlots[i], &v, sizeof(int64_t));
+            argPtrs[i] = &argSlots[i];
+        } else if (std::strcmp(tname, "std::string") == 0) {
+            // S3.12+R3: heap-allocate std::string. The PMF gets a
+            // copy via readArg's std::string branch. Bridge frees
+            // after invoke().
+            const char* s = lua_tostring(L, stackIdx);
+            auto* sp = new std::string(s ? s : "");
+            argPtrs[i] = sp;
+            registerCleanup(sp, [](void* p) { delete static_cast<std::string*>(p); });
+        } else if (paramType && paramType->getFieldCount() > 0) {
+            // S3.12+R3: struct arg. Default-construct T in heap
+            // memory and fill field-by-field from the Lua table.
+            // Lua table key = C++ field name (exact match, camelCase
+            // both sides — see design.md §5.7.4 R3 conventions).
+            // std::string fields inside the struct fail closed
+            // (pushFieldPrimitive / storeFieldPrimitive reject them;
+            // they keep their zero-init from the memset below).
+            size_t typeSize = paramType->getSize();
+            if (typeSize == 0) typeSize = sizeof(uint64_t);  // safety
+            void* mem = ::operator new(typeSize);
+            std::memset(mem, 0, typeSize);
+            size_t fieldCount = paramType->getFieldCount();
+            for (size_t fi = 0; fi < fieldCount; ++fi) {
+                auto* field = paramType->getField(fi);
+                if (!field) continue;
+                lua_getfield(L, stackIdx, field->getName());
+                if (!lua_isnil(L, -1)) {
+                    // storeFieldPrimitive reads from top of stack.
+                    void* fieldPtr = static_cast<uint8_t*>(mem) + field->getOffset();
+                    storeFieldPrimitive(L, field, fieldPtr, /*valueStackIdx=*/-1);
+                }
+                lua_pop(L, 1);
+            }
+            argPtrs[i] = mem;
+            registerCleanup(mem, [](void* p) { ::operator delete(p); });
         } else {
-            // Unknown type tag — treat as int. (Analyzer should have
-            // caught non-primitive args at compile time.)
+            // Unknown type tag — treat as int (enums ride on this
+            // path; the C++ enum auto-converts from int via
+            // std::underlying_type_t in MethodInfoImpl::readArg).
             int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
             std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+            argPtrs[i] = &argSlots[i];
         }
     }
 
+    // RAII: free heap-allocated arg slots when scope exits,
+    // regardless of whether invoke() succeeded.
+    struct ScopeGuard {
+        std::vector<HeapSlot>* q;
+        ~ScopeGuard() {
+            for (auto& s : *q) {
+                if (s.ptr && s.deleter) s.deleter(s.ptr);
+            }
+        }
+    } guard{&cleanup};
+
     const void* retPtr = method->invoke(selfPtr, argPtrs.data());
     auto* retType = method->getReturnType();
-    if (!retType || retPtr == nullptr) {
-        // void method
+    if (retPtr == nullptr) {
+        // void method (or a method that genuinely returned nothing)
         return 0;
     }
-
-    // Push the return value onto the Lua stack using the same dispatch
-    // as pushFieldPrimitive. The retPtr points into a thread-local
-    // buffer owned by MethodInfoImpl — valid until the next invoke()
-    // call, which is fine because the bridge copies the bytes into
-    // a Lua primitive before any further script execution.
-    const char* tname = retType->getName();
-    auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
-    if (eq("int") || eq("Int32")) {
+    if (retType == nullptr) {
+        // R3.0: retType is null for return types that aren't
+        // registered as AYReflect types (e.g. C++ enum, which
+        // rides on the int path). The MethodInfoImpl stored the
+        // underlying-type int in retPtr; push it as a Lua integer.
+        // S3.12+R3.5+ will add a dedicated EnumTypeInfo<E> that
+        // returns the enum type name; the int fallback here is
+        // preserved.
         int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
         lua_pushinteger(L, static_cast<lua_Integer>(v));
-    } else if (eq("float") || eq("Float32")) {
+        return 1;
+    }
+
+    // Push the return value. retPtr points into the thread-local
+    // return buffer (owned by MethodInfoImpl::detail::tlsReturnBuffer)
+    // — valid until the next invoke() call. We read it into a Lua
+    // value before any further script execution.
+    const char* tname = retType->getName();
+    if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0) {
+        int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
+        lua_pushinteger(L, static_cast<lua_Integer>(v));
+    } else if (std::strcmp(tname, "float") == 0 || std::strcmp(tname, "Float32") == 0) {
         float v = 0.0f; std::memcpy(&v, retPtr, sizeof(float));
         lua_pushnumber(L, static_cast<lua_Number>(v));
-    } else if (eq("bool") || eq("Bool")) {
+    } else if (std::strcmp(tname, "bool") == 0 || std::strcmp(tname, "Bool") == 0) {
         bool v = false; std::memcpy(&v, retPtr, sizeof(bool));
         lua_pushboolean(L, v);
-    } else if (eq("double") || eq("Float64")) {
+    } else if (std::strcmp(tname, "double") == 0 || std::strcmp(tname, "Float64") == 0) {
         double v = 0.0; std::memcpy(&v, retPtr, sizeof(double));
         lua_pushnumber(L, static_cast<lua_Number>(v));
-    } else if (eq("Int64")) {
+    } else if (std::strcmp(tname, "Int64") == 0) {
         int64_t v = 0; std::memcpy(&v, retPtr, sizeof(int64_t));
         lua_pushinteger(L, static_cast<lua_Integer>(v));
+    } else if (std::strcmp(tname, "std::string") == 0) {
+        const std::string* sp = static_cast<const std::string*>(retPtr);
+        lua_pushlstring(L, sp->data(), sp->size());
+    } else if (retType->getFieldCount() > 0) {
+        // S3.12+R3: struct return. Build a Lua table and fill each
+        // field via pushFieldPrimitive. Recursive for nested struct
+        // fields (R3.0 limits: no nested struct fields per design).
+        // The retPtr points to a TLS buffer holding a copy of the
+        // struct by value; pushFieldPrimitive needs a non-const void*
+        // (it does not mutate the bytes, but the signature requires
+        // it). const_cast is safe here.
+        lua_newtable(L);
+        size_t fieldCount = retType->getFieldCount();
+        for (size_t fi = 0; fi < fieldCount; ++fi) {
+            auto* field = retType->getField(fi);
+            if (!field) continue;
+            void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(retPtr))
+                             + field->getOffset();
+            lua_pushstring(L, field->getName());
+            pushFieldPrimitive(L, field, fieldPtr);
+            lua_settable(L, -3);
+        }
     } else {
-        lua_pushnil(L);
+        // Unknown return type — most commonly an enum (R3.0 ships
+        // enum args/return on the int path but doesn't register a
+        // dedicated EnumTypeInfo for them). The MethodInfoImpl
+        // stores the underlying-type int in retPtr; push it.
+        int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
+        lua_pushinteger(L, static_cast<lua_Integer>(v));
     }
     return 1;
 }

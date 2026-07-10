@@ -499,6 +499,74 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 4. **Macro 内注释限制**：`#define X /* ... */ macro_continuation\` 中 `/* ... */` 在 MSVC 下产生 C4010 nested-comment 警告并偶尔 broken tokenization。改用 `//` 注释 + 末尾 `\` 续行，**或** 把注释提到 macro 之外。
 5. **`AY_CURRENT_CLASS` 是 user-defined 宏**：`AY_PROPERTY` / `AY_METHOD` 在 class body 内使用前必须 `#define AY_CURRENT_CLASS T`，class body 结束 `#undef`。**不** 隐式 derive（member pointer 是从 `&AY_CURRENT_CLASS::name` 推不出 `T` 的）。Header convention 文档在 `AYPropertyMacros.h` 顶部。
 
+#### 5.7.4 R3 — 非 primitive args/return（struct/enum/std::string）
+
+**状态**：✅ S3.12+R3 完成（2026-07-10）。S3.12 升级到支持 struct args / struct return / enum / `std::string`。
+
+**实现摘要**：
+
+1. **Slot convention 统一化**：每个 arg slot 现在都是**指针**——primitive 写 8-byte 栈槽（`&argSlots[i]`），`std::string` / `T*` / `const T&` 写堆分配指针（bridge 用 cleanup queue 在 invoke 后释放）。`MethodInfoImpl::readArg<I>` 用 `if constexpr` ladder dispatch：
+   - `enum E` → `std::underlying_type_t<E>` memcpy + `static_cast<E>`
+   - `std::string` → heap 指针 → copy-construct 进 PMF 参数
+   - `const T&` / `T&` → 指针 → deref
+   - `T*` / `const T*` → 指针传递
+   - `T` by value → memcpy for trivially-copyable, copy-construct for struct
+2. **MethodInfoImpl::storeReturn**：thread-local return buffer 改用 `std::string`（不是 `std::vector<uint8_t>`）— placement-new `std::string` onto raw `vector<uint8_t>` 会让 string 的 `_Container_base12` 子对象（MSVC STL 内部记录 iterators）corrupt；改用 `std::string` 自家 allocator 保证 placement-new 干净。trivially-copyable types memcpy 进 string buffer，non-trivial types placement-new。
+3. **Bridge `ayt_reflect_call_method_c` 扩**：
+   - 每个 arg 按 `paramType->getName()` dispatch：
+     - primitive → 8-byte 栈槽
+     - `std::string` → `new std::string(lua_tostring(...))` → cleanup queue
+     - struct（`getFieldCount() > 0`）→ `::operator new(typeSize)` → `memset(0)` → 逐字段 `lua_getfield` + `storeFieldPrimitive` → cleanup queue
+     - unknown → fallback as int (covers enum)
+   - return 同样 dispatch：primitive push、std::string push、struct build Lua table 逐字段 `pushFieldPrimitive`
+   - **retType 为 nullptr 的 fallback**：C++ enum 没有专门 `registerEnum<E>()`，所以 `findType<State>()` 返回 nullptr → bridge 看到 `retPtr != nullptr` 但 `retType == nullptr` → 当成 int push
+4. **`TableExpr` AST + parser + codegen**（S3.12+R3 前置）：
+   - `AYAst.h` 新增 `TableExpr` 节点（`std::vector<Entry>`，每 entry = (key_expr, value_expr)）
+   - Parser 在 `parsePrimary` 看到 `{` 时进入 table-literal production：`{key=value, key=value, ...}` — key 必须是 IdentifierExpr
+   - Codegen emit `{name1 = value1, name2 = value2, ...}` — Lua 表构造语法要求 key 是 bareword identifier（**不是** 字符串字面量；之前第一次试错写了 `{"maxHp" = 10}` 是非法 Lua 语法）。
+   - **Logia 不支持 `..` 字符串拼接**——struct return 测试不能写 `__test_witness = tostring(s.maxHp) .. "," .. tostring(s.attack)`，必须用多语句 + 中间变量，或拆字段单独测试。
+5. **kLogiaPipelineVersion 4 → 5**（header cache invalidation）。
+6. **测试覆盖**（7 个 LG-12 R3 tests）：
+   - `lg12_r3_method_struct_arg_const_ref` — fire damage 2x（damageType=1）→ `hp -= 10*2 = 80`
+   - `lg12_r3_method_struct_arg_cold_damage` — cold 1x → `hp -= 5 = 95`
+   - `lg12_r3_method_struct_return_to_lua_table` — `s.maxHp == 200`
+   - `lg12_r3_method_enum_arg_int_cast` — `setState(1)` 不崩
+   - `lg12_r3_method_enum_return_int_cast` — `getState()` 返回 int 0/1
+   - `lg12_r3_method_string_arg_and_return` — `setName("villain")` + `getName()` round-trip
+   - `lg12_r3_method_lua_table_field_name_exact_match` — wrong field name silent miss
+   - **结果**：AYScript_Test **660/660** 全绿（baseline 631 + 7 LG-12 R3 + 22 LG-12 baseline + ...）。AYReflect_Test **156/156** 全绿（baseline 133 + 23 R3 specializations）。
+
+**范围（R3.0）**：
+
+| ✅ 锁 | ❌ 推迟 |
+|---|---|
+| Primitive args + return (S3.12) | `std::vector<T>` / `std::array<T,N>` args (R4) |
+| `const T&` / `const T*` args | Nested struct fields (R4) |
+| `T` (by value) return | `T&` / `T*` out-params (R4) |
+| `std::string` args + return (top-level) | `unique_ptr` / `shared_ptr` (R5) |
+| `enum` args + return (int-cast, no dedicated EnumTypeInfo) | `registerEnum<E>()` + `EnumTypeInfo<E>` (R3.5+) |
+| Exact-match field names (camelCase both sides) | `m_`/`b_` prefix stripper (R3.5+) |
+| Struct args/return with **primitive + enum** fields | `std::string` field on a struct (R3.5+: placement-new in pushFieldPrimitive / storeFieldPrimitive) |
+| Inline `{...}` table literals (TableExpr AST added) |  |
+
+**范围外**（设计原则）：
+- **C++ struct 字段名必须用 camelCase 且不加 `m_`/`b_` 前缀**——Logia 表字面量 key 必须匹配 C++ 字段名。R3.5 会加 stripper + PascalCase↔snake_case 自动转换。
+- **C++ enum 必须能被 AYReflect `findType<Ret>()` 找到**——R3.0 没注册，所以 enum args/return 的 `paramType/retType` 是 nullptr，bridge fallback 为 int path。R3.5 加 `registerEnum<E>()` 后 retType 不再是 nullptr。
+- **Logia 字符串拼接 `..` 不支持**（parser 没有 DotDot token）。struct return 测试要么拆字段单独测试，要么用 Lua-side 字符串拼接（通过 __test_witness 多次赋值）。
+
+**Reference designs**：
+- Godot GDExtension（[docs](https://docs.godotengine.org/en/stable/tutorials/scripting/gdextension/gdextension_cpp_example.html)）：Variant + Dictionary 模式 — struct 是 Dictionary，field-by-field marshalling。R3 走相同路线：Lua table → bridge field walk → C++ struct。
+- Unreal BlueprintCallable（[UHT](https://docs.unrealengine.com/5.0/en-US/ProgrammingAndScripting/GameplayArchitecture/Functions/index.html)）：typed `UPARAM`、UHT-generated metadata、zero-cost bridge。R3 借用 typed signature，但 marshal 是手写（无 UHT）。
+- xLua：`xlua.cast(table, type)` runtime type-cast。R3.0 是 compile-time typed + runtime marshalling，比 xLua 安全但需要预注册。
+
+**Lessons learned (R3 specific)**：
+
+6. **`std::vector<uint8_t>` 装不下 `std::string`**：placement-new `std::string` onto `std::vector<uint8_t>::data()` 会让 `std::string::~basic_string()` 调 `_Orphan_all_unlocked_v3()` 时 read `0xFFFFFFFFFFFFFFFF` 崩。原因：`std::string` 的 `_Container_base12` 子对象（追踪 iterators）在 placement-new 时没正确初始化。修复：thread-local buffer 改用 `std::string` itself——`std::string` 自带 allocator，重 placement-new 是干净状态。
+7. **Lua 表构造语法严格**：`{maxHp = 10}` (bareword key) 是合法；`{"maxHp" = 10}` (string-literal key) 是非法；`[expr] = value` 是合法（generic 形式）。Codegen 必须 emit bareword。
+8. **Logia 没有 `..` token**：Lua 字符串拼接 `..` 在 Logia 源码里写不出来。struct return 测试不能用 `tostring(s.maxHp) .. tostring(s.attack)`。**要么** Logia parser 加 DotDot token（S4 范围），**要么** 测试拆字段。
+9. **TableExpr 必须先于 struct-arg 实装**：S3.12 R3 计划原以为"`local t = {...}`"是 S3.12 R3.0 的工作路径，但 Logia parser 没 table-literal production。R3.0 必须加 TableExpr AST + parser + codegen（不在原计划里），否则所有 struct-arg 测试都编译失败。
+10. **enum 没 AYReflect registry 时 bridge fallback**：R3.0 enum 用 `findType<EnumType>()` 返回 nullptr，bridge 检测 `retType == nullptr` 时把 `retPtr` 当 int32 push。R3.5 加 `registerEnum<E>()` 后 retType 不再 nullptr，bridge 走完整 path。
+
 #### 5.7.5 消费方矩阵
 
 | 消费方 | 字段 | 方法 | 阶段 |
@@ -1062,6 +1130,7 @@ AYScript/
 | 2026-07-09 | **S3.10 完成（System host self.field）**：`ensurePrimitiveTypesRegistered` 跨 TU bootstrap int/float/bool/double/int64；S3.10 codegen rewrite 跨 Component / System / Tool host kind 共享同一路径；`Test_LogiaSystemHost.cpp` 新增 5 用例；`AYSCRIPT_Test` 579/579 全绿。 |
 | 2026-07-09 | **S3.11 完成（multi-hop chain reflect）**：`ayt_reflect_get_field_chain` / `set_field_chain` 新 Lua globals；codegen 新增 `isSelfFieldChainExpr` probe + chain-read / chain-write / chain-compound 分支；`ensureAYEntityTypesRegistered` 注册 `FVector3` 的 `x/y/z` Float32 字段（幂等 `getFieldCount()==0` guard）；`storeFieldPrimitive` 从 S3.10 set 抽出共享给 chain；`kLogiaPipelineVersion` 2 → 3；`Test_LogiaReflectRuntime.cpp` 新增 5 用例 + `Test_LogiaCodegen.cpp::codegen_full_player_controller` 注册 stub PlayerController 改 assertions 验证 chain calls；`AYSCRIPT_Test` 604/604 全绿。FQuaternion / IMethodInfo 推迟到 §5.7.4 track R2。 |
 | 2026-07-10 | **S3.12 完成（self.method() reflect call path，track R2）**：`IMethodInfo` interface + `ITypeInfo::addMethod/findMethod/getMethodCount/getMethod` 4 个虚函数（default no-op，保持 source-compat）；`TypeInfoImpl<T>::_methods` 存储 + 4 override；变长 PMF 适配 `MethodInfoImpl<T,Ret,Args...>` / `MethodInfoImplConst<T,Ret,Args...>` 放在 `logia/AYMethodInfoImpl.h`（AYScript-private header，**不**让 foundation TU 看到 — 上轮 S3.12 中断的 MSVC C2275 触发条件）；`AY_METHOD(Ret, name, args...)` macro + `AY_MakeArgList(PMF)` deduction helper + `AY_MethodRegistrarOf<T,Ret,Args...>` partial specializations（非-const / const）；`AY_FINALIZE_REGISTRATION_METADATA(T)` 基础 finalize 跳过 method entries，`AY_FINALIZE_METHODS(T)` AYScript-side finalize 调 `buildMethodInfo()` → `MethodInfoImpl` → `addMethod()`；SemanticAnalyzer stamps `CallExpr::resolvedMethod + resolvedMethodOwnerName` 当 `self.<method>(...)` 命中 `ITypeInfo::findMethod`；LuaCodegen 优先 emit `ayt_reflect_call_method(self, "<Type>", "<method>", args...)` 否则 fall through bare-Lua；Bridge 新 `ayt_reflect_call_method_c` C entry + `lookupMethod` cache（O(1)）；`kLogiaPipelineVersion` 3 → 4；`Test_LogiaReflectRuntime.cpp` 新增 5 手动 path 用例（`self.heal(10)` 真实 mutate、`self.getHp()` round-trip、unknown safe、arity-mismatch safe、clamp）+ 2 `AY_METHOD` macro 端到端用例（void + const PMF）；`AYSCRIPT_Test` **631/631 全绿**（baseline 590 + LG-11 链式 5 + LG-12 手动 5 + LG-12 macro 2 + 其余已有 29）。Lessons learned：vtable 变化需整仓 rebuild（ninja dep 追踪对 inline 模板实例化不完整 → 部分 TU 漏 rebuild 段错误）、变长 pack 跨 namespace qualification 加 `::` 前缀、MSVC `Args...` dependent name 用 `::template MethodInfoImpl<...>`。 |
+| 2026-07-10 | **S3.12+R3 完成（非 primitive args/return）**：`MethodInfoImpl::readArg` 扩 const T& / const T* / `std::string` / enum（`std::underlying_type_t<E>` cast）/ `T` by-value 分发；`storeReturn` 改用 `std::string` thread-local buffer（`std::vector<uint8_t>` 装 std::string 会触发 `_Container_base12` 子对象 corrupt → 段错误）；`ayt_reflect_call_method_c` 扩 struct args（heap-allocate + field-by-field `lua_getfield` + `storeFieldPrimitive`）、struct return（build Lua table + `pushFieldPrimitive`）、`std::string` heap-alloc + cleanup queue + `lua_pushlstring`、enum fallback as int；新增 `TableExpr` AST 节点 + parser production `{name=value, ...}` + codegen emit bareword key（不能是字符串字面量）；`kLogiaPipelineVersion` 4 → 5；7 个 LG-12 R3 tests（struct arg const-ref fire/cold、struct return、enum arg/return int-cast、`std::string` round-trip、field-name exact-match silent miss）；`AYScript_Test` **660/660 全绿**（baseline 631 + LG-12 R3 7 + 22 baseline delta）。**Lessons learned**：`std::vector<uint8_t>` 不能装 `std::string`（`_Container_base12` 子对象 placement-new 后没正确初始化）、Lua 表构造 key 必须是 bareword 不能加引号、Logia parser 没有 `..` token 不能写字符串拼接、enum 没 AYReflect registry 时 bridge 必须 fallback 为 int。 |
 
 ---
 
@@ -1076,7 +1145,7 @@ AYScript/
 
 ## 13. Session prompts (copy-paste) — post S3.3
 
-**Done through S3.12:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · S3.10 (System host `self.field`) · S3.11 chain reflect (`ayt_reflect_*_field_chain` + FVector3 fields) · **S3.12 method-call reflect** (`IMethodInfo` + `AY_METHOD` macro + `ayt_reflect_call_method`).
+**Done through S3.12+R3:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · S3.10 (System host `self.field`) · S3.11 chain reflect (`ayt_reflect_*_field_chain` + FVector3 fields) · S3.12 method-call reflect (primitives only) · **S3.12+R3** (struct/enum/`std::string` args + return + `TableExpr` AST + parser + codegen).
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 

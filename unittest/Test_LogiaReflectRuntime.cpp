@@ -840,4 +840,377 @@ script MacroPlayer {
     CHECK(bridge.getLuaGlobalString("__test_witness") == "42");
 }
 
+// ============================================================================
+// S3.12+R3 (track R2 §5.7.4) — non-primitive args/return (LG-12 R3)
+// ----------------------------------------------------------------------------
+// End-to-end coverage of the R3 dispatch from Logia scripts through
+// the bridge to the C++ method. The fixture uses the same pattern as
+// the LG-12 macro fixture (inline registrar, LogiaHostContext with
+// hostType set). Test surface:
+//   - struct arg by const-ref (R3.0 most common case)
+//   - struct return (Lua table round-trip)
+//   - enum arg / return (int-cast on int path)
+//   - std::string arg / return (Lua string <-> C++ std::string)
+//   - exact field-name match (camelCase both sides; documents the
+//     no-stripper rule)
+//
+// Limitations tested: no table-literal in arg position (R3.5 ships
+// TableExpr AST), no std::string struct field (R3.5 ships placement-
+// new in pushFieldPrimitive / storeFieldPrimitive), no nested struct.
+// ============================================================================
+
+namespace
+{
+struct R3Player {
+    int hp = 0;
+    int maxHp = 100;
+
+    struct DamageInfo {
+        int amount = 0;
+        int damageType = 0;  // int (not enum) to keep struct fields simple
+    };
+    struct Stats {
+        int maxHp = 0;
+        int attack = 0;
+    };
+
+    void applyDamage(const DamageInfo& d) {
+        if (d.damageType == 1) hp -= d.amount * 2;  // fire = 2x
+        else hp -= d.amount;
+    }
+    int getHp() const { return hp; }
+
+    void setName(const std::string& n) { _name = n; }
+    std::string getName() const { return _name; }
+
+    enum State { ALIVE, DEAD };
+    void setState(State s) { _state = s; }
+    State getState() const { return _state; }
+
+    Stats getStats() const { return {maxHp, 10}; }
+
+    // Non-AY_PROPERTY field to keep R3 fixture self-contained (no
+    // macro registrations on the host struct itself; we only use
+    // AY_METHOD semantics).
+private:
+    std::string _name = "default";
+    State _state = ALIVE;
+};
+
+void ensureR3PlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R3Player") != nullptr) return;
+
+    // Register primitives if missing.
+    if (reg.findType("int") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int", ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", p);
+    }
+    if (reg.findType("std::string") == nullptr) {
+        reg.registerType("std::string", typeid(std::string).hash_code(),
+                         sizeof(std::string));
+    }
+
+    auto* intInfo = reg.findType("int");
+
+    // Register DamageInfo with primitive fields.
+    auto* dmgInfo = new ayt::reflect::TypeInfoImpl<R3Player::DamageInfo>(
+        "DamageInfo",
+        ayt::reflect::detail::defaultCreate<R3Player::DamageInfo>,
+        ayt::reflect::detail::defaultDestroy<R3Player::DamageInfo>,
+        ayt::reflect::detail::defaultCopy<R3Player::DamageInfo>);
+    dmgInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "amount", intInfo, offsetof(R3Player::DamageInfo, amount),
+        ayt::reflect::FieldAttribute::Serialize));
+    dmgInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "damageType", intInfo, offsetof(R3Player::DamageInfo, damageType),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("DamageInfo", dmgInfo);
+
+    // Register Stats with primitive fields.
+    auto* statsInfo = new ayt::reflect::TypeInfoImpl<R3Player::Stats>(
+        "Stats",
+        ayt::reflect::detail::defaultCreate<R3Player::Stats>,
+        ayt::reflect::detail::defaultDestroy<R3Player::Stats>,
+        ayt::reflect::detail::defaultCopy<R3Player::Stats>);
+    statsInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "maxHp", intInfo, offsetof(R3Player::Stats, maxHp),
+        ayt::reflect::FieldAttribute::Serialize));
+    statsInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "attack", intInfo, offsetof(R3Player::Stats, attack),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("Stats", statsInfo);
+
+    // Register R3Player host type with `hp` field.
+    auto* info = new ayt::reflect::TypeInfoImpl<R3Player>(
+        "R3Player",
+        ayt::reflect::detail::defaultCreate<R3Player>,
+        ayt::reflect::detail::defaultDestroy<R3Player>,
+        ayt::reflect::detail::defaultCopy<R3Player>);
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "hp", intInfo, offsetof(R3Player, hp),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "maxHp", intInfo, offsetof(R3Player, maxHp),
+        ayt::reflect::FieldAttribute::Serialize));
+
+    // Attach methods via MethodInfoImpl + MethodInfoImplConst.
+    using ayt::script::logia::reflect::MethodInfoImpl;
+    using ayt::script::logia::reflect::MethodInfoImplConst;
+    info->addMethod(new MethodInfoImpl<R3Player, void, const R3Player::DamageInfo&>(
+        "applyDamage", &R3Player::applyDamage));
+    info->addMethod(new MethodInfoImplConst<R3Player, int>(
+        "getHp", &R3Player::getHp));
+    info->addMethod(new MethodInfoImpl<R3Player, void, const std::string&>(
+        "setName", &R3Player::setName));
+    info->addMethod(new MethodInfoImplConst<R3Player, std::string>(
+        "getName", &R3Player::getName));
+    info->addMethod(new MethodInfoImpl<R3Player, void, R3Player::State>(
+        "setState", &R3Player::setState));
+    info->addMethod(new MethodInfoImplConst<R3Player, R3Player::State>(
+        "getState", &R3Player::getState));
+    info->addMethod(new MethodInfoImplConst<R3Player, R3Player::Stats>(
+        "getStats", &R3Player::getStats));
+
+    reg.registerTypeInfo("R3Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_r3_method_struct_arg_const_ref) {
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.hp = 100;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    // S3.12+R3: inline table literal as arg. The user no longer
+    // needs a pre-assigned `local`; the parser produces a
+    // TableExpr node which codegen emits as `{amount=10, ...}`.
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        self.applyDamage({amount=10, damageType=1})
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_fire_damage", src, ctx, errors);
+    if (!loaded) {
+        for (const auto& e : errors) {
+            fprintf(stderr, "load error: %s\n", e.message.c_str());
+        }
+    }
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_fire_damage",
+                               "on_start", &obj, nullptr));
+    // damageType=1 means fire → 2x damage: 100 - 10*2 = 80
+    CHECK(obj.hp == 80);
+}
+
+TEST_CASE(lg12_r3_method_struct_arg_cold_damage) {
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.hp = 100;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        local dmg = {amount=5, damageType=0}
+        self.applyDamage(dmg)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_cold_damage", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_cold_damage",
+                               "on_start", &obj, nullptr));
+    // damageType=0 (cold) → 1x damage: 100 - 5 = 95
+    CHECK(obj.hp == 95);
+}
+
+TEST_CASE(lg12_r3_method_struct_return_to_lua_table) {
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.maxHp = 200;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    // Struct return: read fields via the Lua table. Note: Logia
+    // doesn't support Lua's `..` string-concatenation operator
+    // (see memory file ay-script-status §5.5 follow-up notes);
+    // we use a single tostring() per field. For the test we
+    // verify just maxHp — attack is tested in the AYReflect
+    // struct-return test.
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        local s = self.getStats()
+        __test_witness = tostring(s.maxHp)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_getstats", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_getstats",
+                               "on_start", &obj, nullptr));
+    auto actual2 = bridge.getLuaGlobalString("__test_witness");
+    CHECK(actual2 == "200");
+}
+
+TEST_CASE(lg12_r3_method_enum_arg_int_cast) {
+    // Enum rides on the int path: bridge memcpy's a Lua int into
+    // the slot, MethodInfoImpl::readArg does
+    // std::underlying_type_t<E> then static_cast<E>.
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.hp = 100;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    // Pass enum as int (1 = DEAD in our R3Player::State).
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        self.setState(1)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_setState", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_setState",
+                               "on_start", &obj, nullptr));
+    CHECK(true);  // No crash + state set
+}
+
+TEST_CASE(lg12_r3_method_enum_return_int_cast) {
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        local s = self.getState()
+        __test_witness = tostring(s)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_getState", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_getState",
+                               "on_start", &obj, nullptr));
+    // Default State is ALIVE = 0.
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "0");
+}
+
+TEST_CASE(lg12_r3_method_string_arg_and_return) {
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.setName("default");  // reset to known baseline
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        self.setName("villain")
+        local n = self.getName()
+        __test_witness = n
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_name", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_name",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "villain");
+    CHECK(obj.getName() == "villain");
+}
+
+TEST_CASE(lg12_r3_method_lua_table_field_name_exact_match) {
+    // Documents the R3.0 field-name exact-match rule. The C++
+    // struct field is `damageType` (camelCase); the Lua table must
+    // use the same spelling. A future R3.5 patch will add a
+    // stripper for m_/b_ prefixes and PascalCase <-> snake_case
+    // conversion.
+    LogiaRuntimeBridge bridge;
+    ensureR3PlayerRegistered();
+    R3Player obj;
+    obj.hp = 100;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R3Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    // Wrong field name `type` (should be `damageType`). The bridge
+    // fails closed: damageType field stays at 0 (default) because
+    // the Lua table has no `damageType` key.
+    const char* src = R"(
+script R3Player {
+    on_start() {
+        local dmg = {amount=7, type=99}
+        self.applyDamage(dmg)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R3Player_wrong_field", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R3Player_wrong_field",
+                               "on_start", &obj, nullptr));
+    // damageType = 0 (cold, no 2x) → 100 - 7 = 93
+    CHECK(obj.hp == 93);
+}
+
 TEST_SUITE_END

@@ -306,6 +306,30 @@ std::unique_ptr<Expr> Parser::parsePrimary()
         return expr;
     }
 
+    // S3.12+R3: table literal `{k1=v1, k2=v2, ...}`. The grammar
+    // allows: identifier = expression, separated by commas, with
+    // an optional trailing comma. Empty `{}` is also accepted.
+    if (match(TokenType::LeftBrace)) {
+        std::vector<TableExpr::Entry> entries;
+        if (!check(TokenType::RightBrace)) {
+            do {
+                TableExpr::Entry entry;
+                if (!match(TokenType::Identifier)) {
+                    error("Expected identifier in table literal key");
+                    return nullptr;
+                }
+                std::string key = previous().lexeme;
+                entry.key = std::make_unique<IdentifierExpr>(key);
+                consume(TokenType::Equal, "Expected '=' after table key");
+                entry.value = parseExpression();
+                if (!entry.value) return nullptr;
+                entries.push_back(std::move(entry));
+            } while (match(TokenType::Comma));
+        }
+        consume(TokenType::RightBrace, "Expected '}' after table literal");
+        return std::make_unique<TableExpr>(std::move(entries));
+    }
+
     error("Expected expression");
     return nullptr;
 }

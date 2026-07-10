@@ -36,9 +36,19 @@ namespace ayt::script
 //       reflect call path. Adds `ayt_reflect_call_method` C entry
 //       and stamps CallExpr::resolvedMethod. MethodInfoImpl lives
 //       in AYScript-private `logia/AYMethodInfoImpl.h` to keep the
-//       variadic pack out of the foundation TU (see AYReflect
-//       design.md §S3.12 lessons-learned).
-constexpr std::size_t kLogiaPipelineVersion = 4u;
+//       variadic pack out of the foundation TU.
+//   5 — S3.12+R3 (track R2 §5.7.4): extend self.method(args) to
+//       support struct args (const T& / const T*), struct return,
+//       enum args/return, std::string args/return. MethodInfoImpl
+//       readArg / invokeImpl extended with a uniform slot convention
+//       (args[i] = pointer to marshalled value; readArg dereferences
+//       based on PMF parameter type). Bridge marshals Lua table → T
+//       field-by-field and T → Lua table for return. Enum rides on
+//       the int path with std::underlying_type_t cast in readArg.
+//       Limitations: no nested struct fields, no table-literal in
+//       arg position (require `local`), no std::vector/array args
+//       (track R4). See design.md §5.7.4 R3.
+constexpr std::size_t kLogiaPipelineVersion = 5u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
