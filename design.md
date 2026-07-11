@@ -2,7 +2,7 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-11）**：**Phase S0–S3 + S3.12+R3 + R4.0 已交付**；`AYScript_Test` **671/671** 全绿；`kLogiaPipelineVersion = 5`。  
+> **文档状态（2026-07-11）**：**Phase S0–S3 + S3.12+R3 + R4.0 + Audit fix 已交付**；`AYScript_Test` **692/692** 全绿；`kLogiaPipelineVersion = 6`。  
 > **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R4.x 接续：R4.1 vector/array args → R4.2 T* out-param。  
 > **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
@@ -201,10 +201,10 @@ script PlayerController {
 1. **`script Name { ... }`**：顶层行为块；`Name` 应对应 AYReflect 中已注册的 C++ host 类型（**S2.5 运行时**通过 `ScriptComponent::setScriptName("Name")` 绑定到实体组件实例）。
 2. **`var x: T = ...`**：纯 Lua local 状态（self 不可见）。仅用于脚本内部计数器、缓存等。
 3. **`self`**：指向当前 host 实例的 lightuserdata。**S2.5** = `ScriptComponent*`；`self.field` 走 AYReflect（须已在 C++ 用 `AY_PROPERTY` 注册）。
-4. **生命周期是约定方法名**：S2.5 标准集为 `on_start` / `on_update` / `on_destroy`；源码可写 `on_update(dt: float)` 作文档性参数，codegen 仍 emit `function M.on_update(self)`，Lua 侧由 bridge 传入 `dt`。**S3** 其他 host 可定义 `run()`、`on_damage()` 等，由调度方调用。
+4. **生命周期是约定方法名**：S2.5 标准集为 `on_start` / `on_update` / `on_destroy`；源码可写 `on_update(dt: float)`（参数被当真传入 Lua body，codegen emit `function M.on_update(self, dt)`；bridge 在 `callLifecycle` 同步把 `dt` 推到对应位置）。**S3** 其他 host 可定义 `run()`、`on_damage()` 等，由调度方调用。**2026-07-11 audit 调整**：原先的"documentary param"措辞已过时，跟 `emitLifecycleFunc` line 151-154 + `callLifecycle` line 1334 实情不符。玩家 controller 示例（`self.jump_force * dt`）真正在用了 dt。
 5. **类型写引擎认识的**：`Entity`、`Transform`、`float` 等，由 Reflect 注册表解析。
 6. **snake_case**：关键字与 API 统一蛇形命名。
-7. **无 Lua 泄漏**：不提供 `local` / `nil` / `pcall` / `require` 等给用户。
+7. **无 Lua 泄漏**：不提供 `local` / `nil` / `pcall` / `require` 等给用户。**2026-07-11 更新**：彻底硬拒会破坏 R3 / R4 测试的兼容性，所以 `local`/`nil` 暂保留为 Identifier（纯字面 emit），SemanticAnalyzer 改 emit 一条 soft warning（`LuaKeywordLeak`）把 leak 暴露给读者。R5+ 再考虑硬拒。`function` 已升级为 Logia keyword（script-block scope helper）。
 
 ### 2.4 后期语法扩展（非 v1 阻塞）
 
@@ -600,6 +600,55 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 11. **嵌套 marshal 用绝对索引 `lua_settable(L, subTableIdx)` 而非 `lua_settable(L, -3)`**：相对索引 (-3) 在递归深处因为 pushFieldPrimitive 内部又 `lua_newtable` push 了一个新的 sub-table，**index -3 重新指向会错**（曾经我 DBG 看到 -3 = "location" 而不是 Vector2 sub-table — 因为新 push 加进来后相对索引移动）。捕获 `subTableIdx = lua_gettop(L)` 在 `lua_newtable` 之后立即捕，inner settable 全部用绝对值 — 这是 deep-recursive Lua C API 的关键模式。
 12. **AYReflect 测试 fixture 共享 type-name 是隐藏的 dependency 风险**：R3 fixture 注册 `R3Player::Stats as "Stats"`,R4 fixture 想注册 `R4Player::Stats as "Stats"`。TypeRegistry 不阻止重名 — `findType<Ret>()` 用 typeid 走 hash，但 `registerTypeInfo(name, info)` 的 name 是 process-wide 的字符串 key，如果其他 fixture 走 `findType("Stats")` 会拿到**先注册**的 ITypeInfo，导致 field 数对不上。最干净是在每个 fixture 用 unique type name（R4 用 `R4Stats`），避免"name collision 踩到另一个 fixture 的 ITypeInfo"。**未来**: add `registerTypeInfo` 名字重复时 warning（push backlist of R4.1+）。
 13. **Logia 的 method-call-then-chain (`getStats().location.x`) 不走 R3.11 chain reflect**：R3.11 只覆盖 `self.<f1>.<f2>`，根必须是 lightuserdata `self`。bridge 返回的 Lua table 上的 `.field.field` 是普通 Lua sub-table 访问 — **需要测试用 `local s = ...` 中间变量**才能在 Logia emit 时正确处理。但 `local` 又是禁止 keyword（见 §2.3）。这是一个**未来 S4 / R5 范畴** — Logia 要么加 `..` token 用于字符串组合，要么把 method-call-chain 也走 R3.11-style chain reflect。
+
+#### 5.7.4 R-Audit — 语法审计修复（2026-07-11）
+
+**状态**：✅ 完成（commit 待 push）。三个并发 defect 经 plan-mode agent 复核根因后一并修复。
+
+**实施摘要**：
+
+1. **新增 `function` keyword + script-block helper**：
+   - `AYToken.h` 新增 `TokenType::Function`；`AYLexer.cpp` 把 `"function"` 加入 keywords 表（`local` 仍由设计保留为 Identifier）。
+   - `AYAst.h` 新增 `FunctionDeclStmt`（`name` + `params` + `body`）。
+   - `AYParser.cpp` 新增 `parseFunctionDeclStmt()` 并在 `parseMember()` 内部 dispatch（**只**在 script-block 上下文里识别），同时 `parseStatement` 看到 `function` 就 hard-error（"function declarations only allowed as script members"）。
+   - `AYLuaCodegen.cpp` 新增 `emitFunctionDecl()` —— 顶层 `function NAME(...) ... end`，无 `M.` 前缀，让 lifecycle body 通过裸名 `doubleIt(21)` 调用；同事在 `emitStmt` 加防御（防止畸形 AST 落到这里也继续走对路径）。
+
+2. **`local` keyword leak → soft warning**：
+   - `AYCompilerError.h` 新增 `ErrorCode::LuaKeywordLeak`。
+   - `AYSemanticAnalyzer.cpp::analyzeStmt()` 检查 `ExprStmt(IdentifierExpr("local|nil|function|..."))` 形态，emit 一条 `DiagnosticSeverity::Warning` 级别的诊断，message + hint 指引改用 `var` 或 function 块级 helper；**不** fail compile。
+   - 设计原因：保留 R3.0 + R3 + R4 现有 15+ 个测试用例的兼容性（这些用例全部靠 `local s = self.method()` 形式），soft warning 把"违规还在跑"的状态透明给日志读者。
+
+3. **`on_update(dt)` test gap 修复**：
+   - `Test_LogiaAdapter.cpp::adapter_maps_onUpdate_to_on_update_passes_dt` 由原来只 witness `"on_update_called"` 升级成 numeric-equality 检查 `__test_dt` 全局（用 `bridge.tryGetLuaGlobalNumber` 读 2.5f 值）。
+   - 同步清理 `parseLifecycleFunc` line 109-112 的 stale comment（旧注释说 "codegen ignores the params" —— 实际现在 `emitLifecycleFunc` 已经把 `func.params` 在 line 151-154 透传到 Lua signature，跟着 bridge `callLifecycle` 在 line 1334 推 `dt`）。
+
+**kLogiaPipelineVersion 5 → 6**：(因 codegen emit 形状在 `function NAME(...)` 路径下加新形态，且 diagnostic surface 新增 `LuaKeywordLeak` 警示，缓存强制失效)。
+
+**测试覆盖**（`Test_LogiaEmitDump.cpp` 13 cases —— 升级为 acceptance suite，file header comment 已重写说明用途）：
+
+| # | Logia source | Expect success | 验证点 |
+|---|---|---|---|
+| 01 | `local s = self.method()` | true | emit broken shape（documented） + LuaKeywordLeak 警告 |
+| 02 | multiple `local`s | true | 同上多行 |
+| 03 | `var tick: int = 0` | true | emit 干净的 `local tick = 0` |
+| 04 | `var tick = 0` (no type) | **false** | parser hard-reject（defer type inference）|
+| 05 | `if x == nil { }` | true | 干净的 `if (x == nil) then ... end` |
+| 06 | `if then/end Lua form` | **false** | brace-only 设计 |
+| 07 | `self.f1.f2.f3` 3-hop | true | bare Lua emit（runtime no-op，defer 3-hop chain） |
+| 08 | `..` concat | **false** | 无 DotDot token |
+| 09 | `function foo() { ... }` script-block | **true** (audit 升级) | emit 顶层 `function foo()` |
+| 10 | `local function m() { }` | **false** | `local` 没 keyword |
+| 11 | `function doubleIt + on_start call` | true | emit 顶层 helper + on_start 用对名字 |
+| 12 | `function` inside `on_update` | false | parser 明确 error |
+| 13 | `local s = ...` warning | true | LuaKeywordLeak diagnostic surfaced |
+
+**结果**：`AYScript_Test` **692/692 全绿**（baseline 671 + R3 已 ship 9 增量 + audit 21 cases = 692）。AYReflect 完全不动。
+
+**Lessons learned (R-Audit specific)**：
+
+14. **审计时务必 trace emit 不只 trace source**：plan-mode agent 把"emit 哪一行 broken"和"哪个 parser 步骤错"切开；Class A `local\nname = expr` 是 **parser** 把 `local` 当 identifier 产生两个 statement，不是 codegen 的 indent 错。R3 测试全部因为"sol2 safe_script 偶然 parse pass"继续 work —— 测试绿不代表真对。
+15. **diagnostic 与 parse success 是解耦的**：soft warning 让 `local s = ...` 仍然 compile-success=true，但 diagnostics 里冒一条 LuaKeywordLeak。这样 (a) 不破坏 15 个 R3 测试的 happy path，(b) CLI 用户 `ays-logia compile foo.logia` 能看到一行提示。
+16. **`function` 块的语义边界必须在 parser enforce**：codegen 总是可以 emit 出格式合法的 Lua（`function foo() ... end` 是合法顶层）；所以 guard 一定要在 parser 拒绝"script-block scope 之外"，否则会产生看起来 work 但语义错位的 helper（被嵌套在 on_update 里会被 hoist 成全局 module 范围 fn，绕过设计意图）。用 `parseMember` 而**非** `parseStatement` 作为 function 的入口是实现要点。
 
 #### 5.7.5 消费方矩阵
 
@@ -1177,6 +1226,8 @@ AYScript/
 | 2026-07-10 | **S3.12+R3 完成（非 primitive args/return）**：…`AYScript_Test` **660/660 全绿**。 |
 | 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
 | 2026-07-11 | **S3.12+R4.0 完成（嵌套 struct 字段 marshal）**：`pushFieldPrimitive` + `storeFieldPrimitive` 加 `field->getType()->getFieldCount() > 0` 递归分支 — push 方向构造 Lua sub-table（用绝对索引 `subTableIdx = lua_gettop(L)` 做 `lua_settable` 而非相对 `-3`，避免深递归时相对索引漂移），store 方向 heap-alloc tmp T + memset + `lua_getfield(L, valueStackIdx, subName)` 逐字段递归。R3.0 struct return path (`retType->getFieldCount() > 0`) 自动 extend — 改一行不动。新 `R4Player` fixture（`Vector2` nested in `DamageInfo` + `Stats`）注册用 unique type name `R4Stats`（避开 R3 `Stats` 命名冲突 — 类型注册表用 typeid 找，但 `registerTypeInfo(name)` 的 name 是 process-global key，多 fixture 注册相同 name 会让 `findType("Stats")` 拿到**先**注册的 ITypeInfo，导致 field 数量不对）。新增 2 LG-12 R4.0 测试（`applyDamage({source={x=10,y=20},amount=7})` + `setPosition/getPosition` round-trip）。`AYScript_Test` **671/671 全绿**。**不 bump kLogiaPipelineVersion** (R4.0 不动 codegen，只 marshal 路径新)。Deferred 到 R4.1/R4.5+:vector/array args、nested-struct 内的 std::string、name stripper。Deferred audit:现有测试 5 个文件用 `local` keyword — design §2.3 禁止泄露 Lua 关键字，codegen emit 出 broken split text 但"运气好"在 sol2 + safe_script 下 PASS。 |
+| 2026-07-11 | **Audit fix 完成（语法审计修复）**：三条独立 audit defect 一并修：(a) `function` 加进 Lexer + 新增 `FunctionDeclStmt` AST + `parseFunctionDeclStmt()`（只允许 script-block scope；`on_update` body 内部 `function` 是 parser hard-reject）+ `emitFunctionDecl()` 输出顶层 `function NAME(...) ... end`，让 lifecycle body 通过裸名调用；(b) `local`/`nil`/`function`/etc. keyword leak via soft warning — `ErrorCode::LuaKeywordLeak` + SemanticAnalyzer `analyzeStmt` 检测 `ExprStmt(IdentifierExpr("local"))` 形态 emit warning（不 fail compile，让 15+ R3/R4 测试继续 work）；(c) `Test_LogiaAdapter.cpp::adapter_maps_onUpdate_to_on_update_passes_dt` 升级 numeric-equality 检查（之前只 witness `"on_update_called"`，不验证 dt 数值实际到达 body）+ 清理 `parseLifecycleFunc` stale comment（"codegen ignores the params" 已被实际行为推翻）。`Test_LogiaEmitDump.cpp` 升级为正式 acceptance suite（13 cases，case 9 `function` 在 script-block scope 现在 success=true，case 11 加 helper-function round-trip，case 12 验证 internal-block reject，case 13 验证 `local` soft warning）。`kLogiaPipelineVersion` 5 → 6（codegen 形状 + diagnostic surface 变化）。**Plan-mode 阶段关键教训**：原 audit 把 `local\nname` 错定到 codegen `emitVarDecl` —— agent 通过 emit 实际 trace 确认**真正**根因是 parser 把 `local` 当 identifier 产生两个 statement。诊断与 parse-success 解耦让大批 R3 fixture 兼容。`AYScript_Test` **692/692 全绿**（baseline 671 + audit-fix 21 cases）。 |
+| 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
 
 ---
 

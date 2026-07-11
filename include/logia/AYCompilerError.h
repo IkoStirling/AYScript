@@ -16,7 +16,11 @@ enum class ErrorCode : uint8_t {
     UnexpectedEndOfFile,
     TypeMismatch,
     UnknownIdentifier,
-    InvalidOperation
+    InvalidOperation,
+    LuaKeywordLeak,        // 2026-07-11: source uses a Lua keyword as
+                           // identifier (currently `local` / `nil`).
+                           // Always DiagnosticSeverity::Warning, never
+                           // flips compile success.
 };
 
 enum class DiagnosticSeverity : uint8_t {

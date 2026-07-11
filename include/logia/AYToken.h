@@ -14,6 +14,12 @@ enum class TokenType : uint8_t {
     OnUpdate,
     OnDestroy,
     Run,            // S3.8b: Tool host run-only entry point.
+    Function,       // 2026-07-11 audit fix: script-block-scope helper
+                    // `function NAME(params) { BODY }`. Parser
+                    // restricts to ScriptDecl members; inside a
+                    // lifecycle body it produces a hard error
+                    // ("function declarations only allowed as
+                    // script members").
     If,
     Else,
     Return,

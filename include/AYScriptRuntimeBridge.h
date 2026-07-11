@@ -48,7 +48,11 @@ namespace ayt::script
 //       Limitations: no nested struct fields, no table-literal in
 //       arg position (require `local`), no std::vector/array args
 //       (track R4). See design.md §5.7.4 R3.
-constexpr std::size_t kLogiaPipelineVersion = 5u;
+//       2026-07-11 audit fix: bump 5 → 6. Codegen output shape
+//       changes for script-block `function NAME(...)` helpers, and
+//       SemanticAnalyzer may emit a new `LuaKeywordLeak` warning.
+//       Both invalidate the compile cache.
+constexpr std::size_t kLogiaPipelineVersion = 6u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

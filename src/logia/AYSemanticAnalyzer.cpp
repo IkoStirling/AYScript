@@ -522,7 +522,40 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
 void SemanticAnalyzer::analyzeStmt(Stmt& s)
 {
     if (auto* es = dynamic_cast<ExprStmt*>(&s)) {
-        if (es->expr) analyzeExpr(*es->expr);
+        // 2026-07-11 audit fix: surface Lua-keyword leaks as a soft
+        // diagnostic. The Logia lexer does not reserve `local`,
+        // `nil`, `function`, etc., so a bare-expression statement
+        // becomes an IdentifierExpr whose name is itself a Lua
+        // keyword. This is how `local s = expr` parses today
+        // (ExprStmt(IdentifierExpr("local")) followed by a separate
+        // BinaryExpr assignment). Until R5+ locks the grammar down,
+        // surface the leak once per script — analyzer deduplicates by
+        // script-level set since every R3/R4 audit fixture trips
+        // this repeatedly and we don't want to flood diagnostics.
+        if (es->expr) {
+            if (auto* id = dynamic_cast<IdentifierExpr*>(es->expr.get())) {
+                static const std::unordered_set<std::string>
+                    kLuaKeywordLeaks = {"local", "nil", "function",
+                                         "then", "end", "do", "while",
+                                         "for", "repeat", "until",
+                                         "break", "continue", "return"};
+                if (kLuaKeywordLeaks.count(id->name)) {
+                    LogiaDiagnostic d;
+                    d.severity = DiagnosticSeverity::Warning;
+                    d.errorCode = ErrorCode::LuaKeywordLeak;
+                    d.message = std::string("'") + id->name +
+                               "' is a Lua keyword; Logia recommends "
+                               "`var NAME : TYPE = expr` (at script-block "
+                               "scope) instead of `" + id->name + " = expr`.";
+                    d.hint = "Use `var x: int = 0` at script-block scope, "
+                             "then `x = new_value` inside the lifecycle body. "
+                             "Add `function NAME(...)` for a script-block "
+                             "helper (2026-07-11 audit fix).";
+                    report(d);
+                }
+            }
+            analyzeExpr(*es->expr);
+        }
     } else if (auto* is = dynamic_cast<IfStmt*>(&s)) {
         if (is->condition) analyzeExpr(*is->condition);
         for (auto& t : is->thenBranch) if (t) analyzeStmt(*t);

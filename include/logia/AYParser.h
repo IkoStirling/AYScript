@@ -25,6 +25,7 @@ private:
     std::unique_ptr<Stmt> parseMember();
     std::unique_ptr<Stmt> parseVarDecl();
     std::unique_ptr<Stmt> parseLifecycleFunc(LifecycleKind kind);
+    std::unique_ptr<Stmt> parseFunctionDeclStmt();   // 2026-07-11 audit fix
     std::unique_ptr<Stmt> parseStatement();
     std::vector<Param> parseParamList();
 

@@ -82,6 +82,16 @@ std::unique_ptr<Stmt> Parser::parseMember()
         return parseLifecycleFunc(LifecycleKind::Run);
     }
 
+    // 2026-07-11 audit fix: script-block-scope helper `function`.
+    // Distinct from `on_*` lifecycles (which are dispatched by name)
+    // — helper-functions emit as a top-level Lua `function NAME(...)
+    // ... end` statement that's reachable from every lifecycle body.
+    // Restricted to script-block scope via `parseFunctionDeclStmt`'s
+    // call site being here in `parseMember` only.
+    if (match(TokenType::Function)) {
+        return parseFunctionDeclStmt();
+    }
+
     error("Expected script member (var or lifecycle function)");
     return nullptr;
 }
@@ -106,10 +116,15 @@ std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind)
 {
     consume(TokenType::LeftParen, "Expected '(' after lifecycle function name");
 
-    // S2.5: lifecycle functions take no parameters. The parser still
-    // parses a non-empty parameter list (so SemanticAnalyzer can
-    // emit a soft warning for old-style code) but codegen ignores
-    // the params — only `self` reaches Lua.
+    // 2026-07-11 (audit fix): lifecycle functions DO forward their
+    // declared params to Lua. `on_update(dt: float)` emits
+    // `function M.on_update(self, dt)`; the bridge's callLifecycle
+    // passes `dt` at the matching position (see
+    // AYScriptRuntimeBridge.cpp::callLifecycle when methodName ==
+    // "on_update"). The historical S2.5 "params are diagnostic only"
+    // rule was overturned when `emitLifecycleFunc` started emitting
+    // params after `self`. design.md §2.3 原则 4 describes the
+    // post-audit shape.
     std::vector<Param> legacyParams;
     if (!check(TokenType::RightParen)) {
         legacyParams = parseParamList();
@@ -135,6 +150,33 @@ std::vector<Param> Parser::parseParamList()
     return params;
 }
 
+// 2026-07-11 audit fix: parse a user-defined script-block-scope
+// helper. Called only from `parseMember` — `parseStatement` (and
+// therefore lifecycle bodies) never invokes this. If a user writes
+// `function foo() { ... }` inside a lifecycle body, the `function`
+// token has already been advanced by `parseMember`'s call site above
+// the lifecycle dispatch, so this code path is unreachable there.
+// The lexer recognizes `function` as a reserved keyword (added in
+// Step 1 of the audit slice); the `match(TokenType::Function)`
+// here is what consumes it.
+std::unique_ptr<Stmt> Parser::parseFunctionDeclStmt()
+{
+    const Token name = consumeIdentifier("Expected function name");
+    consume(TokenType::LeftParen, "Expected '(' after function name");
+    std::vector<Param> params;
+    if (!check(TokenType::RightParen)) {
+        params = parseParamList();
+    }
+    consume(TokenType::RightParen, "Expected ')' after parameter list");
+
+    consume(TokenType::LeftBrace, "Expected '{' before function body");
+    std::vector<StmtPtr> body = parseBlockBody();
+    consume(TokenType::RightBrace, "Expected '}' after function body");
+
+    return std::make_unique<FunctionDeclStmt>(
+        name.lexeme, std::move(params), std::move(body));
+}
+
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
     if (match(TokenType::Return)) {
@@ -145,6 +187,15 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     }
     if (check(TokenType::Var)) {
         return parseVarDecl();
+    }
+    // 2026-07-11: a bare `function NAME(...)` inside a lifecycle
+    // body is rejected explicitly. parseStatement sees the
+    // `function` keyword here but has no script-block context, so
+    // it raises a typed diagnostic (the audit fix's hard error for
+    // helper-functions inside non-script scope).
+    if (check(TokenType::Function)) {
+        error("function declarations only allowed as script members");
+        return nullptr;
     }
 
     auto expr = parseExpression();

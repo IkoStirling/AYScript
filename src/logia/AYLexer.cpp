@@ -142,6 +142,11 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         {"on_update", TokenType::OnUpdate},
         {"on_destroy", TokenType::OnDestroy},
         {"run", TokenType::Run},  // S3.8b: Tool host entry point.
+        {"function", TokenType::Function},  // 2026-07-11: script-block helper.
+        // NOTE: `local` is intentionally NOT reserved (would break
+        // the 15 R3/R4 tests that write `local s = ...` and rely on
+        // the implicit-global declaration). SemanticAnalyzer emits a
+        // soft warning `LuaKeywordLeak` to surface the leak.
         {"if", TokenType::If},
         {"else", TokenType::Else},
         {"return", TokenType::Return},

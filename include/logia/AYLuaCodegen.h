@@ -59,6 +59,7 @@ private:
     void emitScript(const ScriptDecl& script);
     void emitLocalVar(const VarDeclStmt& var);
     void emitLifecycleFunc(const LifecycleFuncDecl& func);
+    void emitFunctionDecl(const FunctionDeclStmt& fn);   // 2026-07-11 audit fix
 
     void emitBlock(const std::vector<StmtPtr>& body);
     void emitStmt(const Stmt& stmt);

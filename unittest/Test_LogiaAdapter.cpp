@@ -21,6 +21,13 @@
 // headers, the adapter will derive from IScriptBridge directly and
 // this shim layer goes away.
 
+namespace {
+bool nearEqual(double a, double b, double eps = 1e-5) {
+    double diff = a - b;
+    return diff < 0 ? -diff < eps : diff < eps;
+}
+}
+
 #include "AYScript.h"
 #include "AYScriptRuntimeBridge.h"
 #include "AYScriptBridgeAdapter.h"
@@ -105,10 +112,20 @@ TEST_CASE(adapter_maps_onUpdate_to_on_update_passes_dt) {
     LogiaRuntimeBridge bridge;
     LogiaScriptBridgeAdapter adapter(&bridge);
 
+    // 2026-07-11 audit fix: previously this only proved the lifecycle
+    // method ran ("on_update_called"). It did NOT prove the dt float
+    // reached the body. The bridge's callLifecycle special-cases
+    // "on_update" to dereference arg2 as a float* and pass it at the
+    // second Lua-call position; codegen emits
+    // `function M.on_update(self, dt)`. After the audit fix the dt
+    // is now genuinely propagated end-to-end — assert with a
+    // numeric-equality read of `last_dt`.
     const char* src = R"(
 script Stepper {
-    on_update() {
-        __test_witness = "on_update_called"
+    var local_seen: float = -1.0
+    on_update(dt: float) {
+        local_seen = dt
+        __test_dt = dt
     }
 }
 )";
@@ -118,7 +135,12 @@ script Stepper {
     comp.setScriptName("Stepper");
     AdapterCall ac{&bridge, &adapter, &comp};
     ac.onUpdate(2.5f);
-    CHECK(bridge.getLuaGlobalString("__test_witness") == "on_update_called");
+    // Read from the Lua global — `local_seen` is module-table scope
+    // and not reachable via tryGetLuaGlobalNumber. Using __test_dt
+    // mirrors the witness pattern used elsewhere in the suite.
+    double actual = 0.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__test_dt", actual));
+    CHECK(nearEqual(actual, 2.5));
 }
 
 TEST_CASE(adapter_maps_onDestroy_to_on_destroy) {

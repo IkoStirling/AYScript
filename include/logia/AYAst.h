@@ -206,6 +206,28 @@ public:
     std::vector<StmtPtr> body;
 };
 
+// 2026-07-11 audit fix: user-defined script-block-scope helper.
+// Shaped after `LifecycleFuncDecl` (same `params` + `body` model),
+// but emits as a top-level Lua function via `emitFunctionDecl`
+// (no `M.` prefix; reachable from every lifecycle body).
+//
+// Restriction: the parser only accepts this form when called from
+// `parseScriptMembers`. Inside lifecycle bodies or anywhere else
+// the lexer sees `function`, the parser rejects with an explicit
+// error message — see `parseStatement` for the gate.
+class FunctionDeclStmt : public Stmt {
+public:
+    FunctionDeclStmt(std::string name,
+                     std::vector<Param> params,
+                     std::vector<StmtPtr> body)
+        : name(std::move(name)),
+          params(std::move(params)),
+          body(std::move(body)) {}
+    std::string name;
+    std::vector<Param> params;
+    std::vector<StmtPtr> body;
+};
+
 class ScriptDecl {
 public:
     ScriptDecl(std::string name, std::vector<StmtPtr> members)

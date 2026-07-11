@@ -114,6 +114,20 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
             _out += "\n";
         }
     }
+
+    // 2026-07-11 audit fix: user-defined script-block-scope helpers.
+    // Emitted after lifecycles so they're hoisted before the first
+    // `M.on_start(...)` reference (Lua hoists top-level function
+    // statements anyway, but ordering improves readability). Lifecycle
+    // bodies call them via bare name (`doubleIt(21)`), and the bare
+    // name resolves to the top-level `function doubleIt(...) ... end`
+    // we emit here.
+    for (const auto& member : script.members) {
+        if (auto* fn = dynamic_cast<const FunctionDeclStmt*>(member.get())) {
+            emitFunctionDecl(*fn);
+            _out += "\n";
+        }
+    }
 }
 
 void LuaCodegen::emitLocalVar(const VarDeclStmt& var)
@@ -192,12 +206,44 @@ void LuaCodegen::emitBlock(const std::vector<StmtPtr>& body)
     }
 }
 
+// 2026-07-11 audit fix: emit a top-level Lua function for a
+// script-block-scope helper. Mirrors `emitLifecycleFunc`'s shape but
+// without the `M.` prefix — the function is reachable from every
+// lifecycle body in the same module via its bare name.
+void LuaCodegen::emitFunctionDecl(const FunctionDeclStmt& fn)
+{
+    indent();
+    _out += "function ";
+    _out += fn.name;
+    _out += "(";
+    for (size_t i = 0; i < fn.params.size(); ++i) {
+        if (i > 0) _out += ", ";
+        _out += fn.params[i].name;
+    }
+    _out += ")\n";
+    ++_indent;
+    for (const auto& s : fn.body) {
+        emitStmt(*s);
+    }
+    --_indent;
+    indent();
+    _out += "end\n";
+}
+
 void LuaCodegen::emitStmt(const Stmt& stmt)
 {
     if (auto* v = dynamic_cast<const VarDeclStmt*>(&stmt)) { emitVarDecl(*v); return; }
     if (auto* i = dynamic_cast<const IfStmt*>(&stmt))      { emitIfStmt(*i);   return; }
     if (auto* r = dynamic_cast<const ReturnStmt*>(&stmt))  { emitReturnStmt(*r); return; }
     if (auto* e = dynamic_cast<const ExprStmt*>(&stmt))    { emitExprStmt(*e); return; }
+    // 2026-07-11 audit fix: defensive — parser rejects `function`
+    // inside lifecycle bodies, but if codegen ever sees one here
+    // (e.g. via a malformed AST forged by a hostile serializer)
+    // we still emit clean Lua rather than corrupting the chunk.
+    if (auto* fn = dynamic_cast<const FunctionDeclStmt*>(&stmt)) {
+        emitFunctionDecl(*fn);
+        return;
+    }
     errorAt(Token{}, "Unsupported statement in codegen");
 }
 
