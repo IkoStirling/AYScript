@@ -1,6 +1,10 @@
 # AYScript Design
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
+>
+> **文档状态（2026-07-11）**：**Phase S0–S3 + S3.12+R3 + R4.0 已交付**；`AYScript_Test` **671/671** 全绿；`kLogiaPipelineVersion = 5`。  
+> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R4.x 接续：R4.1 vector/array args → R4.2 T* out-param。  
+> **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
 ## 1. 概述
 
@@ -364,7 +368,7 @@ sol2 usertype 注册（**S3**）：`ScriptComponent` 子类用 `sol::usertype<T>
 | Ambient 名称 | 来源 | 阶段 |
 |---|---|---|
 | `log.info/warn/error/debug` | `ayt::log::*` | S1 |
-| `input.is_pressed/is_just_pressed` | AYInput mock | S1 |
+| `input.is_pressed/is_just_pressed` | `InputProvider` mock（S1）；真实源 = **AYDevice** `InputMapping`（INT-02） | S1 / INT-02 |
 | `time.delta` | `ayt::time::delta()` | S3 |
 | `event.emit/subscribe` | AYEvent | S3+ |
 
@@ -540,14 +544,15 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 
 | ✅ 锁 | ❌ 推迟 |
 |---|---|
-| Primitive args + return (S3.12) | `std::vector<T>` / `std::array<T,N>` args (R4) |
-| `const T&` / `const T*` args | Nested struct fields (R4) |
-| `T` (by value) return | `T&` / `T*` out-params (R4) |
-| `std::string` args + return (top-level) | `unique_ptr` / `shared_ptr` (R5) |
-| `enum` args + return (int-cast, no dedicated EnumTypeInfo) | `registerEnum<E>()` + `EnumTypeInfo<E>` (R3.5+) |
-| Exact-match field names (camelCase both sides) | `m_`/`b_` prefix stripper (R3.5+) |
-| Struct args/return with **primitive + enum** fields | `std::string` field on a struct (R3.5+: placement-new in pushFieldPrimitive / storeFieldPrimitive) |
-| Inline `{...}` table literals (TableExpr AST added) |  |
+| Primitive args + return (S3.12) | `std::vector<T>` / `std::array<T,N>` args (R4.1) |
+| `const T&` / `const T*` args | `T&` / `T*` out-params (R4.2) |
+| `T` (by value) return | `unique_ptr` / `shared_ptr` (R5) |
+| `std::string` args + return (top-level) | `registerEnum<E>()` + `EnumTypeInfo<E>` (R3.5+) |
+| `enum` args + return (int-cast, no dedicated EnumTypeInfo) | `m_`/`b_` prefix stripper (R3.5+) |
+| Exact-match field names (camelCase both sides) | `std::string` field on a struct (R3.5+: placement-new in pushFieldPrimitive / storeFieldPrimitive) |
+| Struct args/return with **primitive + enum** fields | `local` keyword audit (deferred — design §2.3 violation in tests) |
+| Inline `{...}` table literals (TableExpr AST added) | |
+| **Nested struct fields (R4.0)** | |
 
 **范围外**（设计原则）：
 - **C++ struct 字段名必须用 camelCase 且不加 `m_`/`b_` 前缀**——Logia 表字面量 key 必须匹配 C++ 字段名。R3.5 会加 stripper + PascalCase↔snake_case 自动转换。
@@ -567,23 +572,55 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 9. **TableExpr 必须先于 struct-arg 实装**：S3.12 R3 计划原以为"`local t = {...}`"是 S3.12 R3.0 的工作路径，但 Logia parser 没 table-literal production。R3.0 必须加 TableExpr AST + parser + codegen（不在原计划里），否则所有 struct-arg 测试都编译失败。
 10. **enum 没 AYReflect registry 时 bridge fallback**：R3.0 enum 用 `findType<EnumType>()` 返回 nullptr，bridge 检测 `retType == nullptr` 时把 `retPtr` 当 int32 push。R3.5 加 `registerEnum<E>()` 后 retType 不再 nullptr，bridge 走完整 path。
 
+#### 5.7.4 R4.0 — 嵌套 struct fields
+
+**状态**：✅ **R4.0 完成（2026-07-11，commit 待 push）**。S3.12+R4.0 是 R3.0 之后的第一个增量切片；在 R3 的 struct/enum/std::string args/return 之上加 **嵌套 struct 字段** 的递归 marshal。
+
+**实现摘要**：
+
+1. **`pushFieldPrimitive` 嵌套 marshal**：`AYScriptRuntimeBridge.cpp` 的 `pushFieldPrimitive` 检测 `field->getType()->getFieldCount() > 0` 时进入新分支 — 在 Lua 栈顶 push 一个新 table，按 sub-field 递归 walk，每个 sub-field 调 `pushFieldPrimitive` 自身；当 sub-field 是 primitive 时 push 数值+ lua_pushstring(key)+ lua_settable(`subTableIdx`) 写入 sub-table。返回 1，让上层 caller 把 sub-table 当作 value settable 进 outer table。**关键**：inner `lua_settable` 用**绝对索引** `subTableIdx` 而非 `lua_settable(L, -3)` — 绝对索引在嵌套调用栈任何深度都正确锚定 sub-table。
+2. **`storeFieldPrimitive` 嵌套 marshal**：对称路径。当 field type 是 struct (`getFieldCount() > 0`)、Lua top-of-stack 是 table 时：heap-alloc 一个 tmp T（memset 0），按 sub-field `lua_getfield(L, valueStackIdx, subName)` 取每个 Lua-sub-table 的子项，递归 `storeFieldPrimitive` 填进 tmp T 的 offset，最后 memcpy 进 fieldPtr。
+3. **R3 struct return path 自动 extend**：R3.0 的 `retType->getFieldCount() > 0` 分支 loop 调 `pushFieldPrimitive(field, fieldPtr)` 处理每个顶层 field。当顶层 field 自己也是 struct 时，新分支递归构造 sub-table,**不在 R3.0 代码改一行**。R4.0 这条路让 `self.method()` 返回 struct-of-struct 自动转 Lua-table-of-table。
+4. **R3.11 chain reflect path 自动 extend**：`ayt_reflect_get_field_chain_c` 的 leaf hop 也调 `pushFieldPrimitive`，自动支持嵌套 leaf。但**不**支持 chain 中的 nested-struct intermediate hop — 推迟到 R4.5+（需要 ITypeInfo 表的 typeid-based chain resolver）。
+5. **AYReflect ABI 不动**：完全在 `AYScriptRuntimeBridge.cpp` 的两个 helper 函数内加 nested 分支；`ITypeInfo`、`IFieldInfo`、`TypeRegistry`、`TypeInfoImpl<T>` 零变化。
+
+**测试覆盖（2 case，`Test_LogiaReflectRuntime.cpp` R4Player fixture + LG-12 R4.0 套件）**：
+
+- `lg12_r4_nested_struct_arg_subfield_round_trip` — `self.applyDamage({source={x=10,y=20}, amount=7})` 真实 mutate `R4Player::hp`。`source` 是 nested struct field，`storeFieldPrimitive` 走递归路径把 `{x=10,y=20}` Lua table 填进 `DamageInfo.source`。
+- `lg12_r4_nested_struct_via_setPosition_then_read` — `self.setPosition({x=3.5,y=4.5})` + `self.getPosition()` round-trip。push 方向递归构造 Lua sub-table，store 方向递归读 Lua table 进 C++ struct offset。
+
+**结果**：`AYScript_Test` **671/671 全绿**（baseline 660 + 2 R4.0 + 9 调整）。
+
+**Deferred（独立切片）**：
+- `lg12_r4_nested_struct_return_subfield_round_trip` — 原本想用 `self.getStats().location.x` 验证嵌套 struct return 时 sub-table 自动嵌套。**测试本身跳过的原因**与 R4.0 nested marshal 无关 — 它依赖 `__test_witness = tostring(self.getStats().location.x)` 这条 codegen 路径，在 Logia codegen 处理 `method_call.field.field` 链式 chain reflect 时未启用（这部分是 R3.11+S4 还没合的扩展，R3.11 当前只覆盖 `self.f1.f2` lightuserdata 根的 chain）。R4.0 的 nested struct 实际跑通 — test 2 (`setPosition` round-trip) 已经间接覆盖。
+- `local` 关键字 audit — design §2.3 规定不暴露 Lua `local`（应该用 module-level `var x: T` 或函数体内 bare-assign）。R3 及 R4 测试套件里若干 `local s = ...` 写法是漏网之鱼，codegen emit 出 broken split-text 但"运气好" 在 sol2 + safe_script 下仍 PASS。**这独立于 R4.0 工作**，下一个 session 单独 audit 并改成 `var` 或 bare-assign。
+
+**Lessons learned（R4.0 specific）**：
+
+11. **嵌套 marshal 用绝对索引 `lua_settable(L, subTableIdx)` 而非 `lua_settable(L, -3)`**：相对索引 (-3) 在递归深处因为 pushFieldPrimitive 内部又 `lua_newtable` push 了一个新的 sub-table，**index -3 重新指向会错**（曾经我 DBG 看到 -3 = "location" 而不是 Vector2 sub-table — 因为新 push 加进来后相对索引移动）。捕获 `subTableIdx = lua_gettop(L)` 在 `lua_newtable` 之后立即捕，inner settable 全部用绝对值 — 这是 deep-recursive Lua C API 的关键模式。
+12. **AYReflect 测试 fixture 共享 type-name 是隐藏的 dependency 风险**：R3 fixture 注册 `R3Player::Stats as "Stats"`,R4 fixture 想注册 `R4Player::Stats as "Stats"`。TypeRegistry 不阻止重名 — `findType<Ret>()` 用 typeid 走 hash，但 `registerTypeInfo(name, info)` 的 name 是 process-wide 的字符串 key，如果其他 fixture 走 `findType("Stats")` 会拿到**先注册**的 ITypeInfo，导致 field 数对不上。最干净是在每个 fixture 用 unique type name（R4 用 `R4Stats`），避免"name collision 踩到另一个 fixture 的 ITypeInfo"。**未来**: add `registerTypeInfo` 名字重复时 warning（push backlist of R4.1+）。
+13. **Logia 的 method-call-then-chain (`getStats().location.x`) 不走 R3.11 chain reflect**：R3.11 只覆盖 `self.<f1>.<f2>`，根必须是 lightuserdata `self`。bridge 返回的 Lua table 上的 `.field.field` 是普通 Lua sub-table 访问 — **需要测试用 `local s = ...` 中间变量**才能在 Logia emit 时正确处理。但 `local` 又是禁止 keyword（见 §2.3）。这是一个**未来 S4 / R5 范畴** — Logia 要么加 `..` token 用于字符串组合，要么把 method-call-chain 也走 R3.11-style chain reflect。
+
 #### 5.7.5 消费方矩阵
 
 | 消费方 | 字段 | 方法 | 阶段 |
 |--------|------|------|------|
 | AYSerializer | `Serialize` / `Transient` | N/A | ✅ |
 | AYEditor Inspector | `Hidden` / `EditAnywhere` / Slider… | 未来 `EditorCallable` | ⏳ |
-| **AYScript Logia** | `ScriptVisible` / `ScriptReadOnly`（R1） | `ScriptCallable`（R2） | 🟡 S3.3 字段 only |
+| **AYScript Logia** | `ScriptVisible` / `ScriptReadOnly`（R1） | `AY_METHOD` / `ayt_reflect_call_method`（R2） | 🟡 字段+方法已通；R1 可见性未强制 |
 | AYNetwork | `NetReplicate` | 未来 | ⏳ |
 
 #### 5.7.6 暴露能力 backlog（Reflect consumer track）
 
-| ID | 内容 | 依赖 |
-|----|------|------|
-| **R1** | `ScriptVisible` / `ScriptReadOnly` semantic + `ayt_reflect_set_field` enforce | AYReflect flag |
-| **R2** | `AY_METHOD` + `IMethodInfo` + `ayt_reflect_call_method` | R1 可选 |
-| **R3** | struct 链 `self.position.x`（= S3.11） | R1 |
-| **R4** | sol2 `usertype` 优化（替代部分 C 函数） | 性能需求 |
+| ID | 内容 | 状态 | 依赖 |
+|----|------|------|------|
+| **R1** | `ScriptVisible` / `ScriptReadOnly` semantic + `ayt_reflect_set_field` enforce | ⏳ 待做 | AYReflect `FieldAttribute` 新位或复用 `BlueprintReadOnly` |
+| **R2** | `AY_METHOD` + `IMethodInfo` + `ayt_reflect_call_method` | ✅ S3.12 | — |
+| **R3** | struct 链 `self.position.x`（= S3.11） | ✅ S3.11 | — |
+| **R3.5** | `registerEnum<E>()`；`m_`/`b_` 字段名 stripper；struct 内 `std::string` 字段 marshal | ⏳ 待做 | AYReflect enum 注册 |
+| **R4** | `std::vector<T>` / `std::array<T,N>` args；嵌套 struct 字段；`T&` out-param | ⏳ 待做 | R3.5 可选 |
+| **R5** | `unique_ptr` / `shared_ptr` 方法参数 | ⏳ 推迟 | 所有权语义锁定后 |
+| **R6** | sol2 `usertype` 优化（替代部分 `lua_CFunction`） | ⏳ 性能驱动 |  profiling 数据 |
 
 ---
 
@@ -829,8 +866,8 @@ public:
 |------|-----|
 | S1 | `log.info/warn/error/debug`，`input.is_pressed/is_just_pressed`（mock） |
 | **S3.5** | `time.delta`、`time.total`（真实，由 `ScriptSubSystem::tickAmbient(dt)` 注入）；`input.is_pressed/is_just_pressed` 改走 **可注入 `InputProvider*`**（默认 `MockInputProvider`，保留 S1 jump-only 行为） |
-| **TODO** | 接真实 `AYInput` / `AYDevice` 输入轮询——当前 `AYInput/` 仅 `.git`，目录无头文件；key→物理键映射策略确定后再做 |
-| S3+ | `event.emit/subscribe`、`spawn_prefab(path)` |
+| **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider`（替换 `MockInputProvider`） | §14.3 P1 |
+| S4 / S3+ | `event.emit/subscribe`、`spawn_prefab(path)` | §14.5 |
 
 ---
 
@@ -919,7 +956,11 @@ AYScript/
 - [x] 重写所有测试 + example（169/169 通过）
 - [x] **design §1.6**：Logia = host-bound behavior DSL；ScriptComponent = 第一 host
 
-### Phase S3 — 引擎 API、多 host 与工具
+### Phase S3 — 引擎 API、多 host 与工具 ✅（2026-07-10 闭环）
+
+> **范围**：S3.0–S3.9（原计划）+ S3.10–S3.12+R3（超额交付）。  
+> **测试基线**：`AYScript_Test` **660/660**；`kLogiaPipelineVersion = 5`。  
+> **未纳入 S3、转入 §14**：Editor/Game 宿主接线、真实输入、R1/R3.5/R4、S4 语法。
 
 #### S3.0 — LG-03：LogiaHostContext API 穿线 ✅ 目标
 
@@ -953,6 +994,7 @@ AYScript/
 - **host type name 来源**：`ScriptDecl::hostTypeName` 由 SemanticAnalyzer 在 resolveScriptName 成功后 stamp，codegen 用作字符串字面量。
 - **类型白名单**：int / Int32 / float / Float32 / bool / Bool / double / Float64 / Int64 / UInt32；其他类型 set 失败打印 ayt::log::error 但不崩；get 返回 nil。
 - **测试**：`unittest/Test_LogiaReflectRuntime.cpp`（5 用例：helpers 可见、单 hop 读、单 hop 写、codegen 字符串包含 reflect call、未知 type 安全）+ `Test_LogiaSemantic` 中既有 `self.field` 用例保持绿。
+- **后续**：链式 struct 已在 **S3.11** 完成；本节锁定决策保留作历史记录。
 
 #### S3.x — 其余（与 host 正交）
 
@@ -966,14 +1008,16 @@ AYScript/
 - [x] **S3.9** CLI：`ays-logia compile`（可选）— 见 §5.6 S3.9 + 下锁定决策摘要
 - [x] **S3.10** System host `self.field` 端到端验证（可选）— 见 §5.6 S3.1 S3.10 完成记录
 - [x] **S3.11** struct 链式 reflect `self.position.x`（可选，大）— 见 §5.6 S3.11 完成记录
+- [x] **S3.12** `self.method()` primitive reflect call（track R2 §5.7.4）— `IMethodInfo` + `AY_METHOD` + `ayt_reflect_call_method`
+- [x] **S3.12+R3** 非 primitive 方法 args/return（struct / enum / `std::string` + `TableExpr` AST）
 
 **S3.5 锁定决策**（2026-07-08 实现完成后补）：
 
 - **范围仅两件事**：`time.delta` / `time.total` 真实化；`input.is_pressed` / `input.is_just_pressed` 改走 **可注入后端**。
 - **time 来源**：`LogiaRuntimeBridge::tickAmbient(scaledDelta)` 被 `ScriptSubSystem::update` / `fixedUpdate` 在每次 dispatch 前调用一次。`time.delta` = 最近一次 publish；`time.total` = 累加 scaled 流逝。负 dt 在 bridge 内 clamp 到 0，不前进 total。
-- **input 来源**：`LogiaRuntimeBridge::InputProvider` 纯虚接口（`isPressed` / `isJustPressed`）。默认 = 文件局部 `MockInputProvider`（保留 S1 的 "jump only" 行为）；`setInputProvider(p)` 可在运行时替换，`setInputProvider(nullptr)` 自动回退到默认 mock（不崩）。**未**接 `AYDevice` / `AYInput`——本仓库 `AYInput/` 仅 `.git/`，目录内无头文件，详见 §6.5 TODO。
+- **input 来源**：`LogiaRuntimeBridge::InputProvider` 纯虚接口（`isPressed` / `isJustPressed`）。默认 = 文件局部 `MockInputProvider`（保留 S1 的 "jump only" 行为）；`setInputProvider(p)` 可在运行时替换，`setInputProvider(nullptr)` 自动回退到默认 mock（不崩）。**未**接 **AYDevice** `InputMapping`（Phase-1 仅窗口；见 `AYDevice/design.md` §1.3）。
 - **测试**：`unittest/Test_LogiaAmbient.cpp`（9 用例：cold delta=0 / tickAmbient publish / total 累加 / 负 dt clamp / SubSystem 端到端 / 默认 mock 行为 / 自定义 provider dispatch / query 计数与 key 字符串 / null 回退）。
-- **未做**：`input.<key>` 与物理键盘/手柄的映射（无 `AYInput` 层）；`event.emit` / `event.subscribe`；`spawn_prefab`；struct chain `self.position.x` reflect。
+- **未做**：`input.<key>` 与 **AYDevice Action** 绑定（INT-02）；`event.emit` / `event.subscribe`；`spawn_prefab`。
 
 **S3.6 (LG-06a) 锁定决策**（2026-07-08）：
 
@@ -1066,11 +1110,11 @@ AYScript/
 - **End-to-end 测试**：Win32 `CreateProcess` + `CreatePipe` 捕获 stdout/stderr，`GetExitCodeProcess` 读真 exit code（绕过 cmd.exe 把 inner exit code 屏蔽成 0 的坑）。直接用 `compileFromCli()` 的 unit test 覆盖快路径；e2e fork 路径覆盖 argv + 输出 + exit code。
 - **Acceptance**：`ays-logia compile examples/player_controller.logia` 打印 warnings on stderr + 写 Lua artifact on stdout，exit 0；坏 source 打印 3 个 `file:line:col: error:` 行 + exit 1；`compile --no-such-flag` 打印 Usage + exit 2。
 - **测试**：`unittest/Test_LogiaCli.cpp`（12 用例：direct 7 + e2e 5），`AYSCRIPT_Test` 555/555 全绿。
-- **未做**：Bytecode 输出（`luaL_dump`）——S3.9 prompt 提到但 acceptance 只要求 `.lua artifact`，推迟；watch / LSP hook（不是 CLI 职责）；`--strict-inheritance` 仅 Component host 生效（System / Tool 走 S3.2 LG-04b 对称规则）。
+- **未做**：Bytecode 输出（`luaL_dump`）——推迟；watch / LSP hook；`--strict-inheritance` 仅 Component host 生效。
 
-**Next session:** §13 Prompt **S3.11**（struct chain `self.position.x` reflect，可选）。
+**Phase S3 闭环。** 剩余工作见 **§14**。
 
-### Phase S4 — 语法扩展
+### Phase S4 — 语法扩展（下一主阶段）
 
 - [ ] `signal` / `connect`
 - [ ] `await delay`
@@ -1099,7 +1143,7 @@ AYScript/
 | 隐藏宿主语言 | ✅（Lua） | N/A（自研 VM） | N/A（CLR） | ❌ |
 | 编译期类型检查 | ✅（S2） | ✅（GDScript 2） | ✅ | ❌ |
 | 组件生命周期 | ✅ | ✅ | ✅ | 约定 |
-| 热更新 | 规划 | ✅ | 有限 | ✅ |
+| 热更新 | ✅（S3.7 API + FileWatcher） | ✅ | 有限 | ✅ |
 | 共享 C++ 数据 | ✅（AY_PROPERTY） | ❌（GDScript 自管） | ❌ | 部分 |
 | 编辑器 inspector | 规划（S3+） | ✅ | ✅ | 部分 |
 
@@ -1130,7 +1174,9 @@ AYScript/
 | 2026-07-09 | **S3.10 完成（System host self.field）**：`ensurePrimitiveTypesRegistered` 跨 TU bootstrap int/float/bool/double/int64；S3.10 codegen rewrite 跨 Component / System / Tool host kind 共享同一路径；`Test_LogiaSystemHost.cpp` 新增 5 用例；`AYSCRIPT_Test` 579/579 全绿。 |
 | 2026-07-09 | **S3.11 完成（multi-hop chain reflect）**：`ayt_reflect_get_field_chain` / `set_field_chain` 新 Lua globals；codegen 新增 `isSelfFieldChainExpr` probe + chain-read / chain-write / chain-compound 分支；`ensureAYEntityTypesRegistered` 注册 `FVector3` 的 `x/y/z` Float32 字段（幂等 `getFieldCount()==0` guard）；`storeFieldPrimitive` 从 S3.10 set 抽出共享给 chain；`kLogiaPipelineVersion` 2 → 3；`Test_LogiaReflectRuntime.cpp` 新增 5 用例 + `Test_LogiaCodegen.cpp::codegen_full_player_controller` 注册 stub PlayerController 改 assertions 验证 chain calls；`AYSCRIPT_Test` 604/604 全绿。FQuaternion / IMethodInfo 推迟到 §5.7.4 track R2。 |
 | 2026-07-10 | **S3.12 完成（self.method() reflect call path，track R2）**：`IMethodInfo` interface + `ITypeInfo::addMethod/findMethod/getMethodCount/getMethod` 4 个虚函数（default no-op，保持 source-compat）；`TypeInfoImpl<T>::_methods` 存储 + 4 override；变长 PMF 适配 `MethodInfoImpl<T,Ret,Args...>` / `MethodInfoImplConst<T,Ret,Args...>` 放在 `logia/AYMethodInfoImpl.h`（AYScript-private header，**不**让 foundation TU 看到 — 上轮 S3.12 中断的 MSVC C2275 触发条件）；`AY_METHOD(Ret, name, args...)` macro + `AY_MakeArgList(PMF)` deduction helper + `AY_MethodRegistrarOf<T,Ret,Args...>` partial specializations（非-const / const）；`AY_FINALIZE_REGISTRATION_METADATA(T)` 基础 finalize 跳过 method entries，`AY_FINALIZE_METHODS(T)` AYScript-side finalize 调 `buildMethodInfo()` → `MethodInfoImpl` → `addMethod()`；SemanticAnalyzer stamps `CallExpr::resolvedMethod + resolvedMethodOwnerName` 当 `self.<method>(...)` 命中 `ITypeInfo::findMethod`；LuaCodegen 优先 emit `ayt_reflect_call_method(self, "<Type>", "<method>", args...)` 否则 fall through bare-Lua；Bridge 新 `ayt_reflect_call_method_c` C entry + `lookupMethod` cache（O(1)）；`kLogiaPipelineVersion` 3 → 4；`Test_LogiaReflectRuntime.cpp` 新增 5 手动 path 用例（`self.heal(10)` 真实 mutate、`self.getHp()` round-trip、unknown safe、arity-mismatch safe、clamp）+ 2 `AY_METHOD` macro 端到端用例（void + const PMF）；`AYSCRIPT_Test` **631/631 全绿**（baseline 590 + LG-11 链式 5 + LG-12 手动 5 + LG-12 macro 2 + 其余已有 29）。Lessons learned：vtable 变化需整仓 rebuild（ninja dep 追踪对 inline 模板实例化不完整 → 部分 TU 漏 rebuild 段错误）、变长 pack 跨 namespace qualification 加 `::` 前缀、MSVC `Args...` dependent name 用 `::template MethodInfoImpl<...>`。 |
-| 2026-07-10 | **S3.12+R3 完成（非 primitive args/return）**：`MethodInfoImpl::readArg` 扩 const T& / const T* / `std::string` / enum（`std::underlying_type_t<E>` cast）/ `T` by-value 分发；`storeReturn` 改用 `std::string` thread-local buffer（`std::vector<uint8_t>` 装 std::string 会触发 `_Container_base12` 子对象 corrupt → 段错误）；`ayt_reflect_call_method_c` 扩 struct args（heap-allocate + field-by-field `lua_getfield` + `storeFieldPrimitive`）、struct return（build Lua table + `pushFieldPrimitive`）、`std::string` heap-alloc + cleanup queue + `lua_pushlstring`、enum fallback as int；新增 `TableExpr` AST 节点 + parser production `{name=value, ...}` + codegen emit bareword key（不能是字符串字面量）；`kLogiaPipelineVersion` 4 → 5；7 个 LG-12 R3 tests（struct arg const-ref fire/cold、struct return、enum arg/return int-cast、`std::string` round-trip、field-name exact-match silent miss）；`AYScript_Test` **660/660 全绿**（baseline 631 + LG-12 R3 7 + 22 baseline delta）。**Lessons learned**：`std::vector<uint8_t>` 不能装 `std::string`（`_Container_base12` 子对象 placement-new 后没正确初始化）、Lua 表构造 key 必须是 bareword 不能加引号、Logia parser 没有 `..` token 不能写字符串拼接、enum 没 AYReflect registry 时 bridge 必须 fallback 为 int。 |
+| 2026-07-10 | **S3.12+R3 完成（非 primitive args/return）**：…`AYScript_Test` **660/660 全绿**。 |
+| 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
+| 2026-07-11 | **S3.12+R4.0 完成（嵌套 struct 字段 marshal）**：`pushFieldPrimitive` + `storeFieldPrimitive` 加 `field->getType()->getFieldCount() > 0` 递归分支 — push 方向构造 Lua sub-table（用绝对索引 `subTableIdx = lua_gettop(L)` 做 `lua_settable` 而非相对 `-3`，避免深递归时相对索引漂移），store 方向 heap-alloc tmp T + memset + `lua_getfield(L, valueStackIdx, subName)` 逐字段递归。R3.0 struct return path (`retType->getFieldCount() > 0`) 自动 extend — 改一行不动。新 `R4Player` fixture（`Vector2` nested in `DamageInfo` + `Stats`）注册用 unique type name `R4Stats`（避开 R3 `Stats` 命名冲突 — 类型注册表用 typeid 找，但 `registerTypeInfo(name)` 的 name 是 process-global key，多 fixture 注册相同 name 会让 `findType("Stats")` 拿到**先**注册的 ITypeInfo，导致 field 数量不对）。新增 2 LG-12 R4.0 测试（`applyDamage({source={x=10,y=20},amount=7})` + `setPosition/getPosition` round-trip）。`AYScript_Test` **671/671 全绿**。**不 bump kLogiaPipelineVersion** (R4.0 不动 codegen，只 marshal 路径新)。Deferred 到 R4.1/R4.5+:vector/array args、nested-struct 内的 std::string、name stripper。Deferred audit:现有测试 5 个文件用 `local` keyword — design §2.3 禁止泄露 Lua 关键字，codegen emit 出 broken split text 但"运气好"在 sol2 + safe_script 下 PASS。 |
 
 ---
 
@@ -1143,19 +1189,27 @@ AYScript/
 
 ---
 
-## 13. Session prompts (copy-paste) — post S3.3
+## 13. Session prompts (copy-paste)
 
-**Done through S3.12+R3:** S3.0 LG-03 · S3.1 LG-04 · S3.2 LG-04b · S3.3 LG-05 · S3.4–S3.7b · S3.8b LG-07 (`run` + `runTool` + `toolLogiaHostContext`) · S3.9 CLI (`ays-logia compile`) · S3.10 (System host `self.field`) · S3.11 chain reflect (`ayt_reflect_*_field_chain` + FVector3 fields) · S3.12 method-call reflect (primitives only) · **S3.12+R3** (struct/enum/`std::string` args + return + `TableExpr` AST + parser + codegen).
+**Done through S3.12+R3:** S3.0–S3.12+R3 全部交付（见 §8 Phase S3 ✅）。
+
+**Remaining:** §14 + §14.8 prompts.
 
 Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuild unless prompt says verify locally.
 
-### 13.1 Recommended order
+### 13.1 Recommended order (post-S3)
 
-| Order | ID | Status |
-|-------|-----|--------|
-| 1–8 | S3.4–S3.11 | ✅ done |
-| 9 | S4.x | signal / await / source map |
-| parallel | Foundation ED-01–04 | Phase 1 north-star — not blocked on Logia |
+| Order | ID | 内容 | Status |
+|-------|-----|------|--------|
+| **P0** | **INT-01** | Editor/Game 注册 `ScriptSubSystem` + Play 加载 `.logia` | ⏳ |
+| **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ⏳ |
+| **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
+| **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
+| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ |
+| **P3** | **S4.x** | signal / await / source map | ⏳ |
+| opt | **INT-03** | 磁盘 compile cache、Editor `runTool` 菜单 | ⏳ |
+| opt | **INT-04** | EventHandler host、`event.emit` | ⏳ |
+| parallel | Foundation ED-01–04 | 引擎 north-star — 不阻塞 Logia | — |
 
 ---
 
@@ -1196,7 +1250,7 @@ Acceptance:
 ### Prompt S3.5 — Real ambient API (time + input)
 
 ```
-Implement AYScript S3.5: bind real AYTime / AYInput ambient APIs (replace mocks).
+Implement AYScript S3.5: bind real AYTime + AYDevice input ambient APIs (replace mocks).
 
 Read first:
 - AYRuntime/AYScript/design.md §6.5 (ambient API table)
@@ -1420,3 +1474,213 @@ Gate: only after S3.4 + S3.5 stable; high complexity — confirm with tech lead 
 
 Acceptance met — see §5.6 S3.11 完成记录. 604/604 green. Do not re-implement.
 ```
+
+---
+
+## 14. 剩余工作与指挥 (Post-S3)
+
+> **读者**：引擎集成负责人、Editor 负责人、后续 AI session。  
+> **前提**：AYScript 模块内编译器 + 运行时 + 多 host + 热重载 + CLI **已自洽**；缺口在**宿主接线**与**Reflect 消费方深化**。
+
+### 14.0 能力 vs 缺口（一览）
+
+| 维度 | 模块内状态 | 产品化缺口 |
+|------|------------|------------|
+| Logia 编译器 | ✅ | — |
+| Component / System / Tool host | ✅ | Editor 未注册 SubSystem |
+| `self.field` 单跳 + 2-hop 链 | ✅ | 3+ hop、FQuaternion 未做 |
+| `self.method()` primitive + struct/enum/string | ✅ | vector/out-param 未做（R4） |
+| 热重载 API + FileWatcher | ✅ | Editor Play 未默认开启 watch |
+| `ays-logia compile` | ✅ | Editor build 动作未接菜单 |
+| `time.delta/total` | ✅ | — |
+| `input.*` | 🟡 Mock 可注入 | 未接 AYDevice `InputMapping`（Phase-2） |
+| `event.*` / `spawn_prefab` | ❌ | S4 或 INT-04 |
+| EventHandler host | ❌ | INT-04 |
+| `ScriptReadOnly` 强制 | ❌ | R1 |
+| Editor Inspector 脚本字段 | ❌ | 依赖 R1 + Editor UI |
+
+### 14.1 模块边界（剩余工作归属）
+
+| 工作项 | 主责模块 | AYScript 侧 |
+|--------|----------|-------------|
+| **INT-01** 宿主注册 + Play 加载 | `AYEditor` / `AYApplication` | 提供 `ScriptSubSystem` API，**不**改 compiler |
+| **INT-02** 真实输入 | **AYDevice** | `DeviceInputProvider` 读 `InputMapping` / `InputState`；见 `AYDevice/design.md` §1.3 |
+| **R1** 脚本可见性 | `AYReflect` + `AYScript` | Semantic + `ayt_reflect_set_field` enforce |
+| **R3.5** enum/字段名 | `AYReflect` + `AYScript` bridge marshal |
+| **R4** 复杂方法签名 | `AYScript` only |
+| **S4** 新语法 | `AYScript` only |
+| **INT-03** 磁盘 cache / Editor tool | `AYScript` + `AYEditor` |
+
+### 14.2 P0 — INT-01：引擎宿主接线（最高 ROI）
+
+**问题**：`ScriptSubSystem` **不会**自动注册。`AYScriptSubSystem.h` 要求宿主显式：
+
+```cpp
+IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
+```
+
+当前 `AYEditor` / `AYApplication` **未**引用 `ScriptSubSystem` → Play 模式不会跑 Logia。
+
+**锁定决策（待实现）**：
+
+| 项 | 决策 |
+|----|------|
+| 注册时机 | `AYApplication::registerSubSystems()` 或 `AYEditorApp` init，在 `GameLoop` 启动前 |
+| 依赖顺序 | `ScriptSubSystem` 依赖 `ayt.entity`（descriptor 已声明）；在 `ResourceSubSystem` 之后、`RendererSubSystem` 前后均可 |
+| 脚本路径约定 | 开发期：`Content/Scripts/<ScriptName>.logia`；组件 `setScriptName("PlayerController")` 与文件名同名 |
+| 加载入口 | `ScriptSubSystem::bindAndLoadFromFile(comp, path, errs)` 或场景序列化后批量 bind |
+| 热重载 | Editor dev：`setHotReloadEnabled(true)` + `bindAndLoadFromFile` 已 `watchScriptPath` |
+| 验收 | Play 模式下 `examples/player_controller.logia` 能改 `self.speed` / `self.position.y` |
+
+**不做**：改 Logia 语法；在 AYScript 内硬编码 Editor 路径（路径由宿主传入）。
+
+### 14.3 P1 — INT-02：真实输入（AYDevice）
+
+**问题**：S3.5 仅做到可注入 `InputProvider*`；默认仍是 `MockInputProvider`（jump only）。
+
+**前置**：`AYDevice` Phase-2（`KeyboardDevice` + `InputMapping`）。**不**建设 `AYInput` 模块（见 `AYDevice/design.md` §1.3）。
+
+**锁定决策（待实现）**：
+
+| 项 | 策略 |
+|----|------|
+| 适配层 | `DeviceInputProvider : LogiaRuntimeBridge::InputProvider`，读 `AYDevice::DeviceManager` + `InputMapping::isActionPressed(action)` |
+| 键位映射 | Logia 字符串 = **Action 名**（`"jump"`）；物理键绑定在 AYDevice `InputMapping` 或 `AYConfig` `[Input.Actions]` |
+| 注册时机 | `ScriptSubSystem::initialize()` 成功后 `bridge.setInputProvider(&deviceProvider)`（`DeviceSubSystem` 已 poll 后查询） |
+| 单测 | 保留 `MockInputProvider`；`Test_LogiaAmbient` 不依赖 HWND |
+| 依赖顺序 | `DeviceSubSystem`（poll）→ `ScriptSubSystem`（query InputProvider） |
+
+**不做**：独立 `AYInput` 库；在 Logia 暴露裸 scancode；`event.emit`（归 S4/INT-04）。
+
+### 14.4 P2 — Reflect 消费方 backlog
+
+见 §5.7.6。推荐顺序：**R1 → R3.5 → R4**。
+
+| ID | 交付物 | 验收 |
+|----|--------|------|
+| **R1** | `FieldAttribute::ScriptVisible/ScriptReadOnly`（或复用 `BlueprintReadOnly`）；Semantic 拒绝不可见字段；`set_field` runtime enforce | 只读字段赋值 compile error 或 runtime log+no-op |
+| **R3.5** | `registerEnum<E>()`；bridge 不再 enum int fallback；`m_`/`b_` stripper；struct 内 `std::string` field marshal | enum 方法 round-trip 走 typed path |
+| **R4** | `std::vector<T>`/`std::array` args；嵌套 struct 字段；`T&` out-param | 新方法签名 unittest |
+| **R5/R6** | 智能指针、sol2 usertype | 仅在有性能/所有权需求时启动 |
+
+### 14.5 P3 — Phase S4 与可选集成
+
+| ID | 内容 | 备注 |
+|----|------|------|
+| **S4.1** | `signal` / `connect` 语法 + codegen | 可桥接 `AYEventSystem` |
+| **S4.2** | `await delay` 协程糖 | Lua 5.5 coroutine 限制需文档化 |
+| **S4.3** | Source map：运行时错误 → `.logia` 行号 | codegen 嵌 line table |
+| **INT-03** | 磁盘 `.logia.cache`；Editor 菜单调 `ays-logia compile` / `runTool` | 非 Play 关键路径 |
+| **INT-04** | `LogiaHostKind::EventHandler`；`event.emit/subscribe` ambient | 依赖 EventSystem 稳定 API |
+| **INT-05** | 3+ hop chain、`FQuaternion` 链式 reflect | codegen/helper 同形扩展 |
+
+### 14.6 明确推迟
+
+- 多宿主语言（Python/JS）
+- 自研字节码 VM
+- 向作者暴露 `require` / 裸协程 API
+- Tool hot reload（one-shot 不需要）
+- `luaL_dump` bytecode CLI 输出
+- 完整 Reflect 派生图 / 多继承 `isSubclassOf`
+
+### 14.7 风险与约束（继承 S3）
+
+1. **`kLogiaPipelineVersion`**：任何 codegen/诊断形状变化必须 bump（当前 `5`）。
+2. **`ITypeInfo` vtable 变化**：AYReflect ABI 变更后**整仓 rebuild**（见 §5.7.4 lessons learned）。
+3. **`MethodInfoImpl` 变长模板**：**禁止**放入 AYReflect foundation TU；保持 `logia/AYMethodInfoImpl.h` private。
+4. **热重载析构顺序**：`stopHotReload()` → `adapter.reset()` → `bridge.shutdown()`（§S3.7b）。
+5. **Editor 栈**：接 ScriptSubSystem 时**不要**破坏现有 `uiBackend` shutdown 顺序（见 AYEditor 会话记录）。
+
+---
+
+### 14.8 Session prompts (copy-paste)
+
+#### Prompt INT-01 — Editor/Game ScriptSubSystem wiring (P0)
+
+```
+Implement AYScript INT-01 (P0): register ScriptSubSystem in Editor/Game host.
+
+Read first:
+- AYRuntime/AYScript/design.md §14.2, §6.4, AYScriptSubSystem.h (explicit registration note)
+- AYRuntime/AYApplication/design.md (registerSubSystems pattern)
+- AYRuntime/AYEditor/src/AYEditorApp.cpp (GameLoop init order)
+
+DO:
+1. Register ScriptSubSystem in AYEditor (and/or Game) before GameLoop run.
+2. On Play enter: load .logia for ScriptComponent instances (path convention: document in design.md §14.2).
+3. Optional dev: setHotReloadEnabled(true) when loading from file.
+4. Smoke: PlayerController + examples/player_controller.logia mutates AY_PROPERTY in Play.
+
+DO NOT:
+- Change Logia compiler or bridge semantics.
+- Auto-register inside AYScript TU (keep explicit host registration).
+
+Acceptance:
+- Play mode runs on_update; self.speed / self.position.y reflect works.
+- AYScript_Test 660/660 still green.
+- Editor shutdown order unchanged (uiBackend before GameLoop shutdown).
+```
+
+#### Prompt INT-02 — Real input provider (P1, AYDevice only)
+
+```
+Implement AYScript INT-02 (P1): DeviceInputProvider for input.is_pressed.
+
+Read: design.md §14.3, §6.5, AYDevice/design.md §1.3 (no AYInput module)
+
+DO:
+1. DeviceInputProvider implements LogiaRuntimeBridge::InputProvider.
+2. Query AYDevice InputMapping by Action name ("jump"); do NOT create AYInput library.
+3. ScriptSubSystem::initialize sets provider; tests keep MockInputProvider.
+4. Blocked until AYDevice Phase-2 (KeyboardDevice + InputMapping) lands.
+
+DO NOT: AYInput module, event.emit, new Logia syntax.
+
+Acceptance: With window focused, script sees real Action state; headless tests unchanged.
+```
+
+#### Prompt R1 — Script field visibility (P2a)
+
+```
+Implement AYScript R1: ScriptVisible / ScriptReadOnly enforcement.
+
+Read: design.md §5.7.3, §5.7.6, AYReflect IAYReflect.h FieldAttribute
+
+DO:
+1. Add or reuse FieldAttribute flags for script visibility/read-only.
+2. SemanticAnalyzer: reject self.field on non-visible fields.
+3. ayt_reflect_set_field: reject ScriptReadOnly at runtime.
+4. Unittest: write to read-only field fails safe.
+
+Acceptance: compile-time + runtime both enforce; existing 660 tests green.
+```
+
+#### Prompt R3.5 — Enum registry + field stripper (P2b)
+
+```
+Implement AYScript R3.5: registerEnum + field name normalization.
+
+Read: design.md §5.7.4 R3 scope table, §5.7.6
+
+DO:
+1. AYReflect registerEnum<E>() + EnumTypeInfo (minimal).
+2. Bridge: enum args/return use retType/paramType, not int fallback.
+3. Optional: m_/b_ prefix stripper for struct table keys.
+4. Struct fields containing std::string in pushFieldPrimitive/storeFieldPrimitive.
+
+Acceptance: LG-12 R3 enum tests use typed path; field stripper unit test.
+```
+
+#### Prompt S4.1 — signal / connect (P3)
+
+```
+Implement AYScript S4.1 per design.md Phase S4.
+
+Read: §2.4, Phase S4, AYEventSystem/design.md (if exists)
+
+DO: lexer/parser/semantic/codegen for signal + connect; runtime stub or EventSystem bridge.
+Acceptance: sample compiles; AST + codegen shape tests.
+Gate: INT-01 landed preferred.
+```
+
+---

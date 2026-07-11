@@ -260,10 +260,21 @@ const ayt::reflect::IMethodInfo* lookupMethod(const std::string& typeName,
     return method;
 }
 
-// Push a primitive (int/float/bool/double/int64) onto the Lua
-// stack from a `void*` field pointer. Caller is responsible for
-// the type tag — returns 1 on success, 0 on miss. Used only by
-// `ayt_reflect_get_field_c` below.
+// Push a primitive (int/float/bool/double/int64) or a nested-struct
+// sub-table onto the Lua stack from a `void*` field pointer.
+//
+// Primitive dispatch (the S3.3 / S3.10 path) returns 1 after a single
+// lua_push*. The R4.0 nested-struct branch builds a Lua table at the
+// top of the stack with one entry per primitive leaf and returns 1;
+// the chain-helper code that handles intermediate hops
+// (ayt_reflect_*_field_chain_c) already calls this helper for leaves,
+// so the same recursive structure automatically applies to nested
+// chains too. Returns 0 on truly unknown types (e.g. std::string
+// field, which R3.0 deliberately left fail-closed for the field path).
+//
+// Used by `ayt_reflect_get_field_c` (single hop) and the chain
+// leaf helper `ayt_reflect_get_field_chain_c`. The R3.12+R3 struct
+// return path also walks this for sub-fields.
 int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void* fieldPtr)
 {
     auto* type = field->getType();
@@ -289,6 +300,37 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
     }
     if (eq("Int64")) {
         lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int64_t*>(fieldPtr)));
+        return 1;
+    }
+    // R4.0 — nested struct field: build a Lua sub-table with one
+    // entry per primitive leaf (recursive for deeper nesting). The
+    // same primitive dispatch above handles leaves at any depth.
+    // Limitations carried over from R3.0: std::string sub-fields
+    // fail closed (nil) until R3.5+ lands; container
+    // (vector/array) sub-fields fail closed until R4.1+.
+    if (type->getFieldCount() > 0) {
+        lua_newtable(L);
+        int subTableIdx = lua_gettop(L);
+        size_t subCount = type->getFieldCount();
+        for (size_t si = 0; si < subCount; ++si) {
+            auto* sub = type->getField(si);
+            if (!sub) continue;
+            const char* subName = sub->getName();
+            if (!subName) continue;
+            void* subPtr = static_cast<uint8_t*>(fieldPtr) + sub->getOffset();
+            if (pushFieldPrimitive(L, sub, subPtr) == 1) {
+                lua_pushstring(L, subName);
+                // Settable key+value into the captured `subTableIdx`
+                // (relative-to-absolute anchor) so deep nesting works
+                // regardless of how deep the call stack sits on the
+                // Lua stack.
+                lua_settable(L, subTableIdx);
+            } else {
+                if (lua_gettop(L) > 0 && lua_isnil(L, -1)) {
+                    lua_pop(L, 1);
+                }
+            }
+        }
         return 1;
     }
     return 0;
@@ -347,6 +389,14 @@ int ayt_reflect_set_field_c(lua_State* L)
 // `valueStackIdx` is the absolute Lua stack index of the value to
 // store. Callers must validate `valueStackIdx <= lua_gettop(L)` before
 // calling.
+//
+// R4.0 — nested struct field: when the field's type has its own
+// fields (getFieldCount() > 0), `valueStackIdx` must point at a Lua
+// table. We build a temporary T in heap memory (memset 0), recursively
+// fill each sub-field from the Lua table, then memcpy into the
+// caller's fieldPtr (struct by value assignment). Returns 1 on
+// success; 0 on truly unknown type (std::string / container fields
+// fail closed until R3.5+ / R4.1).
 int storeFieldPrimitive(lua_State* L,
                         const ayt::reflect::IFieldInfo* field,
                         void* fieldPtr,
@@ -380,6 +430,38 @@ int storeFieldPrimitive(lua_State* L,
     if (eq("Int64")) {
         *static_cast<int64_t*>(fieldPtr) =
             static_cast<int64_t>(lua_tointeger(L, valueStackIdx));
+        return 1;
+    }
+    // R4.0 — nested struct write. Lua-side value must be a table.
+    // We allocate a temp T, fill it recursively, then memcpy into
+    // the caller's fieldPtr. Used by `ayt_reflect_set_field_c` (single
+    // hop) and the chain helper `ayt_reflect_set_field_chain_c`.
+    if (type->getFieldCount() > 0) {
+        if (!lua_istable(L, valueStackIdx)) {
+            return 0;
+        }
+        size_t typeSize = type->getSize();
+        if (typeSize == 0) typeSize = sizeof(uint64_t);  // safety
+        void* subMem = ::operator new(typeSize);
+        std::memset(subMem, 0, typeSize);
+        size_t subCount = type->getFieldCount();
+        for (size_t si = 0; si < subCount; ++si) {
+            auto* sub = type->getField(si);
+            if (!sub) continue;
+            const char* subName = sub->getName();
+            if (!subName) continue;
+            lua_getfield(L, valueStackIdx, subName);
+            if (!lua_isnil(L, -1)) {
+                void* subPtr = static_cast<uint8_t*>(subMem) + sub->getOffset();
+                // Recurse. -1 is relative to current top of stack —
+                // the inner getfield above left the value there.
+                storeFieldPrimitive(L, sub, subPtr, /*valueStackIdx=*/-1);
+            }
+            lua_pop(L, 1);
+        }
+        // Struct by value copy into the caller's slot.
+        std::memcpy(fieldPtr, subMem, typeSize);
+        ::operator delete(subMem);
         return 1;
     }
     return 0;
@@ -748,12 +830,14 @@ int ayt_reflect_call_method_c(lua_State* L)
     } else if (retType->getFieldCount() > 0) {
         // S3.12+R3: struct return. Build a Lua table and fill each
         // field via pushFieldPrimitive. Recursive for nested struct
-        // fields (R3.0 limits: no nested struct fields per design).
+        // fields (R4.0 extends R3: a field whose type is itself a
+        // struct auto-builds a Lua sub-table).
         // The retPtr points to a TLS buffer holding a copy of the
         // struct by value; pushFieldPrimitive needs a non-const void*
         // (it does not mutate the bytes, but the signature requires
         // it). const_cast is safe here.
         lua_newtable(L);
+        int outerIdx = lua_gettop(L);
         size_t fieldCount = retType->getFieldCount();
         for (size_t fi = 0; fi < fieldCount; ++fi) {
             auto* field = retType->getField(fi);
@@ -762,7 +846,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                              + field->getOffset();
             lua_pushstring(L, field->getName());
             pushFieldPrimitive(L, field, fieldPtr);
-            lua_settable(L, -3);
+            lua_settable(L, outerIdx);
         }
     } else {
         // Unknown return type — most commonly an enum (R3.0 ships
