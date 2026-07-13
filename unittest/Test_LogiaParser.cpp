@@ -115,4 +115,53 @@ script T {
     CHECK_FALSE(ifStmt->thenBranch.empty());
 }
 
+TEST_CASE(parse_r52a_do_block) {
+    // R5.2-A (2026-07-13): `do { <stmts> } end` parses to a BlockStmt
+    // whose body is a vector with the expected size. Mirrors
+    // parse_if_without_parens — the parser's responsibility is the
+    // AST shape; codegen + runtime semantics are exercised by the
+    // LogiaReflectRuntime suite.
+    const char* source = R"(
+script T {
+    on_start() {
+        do {
+            var a: int = 1
+            a = a + 1
+        } end
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    CHECK(result.errors.empty());
+
+    const LifecycleFuncDecl* onStart =
+        findLifecycle(*result.program->scripts[0], LifecycleKind::OnStart);
+    CHECK(onStart != nullptr);
+    CHECK(onStart->body.size() == 1u);
+
+    const auto* bs = dynamic_cast<const BlockStmt*>(onStart->body[0].get());
+    CHECK(bs != nullptr);
+    CHECK(bs->body.size() == 2u);
+}
+
+TEST_CASE(parse_r52a_do_block_at_top_level_rejected) {
+    // R5.2-A: `do { ... } end` is a STATEMENT, valid only where
+    // statements are allowed (inside lifecycle bodies / function
+    // bodies / control-flow branches). A bare `do` at script-block
+    // scope is rejected — parseMember has no `do` dispatch, so a
+    // bare `do` keyword falls through to the "Expected script
+    // member" error path.
+    const char* source = R"(
+script T {
+    do { var a: int = 1 } end
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+    CHECK_FALSE(result.errors.empty());
+}
+
 TEST_SUITE_END

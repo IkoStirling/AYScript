@@ -12,7 +12,7 @@
 // getFieldCount() on the resolved leaf type of `self.<field>`
 // and decide between the reflect-call rewrite and the legacy
 // bare-member codegen.
-#include "IAYReflect.h"
+#include "ayreflect/IReflect.h"
 
 #include <cstdio>
 #include <sstream>
@@ -247,6 +247,11 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     // guaranteed to be in a valid context.
     if (auto* b = dynamic_cast<const BreakStmt*>(&stmt))    { emitBreakStmt(*b); return; }
     if (auto* c = dynamic_cast<const ContinueStmt*>(&stmt)) { emitContinueStmt(*c); return; }
+    // R5.2-A (2026-07-13): block-scope statement. Lowered to Lua
+    // 5.2+ native `do ... end`. The Logia-side `do` / `end` /
+    // braces in source are consumed by the parser; this emit
+    // produces the shell only.
+    if (auto* blk = dynamic_cast<const BlockStmt*>(&stmt))   { emitBlockStmt(*blk); return; }
     if (auto* r = dynamic_cast<const ReturnStmt*>(&stmt))  { emitReturnStmt(*r); return; }
     if (auto* e = dynamic_cast<const ExprStmt*>(&stmt))    { emitExprStmt(*e); return; }
     // 2026-07-11 audit fix: defensive — parser rejects `function`
@@ -407,6 +412,25 @@ void LuaCodegen::emitContinueStmt(const ContinueStmt& /*stmt*/)
 {
     indent();
     _out += "continue\n";
+}
+
+// R5.2-A (2026-07-13): explicit `do ... end` shell. The body is
+// emitted via the existing emitBlock helper (just iterates the
+// StmtPtr vector). Indent is preserved by the surrounding
+// LuaCodegen::indent() state — same convention as while/for
+// bodies (see emitWhileStmt at L310, emitForStmt at L353).
+//
+// `do` is a pure block scope keyword in Lua (not a do-while loop);
+// the parser already ensures the AST shape is correct.
+void LuaCodegen::emitBlockStmt(const BlockStmt& stmt)
+{
+    indent();
+    _out += "do\n";
+    ++_indent;
+    emitBlock(stmt.body);
+    --_indent;
+    indent();
+    _out += "end\n";
 }
 
 void LuaCodegen::emitReturnStmt(const ReturnStmt& stmt)

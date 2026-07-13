@@ -162,6 +162,12 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         // rejects bare references at any other context.
         {"break", TokenType::Break},
         {"continue", TokenType::Continue},
+        // R5.2-A (2026-07-13): block-scope entry + closer. Parser
+        // matches `do` → parseDoBlock (requires matching `end` after
+        // `}`). `end` itself is only used as the closer of `do` blocks;
+        // other control-flow statements close implicitly on `}`.
+        {"do", TokenType::Do},
+        {"end", TokenType::End},
         {"return", TokenType::Return},
         {"true", TokenType::True},
         {"false", TokenType::False},

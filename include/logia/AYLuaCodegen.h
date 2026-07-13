@@ -81,6 +81,7 @@ private:
     void emitForStmt(const ForStmt& stmt);       // R5.0 (2026-07-13)
     void emitBreakStmt(const BreakStmt& stmt);   // R5.1 (2026-07-13)
     void emitContinueStmt(const ContinueStmt& stmt); // R5.1 (2026-07-13)
+    void emitBlockStmt(const BlockStmt& stmt);  // R5.2-A (2026-07-13)
     void emitReturnStmt(const ReturnStmt& stmt);
     void emitExprStmt(const ExprStmt& stmt);
 

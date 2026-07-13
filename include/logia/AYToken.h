@@ -26,6 +26,19 @@ enum class TokenType : uint8_t {
     For,              // R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`
     Break,            // R5.1 (2026-07-13): `break;` (or `break` + stmt-end) inside loop body
     Continue,         // R5.1 (2026-07-13): `continue;` inside loop body
+    Do,               // R5.2-A (2026-07-13): block-scope entry marker
+                      // `do { ... } end`. Parsed by Parser::parseStatement;
+                      // codegens to Lua's `do ... end`. NOT a loop keyword
+                      // (matches Lua 5.2+ semantics — `do ... end` is pure
+                      // block scope). Slice B (`break :L`) is a separate
+                      // commit.
+    End,              // R5.2-A (2026-07-13): block-scope closer for explicit
+                      // `do { ... } end` form. Tokenizer-only — semantically
+                      // a no-op for the parser (BlockStmt stores body as
+                      // a vector), but the lexer recognizes `end` so
+                      // `do {} end` parses cleanly. (Other control-flow
+                      // statements close implicitly on `}`; explicit-`end`
+                      // is only for `do`.)
     Return,
     True,
     False,

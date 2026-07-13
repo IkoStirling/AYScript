@@ -206,6 +206,14 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     if (match(TokenType::Continue)) {
         return parseContinueStmt();
     }
+    // R5.2-A (2026-07-13): `do { <stmts> } end` block-scope statement.
+    // Matches `do` keyword; defers to parseDoBlock for the body. NOT a
+    // do-while loop — Lua's `do ... end` is purely block scoping, and
+    // Logia aligns with Lua here. The body is parsed with the same
+    // parseBlockBody entry as every other braced body.
+    if (match(TokenType::Do)) {
+        return parseDoBlock();
+    }
     if (check(TokenType::Var)) {
         return parseVarDecl();
     }
@@ -389,6 +397,22 @@ std::unique_ptr<Stmt> Parser::parseContinueStmt()
     }
     match(TokenType::Semicolon);
     return std::make_unique<ContinueStmt>();
+}
+
+// R5.2-A (2026-07-13): `do { <stmts> } end` — explicit block scope.
+// The `do` keyword has already been consumed by parseStatement's
+// `match(TokenType::Do)` dispatch before we get here. Mirrors the
+// other braced-body paths (parseWhileStmt, parseForStmt, parseIfStmt):
+// consume `{`, parseBlockBody, consume `}`, then consume `end`. The
+// `end` literal in the source is Logia-side only — codegen emits
+// Lua's `do ... end` from the BlockStmt AST node.
+std::unique_ptr<Stmt> Parser::parseDoBlock()
+{
+    consume(TokenType::LeftBrace, "Expected '{' after 'do'");
+    std::vector<StmtPtr> body = parseBlockBody();
+    consume(TokenType::RightBrace, "Expected '}' after do-block body");
+    consume(TokenType::End, "Expected 'end' to close do-block");
+    return std::make_unique<BlockStmt>(std::move(body));
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()

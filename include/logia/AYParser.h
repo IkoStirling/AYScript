@@ -41,6 +41,7 @@ private:
     std::unique_ptr<Stmt> parseForStmt();     // R5.0 (2026-07-13): for (var i : N) { body }
     std::unique_ptr<Stmt> parseBreakStmt();   // R5.1 (2026-07-13): break; (only inside loop)
     std::unique_ptr<Stmt> parseContinueStmt();// R5.1 (2026-07-13): continue; (only inside loop)
+    std::unique_ptr<Stmt> parseDoBlock();    // R5.2-A (2026-07-13): do { <stmts> } end
     std::vector<StmtPtr> parseBlockBody();
 
     // R5.1: track loop nesting depth. parseWhileStmt / parseForStmt

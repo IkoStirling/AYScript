@@ -85,6 +85,16 @@ namespace ayt::script
 //       unchanged — pattern is `self.fillInt(x)` where C++ writes
 //       to self.foo and the script reads back. Compile cache
 //       invalidated because bridge code path changed.
+//       2026-07-13 R5.2-A: bump 15 → 16. New Logia surface:
+//       `do { <stmts> } end` block-scope statement. Mirrors Lua's
+//       `do ... end` exactly (Logia-side braces around body, plus
+//       explicit `end` to close). Reuses new `do` + `end` keyword
+//       tokens (TokenType::Do / TokenType::End). Codegen emits
+//       Lua's native `do ... end` via LuaCodegen::emitBlockStmt.
+//       Slice B (`break :L`, `continue :L`, `::L::` label decl) and
+//       Slice C (bound type validation) are separate commits. Compile
+//       cache invalidated because codegen output shape changed for
+//       the new construct.
 //       2026-07-13 R4.2b: bump 14 → 15. Bridge runtime out-param
 //       marshal extended for `std::string` (T& / T* in PMF
 //       signature). Heap-allocates a fresh std::string per call
@@ -141,7 +151,7 @@ namespace ayt::script
 //       sub-table per struct element via pushFieldPrimitive or pushes
 //       each std::string via lua_pushlstring. Logia source unchanged.
 //       Compile cache invalidated because bridge code path changed.
-constexpr std::size_t kLogiaPipelineVersion = 15u;
+constexpr std::size_t kLogiaPipelineVersion = 16u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

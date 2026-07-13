@@ -192,6 +192,21 @@ public:
     ContinueStmt() = default;
 };
 
+// R5.2-A (2026-07-13): explicit block-scope statement. Logia-side
+// source: `do { <stmts> } end`. Semantically identical to the
+// user's existing `{ <stmts> }` braces that control-flow
+// statements (while / for / if / else / function) use for bodies.
+// The `do` keyword is the entry marker and `end` the closer.
+// Lowered to Lua 5.2+ native `do ... end`.
+//
+// `do` is NOT a do-while loop keyword — matches Lua semantics
+// (Lua's `do ... end` is a pure block, not a post-test loop).
+class BlockStmt : public Stmt {
+public:
+    explicit BlockStmt(std::vector<StmtPtr> body) : body(std::move(body)) {}
+    std::vector<StmtPtr> body;
+};
+
 class IfStmt : public Stmt {
 public:
     IfStmt(ExprPtr condition, std::vector<StmtPtr> thenBranch, std::vector<StmtPtr> elseBranch)
