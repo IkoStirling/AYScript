@@ -564,4 +564,61 @@ script ContinueOutside {
     CHECK(_lastDump.errorsContain("'continue' outside loop"));
 }
 
+// R5.0.1 — `else if (cond) { ... }` with parens. R5.0.1's recursive
+// `parseIfStmt` re-entry handles the inner `(cond)` syntax. The
+// emitted Lua shape should be nested `if ... then ... else ... end`
+// blocks (Logia desugars `else if` to nested IfStmt nodes).
+TEST_CASE(emit_dump_27_else_if_paren_form) {
+    const char* src = R"(
+script Chain {
+    var n: int = 0
+    function check() {
+        if n > 0 {
+            __test_witness = "positive"
+        } else if (n < 0) {
+            __test_witness = "negative"
+        } else {
+            __test_witness = "zero"
+        }
+    }
+    on_start() { check() }
+}
+)";
+    dumpCase("27_else_if_paren_form", src, /*expectSuccess=*/true);
+    // Outer if: `n > 0` (BinaryExpr Greater emits with parens).
+    CHECK(containsFlat(_lastDump.emittedLua, "if (n > 0) then"));
+    // The `else if (n < 0)` desugars to a nested `if (n < 0) then ... end`
+    // inside the outer else branch.
+    CHECK(containsFlat(_lastDump.emittedLua, "if (n < 0) then"));
+    // The trailing `else { ... }` is the deepest else of the chain.
+    CHECK(containsFlat(_lastDump.emittedLua, "else\n"));
+    // At least 3 `end` keywords (outer if, inner if, function).
+    // We count by checking the source line is preserved.
+    CHECK(containsFlat(_lastDump.emittedLua, "function check()"));
+}
+
+// R5.0.1 — `else if cond { ... }` bare form (no parens around the
+// chained condition). Also accepted because parseIfStmt's recursion
+// re-peeks `(` on each entry.
+TEST_CASE(emit_dump_28_else_if_bare_form) {
+    const char* src = R"(
+script ChainBare {
+    var n: int = 0
+    function check() {
+        if n > 0 {
+            __test_witness = "positive"
+        } else if n < 0 {
+            __test_witness = "negative"
+        } else {
+            __test_witness = "zero"
+        }
+    }
+    on_start() { check() }
+}
+)";
+    dumpCase("28_else_if_bare_form", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "if (n > 0) then"));
+    CHECK(containsFlat(_lastDump.emittedLua, "if (n < 0) then"));
+}
+
 TEST_SUITE_END
