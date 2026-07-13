@@ -2,8 +2,8 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-11）**：**Phase S0–S3 + S3.12+R3 + R4.0 + Audit fix 已交付**；`AYScript_Test` **692/692** 全绿；`kLogiaPipelineVersion = 6`。  
-> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R4.x 接续：R4.1 vector/array args → R4.2 T* out-param。  
+> **文档状态（2026-07-13）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R5.0 + R5.0.1 + R5.1 + R4.1 已交付**；`AYScript_Test` **752/752** 全绿；`kLogiaPipelineVersion = 10`。  
+> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R4.x 接续：R4.2 T&/T* out-param → R4.1b struct/std::string element containers。
 > **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
 ## 1. 概述
@@ -607,6 +607,50 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 12. **AYReflect 测试 fixture 共享 type-name 是隐藏的 dependency 风险**：R3 fixture 注册 `R3Player::Stats as "Stats"`,R4 fixture 想注册 `R4Player::Stats as "Stats"`。TypeRegistry 不阻止重名 — `findType<Ret>()` 用 typeid 走 hash，但 `registerTypeInfo(name, info)` 的 name 是 process-wide 的字符串 key，如果其他 fixture 走 `findType("Stats")` 会拿到**先注册**的 ITypeInfo，导致 field 数对不上。最干净是在每个 fixture 用 unique type name（R4 用 `R4Stats`），避免"name collision 踩到另一个 fixture 的 ITypeInfo"。**未来**: add `registerTypeInfo` 名字重复时 warning（push backlist of R4.1+）。
 13. **Logia 的 method-call-then-chain (`getStats().location.x`) 不走 R3.11 chain reflect**：R3.11 只覆盖 `self.<f1>.<f2>`，根必须是 lightuserdata `self`。bridge 返回的 Lua table 上的 `.field.field` 是普通 Lua sub-table 访问 — **需要测试用 `local s = ...` 中间变量**才能在 Logia emit 时正确处理。但 `local` 又是禁止 keyword（见 §2.3）。这是一个**未来 S4 / R5 范畴** — Logia 要么加 `..` token 用于字符串组合，要么把 method-call-chain 也走 R3.11-style chain reflect。
 
+#### 5.7.4 R4.1 — std::vector / std::array 方法参数与返回值
+
+**状态**：✅ **R4.1 完成（2026-07-13，commit 待 push）**。R3.0 + R4.0 之后，method 边界只剩 homogeneous 容器 (`std::vector<T>` / `std::array<T, N>`) 没有覆盖。R4.1 把容器作为 method 参数与返回值打通,Element 类型限制为 primitive (int / float) — 结构体 / std::string 元素推到 R4.1b。
+
+**实现摘要**：
+
+1. **AYReflect 新增 `ArrayTypeInfo<T, N>`**(镜像 `VectorTypeInfo<T>`)：`AYFoundation/AYReflect/AYReflect.h` 新增模板,实现 `IContainerTypeInfo` 接口的所有方法;`getContainerSize()` 返回 compile-time N;`resize()` / `pushBack()` 是 no-op stubs(因为 std::array 不能 grow)。配套新增 `registerArrayType<T, N>(name)` helper。
+2. **`IContainerTypeInfo` 加 `isFixedSize()` virtual** (R4.1):默认 `false`(对 `VectorTypeInfo` 保持源码兼容),`ArrayTypeInfo` override 为 `true`。这是 bridge 区分 std::vector vs std::array 的唯一信号 — 避免 name-string sniffing。**vtable ABI 变化**,按 memory note 3 触发整仓 rebuild。
+3. **`MethodInfoImpl::readArg` 加容器分支**:`detail::is_std_vector_v` / `detail::is_std_array_v` SFINAE traits 检测 `std::vector<T>` / `std::array<T, N>` 参数类型;slot 持有 heap-allocated 容器指针,readArg copy-construct 到 PMF 参数(const T& 自然 bind 到 returned 局部)。`MethodInfoImplConst` 同步扩展。
+4. **bridge arg-marshal 新增 `IContainerTypeInfo` 分支** (`ayt_reflect_call_method_c`):dynamic_cast 后,`lua_len()` 取元素数 N,`lua_rawgeti` 逐元素读 int / float。`isFixedSize()` 决定 `resize + push_back` (vector) vs `clamp + memset + memcpy` (array) 两条路径。`getContainerSize(nullptr)` 在 ArrayTypeInfo 上返回 compile-time N,作为 cap。
+5. **bridge return-marshal 新增 `IContainerTypeInfo` 分支**:invoke 完检查 retType,`getContainerSize(retPtr)` 取 N,`getElementAt(retPtr, i)` 拿每个元素指针,逐元素 push 到新 Lua table。1-indexed。
+6. **Logia TableExpr 解析加 positional 形式**:`include/logia/AYParser.h` + `src/logia/AYParser.cpp` 的 `parsePrimary` 在 `{` 之后 peek `isStartOfKeyedEntry()` (Identifier+`=` 紧邻)— 是则走原有 keyed 路径,否则走新 positional 路径 `do { entry.key=nullptr; entry.value=parseExpression(); } while(comma)`。`TableExpr::Entry::key` 字段早就是 nullable(预留 for R3.5+),本切片落实。Codegen 的 `e.key==nullptr` 分支已经存在,直接 emit `value`(`{1, 2, 3}` → 1-indexed Lua table,正好对得上 vector/array 的 `lua_rawgeti` 1-indexed 索引)。
+
+**测试覆盖（6 cases,`Test_LogiaReflectRuntime.cpp` R4_1Player fixture + LG-12 R4.1 套件）**：
+
+| # | 名称 | 验证点 |
+|---|---|---|
+| 1 | `lg12_r41_vector_int_arg_sum` | `self.sumVec({1,2,3,4,5})` 返回 15 |
+| 2 | `lg12_r41_vector_int_return_to_lua_table` | `self.getVec()` 返回 Lua table,`#v == 5`,`v[3] == 3` |
+| 3 | `lg12_r41_vector_int_arg_shorter_than_expected` | `self.first3({1,2})` → C++ 收到 2-element vector,sum = 3 |
+| 4 | `lg12_r41_array_float4_arg_sums_to_hp` | `self.applyFloatArr({1.5,2.5,3.5,4.5})` → `hp = 12` |
+| 5 | `lg12_r41_array_int3_return` | `self.getArr3()` → Lua table,`#a == 3`,`a[2] == 20` |
+| 6 | `lg12_r41_empty_vector_returns_minus_one` | `self.first({})` → C++ 收到空 vector,返回 -1 |
+
+**结果**:`AYScript_Test` **752/752 全绿**(baseline 742 + R4.1 6 cases + 1 sub-case + 已有 3 个 dump-case 集成用例)。
+
+**kLogiaPipelineVersion 9 → 10**:bridge runtime marshal 路径新增(不影响 codegen emit shape,但 compile cache 强制失效)。
+
+**范围**：
+
+| ✅ R4.1 ships | ❌ Deferred |
+|---|---|
+| `std::vector<T>` arg + return (T = int / float) | `std::vector<T>` T = struct / std::string (R4.1b) |
+| `std::array<T, N>` arg + return (T = int / float) | `std::vector<bool>` (bit-packed, R4.1c) |
+| Positional TableExpr `{v1, v2, v3}` (parser + codegen) | `std::vector<std::vector<T>>` (R4.1d) |
+| `IContainerTypeInfo::isFixedSize()` virtual | `T&` / `T*` out-param (R4.2) |
+
+**Lessons learned (R4.1 specific)**：
+
+17. **MethodInfoImpl 的 if-constexpr ladder 是 bridge 协议扩展点**:R3.0 加了 enum / std::string / lvalue-ref / pointer 分支,R4.1 加 std::vector / std::array。每个新分支只需要在 readArg 加一个 if constexpr,bridge arg-side 加一个 dynamic_cast 分支,无需修改 PMF 本身。MethodInfoImpl 作为"slot 派发器"的设计在 R4.1 完整闭环。
+18. **Positional TableExpr 是 R4.1 的隐藏前提**:`{1, 2, 3}` 之前是 parser hard-reject (case 04 / emit_dump 04)。R4.1 必须扩 parser,但**改动面小**:`TableExpr::Entry::key` 早是 nullable(预留 for R3.5+),codegen 早处理 `key==nullptr` — 只需要 parsePrimary 加 peek + 选择两条路径。Lesson:AST 节点预留 nullable 字段降低了后续切片成本。
+19. **ITypeInfo vtable 加虚函数触发整仓 rebuild**:`isFixedSize()` 是一行 override,但 AYReflect ABI 变化按 memory note 3 必须 `--clean-first` 或 `find -name '*.cpp' -exec touch`。`build_ayscript.bat` 第一次 build 后链接 AYReflect.lib,后续 cpp TU 通过 dep 链 rebuild — 验证通过。
+20. **`__test_witness = tostring(s)` 走 `getLuaGlobalString` 不是 `tryGetLuaGlobalNumber`**:Lua `tostring(15)` 是 string,`tryGetLuaGlobalNumber` 只对 number return true。R3 case 12 用 `getLuaGlobalString` 验证 witness,R4.1 case 1/3/5/6 同样用 string 比较(避开 tostring-vs-number 类型误读)。case 4 (applyFloatArr → hp 写入) 用 `getLuaGlobalString("12")` 验证 C++ 写入 — 这里 C++ field 是 int,Logia 读 `self.hp` 是 number,但 `tostring(self.hp)` 走 string 通道才安全。
+
 #### 5.7.4 R-Audit — 语法审计修复（2026-07-11）
 
 **状态**：✅ 完成（commit 待 push）。三个并发 defect 经 plan-mode agent 复核根因后一并修复。
@@ -846,7 +890,7 @@ while n < 10 {
 | **R2** | `AY_METHOD` + `IMethodInfo` + `ayt_reflect_call_method` | ✅ S3.12 | — |
 | **R3** | struct 链 `self.position.x`（= S3.11） | ✅ S3.11 | — |
 | **R3.5** | `registerEnum<E>()`；`m_`/`b_` 字段名 stripper；struct 内 `std::string` 字段 marshal | ⏳ 待做 | AYReflect enum 注册 |
-| **R4** | `std::vector<T>` / `std::array<T,N>` args；嵌套 struct 字段；`T&` out-param | ⏳ 待做 | R3.5 可选 |
+| **R4** | `std::vector<T>` / `std::array<T,N>` args；嵌套 struct 字段；`T&` out-param | ⏳ 部分 (R4.0 + R4.1 ship;R4.2 待) | R3.5 可选 |
 | **R5** | `unique_ptr` / `shared_ptr` 方法参数 | ⏳ 推迟 | 所有权语义锁定后 |
 | **R6** | sol2 `usertype` 优化（替代部分 `lua_CFunction`） | ⏳ 性能驱动 |  profiling 数据 |
 
@@ -1409,6 +1453,7 @@ AYScript/
 | 2026-07-13 | **R5.0 完成（while / for 循环语句）**：`while (cond) { body }` 与 `for (var i : N) { body }` 在 R5.0 落地为 Logia 一级语法。`include/logia/AYToken.h` 加 `TokenType::While` / `TokenType::For`；`src/logia/AYLexer.cpp` keywords map 收编 `while` / `for`（从此保留字）；`include/logia/AYAst.h` 加 `WhileStmt(condition, body)` / `ForStmt(counterName, bound, body)` AST 节点；`src/logia/AYParser.cpp` 新增 `parseWhileStmt()` / `parseForStmt()` 在 `parseStatement()` dispatch 的 `If` 后插入，`for` header 是专用 counter-var pattern `var Identifier Colon Expr`，**不**复用 `parseVarDecl`（否则 `10` 会被当 type name 报 unknown-type），`synchronize()` 加 `While` / `For` recovery token；`src/logia/AYLuaCodegen.cpp` 新增 `emitWhileStmt` → `while <cond> do ... end` + `emitForStmt` → `for <counter> = 1, <bound> do ... end`（emit 不带 `var` / `:`，Lua `for` 隐式声明 counter），`emitStmt` dispatch 同步扩展；`src/logia/AYSemanticAnalyzer.cpp` 加 `analyzeWhileStmt` / `analyzeForStmt`，**关键不变量**：`for` counter 不进 analyzer `_scope`（Lua `for` 已是 loop-local，强行塞 scope 会与 runtime 视图失配），`analyzeStmt` dispatch 同步扩展；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 6 → 7；`unittest/Test_LogiaEmitDump.cpp` 增 case 14（`while` 在 script-block helper 里）/ 15（`for` + 验证 emit 不带 `var`）/ 16（嵌套 `for`）。`AYScript_Test` **705/705 全绿**（baseline 692 + R5.0 3 cases + 已有的 10 个漏计入的 dump-case 集成用例）。Defer to R5.0.1 / R4.5+：`break` / `continue`、C-style `for`、range `for (i in 1..N)`（需 `..` token）、bound 类型校验（需 expression-type inference）。**Lessons learned**：var-vs-type 歧义由 parser 显式处理而非 grammar 升级；counter scope 由 Lua 提供而非 analyzer 提供（避免 analyzer/runtime 视图失配）；`while`/`for` 走 brace-only 但 emit 用 Lua 原生 `do/end`（brace-only 是 source-level，`do/end` 是 target-level，两者不必统一）。 |
 | 2026-07-13 | **R5.0.1 完成（可选括号 + for 半开区间）**：R5.0 落地后用户反馈两点 — (a) 强制 `if (cond) { ... }` 括号违背人写代码习惯（多数人写 `if x > 0` 不写 `if (x > 0)`），(b) `for (var i : 10)` 强制 1..N 偏离主流 0..N-1 习惯。R5.0.1 在 R5.0 基础上加两条无 breaking change 的扩展：(1) `if cond { ... }` / `while cond { ... }` / `for var i : N { ... }` 三种 statement 括号可选（peented，但加了左括号就强制配对右括号；混搭 `if (cond { ... }` 是 clean parse error）；(2) `for (var i : start, end) { body }` 半开区间形式 emit `for i = start, (end) - 1 do`（Lua numeric-for 是 inclusive，两端相减模拟 [start, end) 语义；括号包裹 `end` 是因为 end 可能是 `n*2` 这种算术，不包会被 Lua precedence 解析成 `n * (2 - 1)`）。`include/logia/AYAst.h` `ForStmt` 加 `ExprPtr start` field + 新 ctor `ForStmt(counterName, start, end, body)`，旧 ctor 标短形式（`start == nullptr`）；`src/logia/AYParser.cpp` `parseIfStmt` / `parseWhileStmt` / `parseForStmt` 用 `match(LeftParen)` peek 后 dispatch 两种形态，`parseForStmt` 在 first expression 后 peek `,` 决定走 start-end range 还是单 bound 短形式，`parseIfStmt` 的 `else` 分支 peek `If` 后递归支持 `else if` 链；`src/logia/AYLuaCodegen.cpp` `emitForStmt` 看 `stmt.start` 双形态：非空 emit `start, (end) - 1`、空 emit `1, bound`；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 7 → 8（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 17（`if` bare）/ 18（`while` bare）/ 19（`for (var i : 0, 10)` half-open）/ 20（`for var i : 0, 10 { ... }` 头 bare）/ 21（`for (var i : 10)` 短形式回归 guard）。`AYScript_Test` **720/720 全绿**（R5.0 705 + R5.0.1 5 cases + 已有 10 个 dump-case 集成用例）。**Lessons learned**：强制括号是设计洁癖 vs 工程实用性的取舍（1 行 `match(LeftParen)` 消除每天撞到的体感摩擦）；0..N-1 vs 1..N 是范式之争（保留短形式 + 加 range 是双赢）；`for i = 0, n*2 - 1 do` 必须 `(end) - 1` 包裹避免 Lua precedence 错位；MSVC `std::vector<unique_ptr>` initializer_list brace-init 容易触发 `construct_at` overload 解析失败，改用 `vector + push_back` 两步式避免。 |
 | 2026-07-13 | **R5.1 完成（`break` / `continue`）**：loop 早退能力闭环。`include/logia/AYToken.h` 加 `TokenType::Break` / `TokenType::Continue`；`src/logia/AYLexer.cpp` keywords map 收编 `break` / `continue`（从此保留字）；`include/logia/AYAst.h` 加 `BreakStmt` / `ContinueStmt`（无字段，marker node）；`include/logia/AYParser.h` 加 `Parser::_loopDepth` int 字段（初始 0）；`src/logia/AYParser.cpp` `parseWhileStmt` / `parseForStmt` 在 `parseBlockBody` 前后 `++_loopDepth; ...; --_loopDepth;` push/pop，新加 `parseBreakStmt` / `parseContinueStmt` 在 loopDepth==0 时报 `'break' outside loop` / `'continue' outside loop` 并 return nullptr，`parseStatement` dispatch 在 `if` / `while` / `for` 之后、`var` 之前加 `Break` / `Continue` 分支，`synchronize()` recovery case 加两个新 token；`include/logia/AYLuaCodegen.h` 加 `emitBreakStmt` / `emitContinueStmt` 声明；`src/logia/AYLuaCodegen.cpp` `emitBreakStmt` 输出 `break\n`、`emitContinueStmt` 输出 `continue\n`（Lua 5.2+ 原生支持，零 runtime helper / 零 goto-juggling），`emitStmt` dispatch 同步扩展；`include/logia/AYSemanticAnalyzer.h` 加 `analyzeBreakStmt` / `analyzeContinueStmt` 声明（无字段 no-op）；`src/logia/AYSemanticAnalyzer.cpp` 实现两个 no-op 方法，`analyzeStmt` dispatch 同步扩展，`analyzeForStmt` 顺手 walk `f.start`（R5.0.1 漏掉的 `start` 表达式 validate）；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 8 → 9（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 22（`for + break`）/ 23（`while + continue`）/ 24（nested `for` inner `break`）/ 25（`break` 在 helper body 里 → hard error）/ 26（`continue` 在 on_start 里 → hard error）。`AYScript_Test` **734/734 全绿**（R5.0.1 720 + R5.1 5 cases + 已有 9 个 dump-case 集成用例）。**Lessons learned**：`loopDepth` 一个 int 字段就足够支持 nested loop 的 break/continue（push/pop 在 while/for 入口/出口），不需要 label / 栈；parser 拒绝比 codegen 拒绝对脚本作者更友好（source-level error vs Lua runtime 错误信息）；Lua 5.2+ 原生 `continue` 让 R5.1 不需要 goto/状态机 hack。Defer 到 R5.2+：labeled `break LABEL` / `do { ... } end` block scoping / bound 类型校验 / C-style `for`。 |
+| 2026-07-13 | **R4.1 完成（`std::vector<T>` / `std::array<T, N>` method args + return）**：method 边界 homogeneous 容器双向 marshal 闭环。`AYFoundation/AYReflect/AYReflect.h` 新增 `ArrayTypeInfo<T, N>` 模板（实现 `IContainerTypeInfo` 接口,compile-time N cap,`resize()` / `pushBack()` 是 no-op stub 因为 std::array 不能 grow）+ `registerArrayType<T, N>(name)` helper；`AYFoundation/AYReflect/interface/IAYReflect.h` 给 `IContainerTypeInfo` 加 `virtual bool isFixedSize() const` 默认 `false`（ArrayTypeInfo override `true`,VectorTypeInfo 保持 `false`）—— 这是 bridge 区分 array vs vector 的唯一信号,**vtable ABI 变化触发整仓 rebuild**。`include/logia/AYMethodInfoImpl.h` 给 `detail` 命名空间加 `is_std_vector_v` / `is_std_array_v` SFINAE traits，`MethodInfoImpl::readArg` 与 `MethodInfoImplConst::readArg` 的 if-constexpr ladder 加 `std::vector<T>` / `std::array<T, N>` 两个分支（slot 持有 heap-allocated 容器指针,readArg copy-construct 到 PMF 参数）。`src/logia/AYScriptRuntimeBridge.cpp` `ayt_reflect_call_method_c` 在 arg-marshal 阶段加 `dynamic_cast<IContainerTypeInfo*>` 分支（lua_len 取 N + lua_rawgeti 逐元素 + 是 vector 则 resize + push_back、是 array 则 cap + memset + memcpy），return-marshal 阶段加同名分支（`getContainerSize(retPtr)` + `getElementAt(retPtr, i)` 逐元素 + 1-indexed lua_rawseti）。`include/logia/AYParser.h` + `src/logia/AYParser.cpp` 给 `parsePrimary` 的 TableExpr 解析加 positional 形式 —— peek `isStartOfKeyedEntry()` (Identifier+`=` 紧邻) 决定走 keyed `{k=v, ...}` 还是 positional `{v1, v2, ...}` 路径；`TableExpr::Entry::key` 早就是 nullable（预留 for R3.5+）,codegen 早处理 `key==nullptr`,R4.1 落实这个预留。`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 9 → 10（bridge runtime marshal 路径新增）。`unittest/Test_LogiaReflectRuntime.cpp` 新增 `R4_1Player` fixture + 6 个 LG-12 R4.1 测试（vector<int> arg sum / vector<int> return / vector<int> arg shorter / array<float,4> arg / array<int,3> return / empty vector）。`AYScript_Test` **752/752 全绿**（R5.1 734 + R4.1 6 cases + 已有 12 个 dump-case + reflect 集成用例）。**Lessons learned**：MethodInfoImpl 的 if-constexpr ladder 是 bridge 协议扩展点（R3.0 加 enum/string/ref/pointer,R4.1 加 vector/array）;AST 节点预留 nullable 字段（TableExpr::Entry::key）降低后续切片成本;ITypeInfo vtable 改动必须整仓 rebuild（memory note 3）;`__test_witness = tostring(s)` 走 `getLuaGlobalString` 不是 `tryGetLuaGlobalNumber` —— tostring 出 string。Defer 到 R4.1b：struct/std::string 元素类型容器（pushFieldPrimitive struct 路径 + placement-new `std::string`）;R4.2：T&/T* out-param。 |
 | 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
 
 ---
@@ -1439,7 +1484,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ⏳ |
 | **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
 | **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
-| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ |
+| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param R4.2 待) |
 | **P3** | **S4.x** | signal / await / source map | ⏳ |
 | opt | **INT-03** | 磁盘 compile cache、Editor `runTool` 菜单 | ⏳ |
 | opt | **INT-04** | EventHandler host、`event.emit` | ⏳ |
@@ -1724,7 +1769,7 @@ Acceptance met — see §5.6 S3.11 完成记录. 604/604 green. Do not re-implem
 | Logia 编译器 | ✅ | — |
 | Component / System / Tool host | ✅ | Editor 未注册 SubSystem |
 | `self.field` 单跳 + 2-hop 链 | ✅ | 3+ hop、FQuaternion 未做 |
-| `self.method()` primitive + struct/enum/string | ✅ | vector/out-param 未做（R4） |
+| `self.method()` primitive + struct/enum/string | ✅ | vector/array (int/float) ship R4.1; out-param R4.2 待;vector<struct> R4.1b 待 |
 | 热重载 API + FileWatcher | ✅ | Editor Play 未默认开启 watch |
 | `ays-logia compile` | ✅ | Editor build 动作未接菜单 |
 | `time.delta/total` | ✅ | — |
@@ -1795,7 +1840,7 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 |----|--------|------|
 | **R1** | `FieldAttribute::ScriptVisible/ScriptReadOnly`（或复用 `BlueprintReadOnly`）；Semantic 拒绝不可见字段；`set_field` runtime enforce | 只读字段赋值 compile error 或 runtime log+no-op |
 | **R3.5** | `registerEnum<E>()`；bridge 不再 enum int fallback；`m_`/`b_` stripper；struct 内 `std::string` field marshal | enum 方法 round-trip 走 typed path |
-| **R4** | `std::vector<T>`/`std::array` args；嵌套 struct 字段；`T&` out-param | 新方法签名 unittest |
+| **R4** | `std::vector<T>`/`std::array` args（int/float ship R4.1）；嵌套 struct 字段（ship R4.0）；`T&` out-param（R4.2 待） | 新方法签名 unittest |
 | **R5/R6** | 智能指针、sol2 usertype | 仅在有性能/所有权需求时启动 |
 
 ### 14.5 P3 — Phase S4 与可选集成

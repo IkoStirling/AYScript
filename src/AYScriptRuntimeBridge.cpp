@@ -764,6 +764,94 @@ int ayt_reflect_call_method_c(lua_State* L)
             }
             argPtrs[i] = mem;
             registerCleanup(mem, [](void* p) { ::operator delete(p); });
+        } else if (auto* containerType = dynamic_cast<ayt::reflect::IContainerTypeInfo*>(paramType)) {
+            // R4.1 (2026-07-13): std::vector<T> / std::array<T, N>
+            // arg. Lua-side: a 1-indexed table. Bridge:
+            //   - Lua top-of-stack is a table; lua_len gives N.
+            //   - For std::vector (isFixedSize()==false): heap-alloc
+            //     a vector and push_back per element.
+            //   - For std::array (isFixedSize()==true): clamp N to
+            //     the compile-time size; raw-byte-write per element.
+            //   - Heap-allocate the container so readArg can take a
+            //     pointer; cleanup queue deletes it after invoke.
+            //
+            // R4.1 element-type scope: int / float only. Other
+            // element types (bool / double / struct / std::string)
+            // fall through to nullptr and the PMF observes a
+            // default-constructed container — a future R4.1b would
+            // route struct elements through pushFieldPrimitive's
+            // struct path.
+            auto* elementType = containerType->getElementType();
+            size_t luaLen = 0;
+            if (lua_istable(L, stackIdx)) {
+                lua_len(L, stackIdx);
+                luaLen = static_cast<size_t>(lua_tointeger(L, -1));
+                lua_pop(L, 1);
+            }
+
+            if (!elementType) {
+                int32_t v = 0;
+                std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+                argPtrs[i] = &argSlots[i];
+            } else {
+                const char* ename = elementType->getName();
+                const bool elemIsInt   = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+                const bool elemIsFloat = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
+
+                if (!elemIsInt && !elemIsFloat) {
+                    ayt::log::warn("ayt_reflect_call_method: container element type '%s' not yet supported in R4.1",
+                                   ename ? ename : "(null)");
+                    argPtrs[i] = nullptr;
+                } else {
+                    const size_t elemSize = elemIsInt ? sizeof(int32_t) : sizeof(float);
+                    const bool isFixedSize = containerType->isFixedSize();
+
+                    if (isFixedSize) {
+                        // std::array<T, N>: cap = compile-time N.
+                        size_t cap = containerType->getContainerSize(nullptr);
+                        if (cap == 0) cap = 1;  // defensive (ArrayTypeInfo asserts N>0)
+                        size_t N = (luaLen < cap) ? luaLen : cap;
+                        void* mem = ::operator new(cap * elemSize);
+                        std::memset(mem, 0, cap * elemSize);
+                        for (size_t k = 0; k < N; ++k) {
+                            lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                            if (elemIsInt) {
+                                int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
+                                std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
+                            } else {
+                                float v = static_cast<float>(lua_tonumber(L, -1));
+                                std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
+                            }
+                            lua_pop(L, 1);
+                        }
+                        argPtrs[i] = mem;
+                        registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                    } else {
+                        // std::vector<T>: heap-alloc, push_back each.
+                        if (elemIsInt) {
+                            auto* vec = new std::vector<int>();
+                            vec->reserve(luaLen);
+                            for (size_t k = 0; k < luaLen; ++k) {
+                                lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                                vec->push_back(static_cast<int32_t>(lua_tointeger(L, -1)));
+                                lua_pop(L, 1);
+                            }
+                            argPtrs[i] = vec;
+                            registerCleanup(vec, [](void* p) { delete static_cast<std::vector<int>*>(p); });
+                        } else {
+                            auto* vec = new std::vector<float>();
+                            vec->reserve(luaLen);
+                            for (size_t k = 0; k < luaLen; ++k) {
+                                lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                                vec->push_back(static_cast<float>(lua_tonumber(L, -1)));
+                                lua_pop(L, 1);
+                            }
+                            argPtrs[i] = vec;
+                            registerCleanup(vec, [](void* p) { delete static_cast<std::vector<float>*>(p); });
+                        }
+                    }
+                }
+            }
         } else {
             // Unknown type tag — treat as int (enums ride on this
             // path; the C++ enum auto-converts from int via
@@ -827,6 +915,46 @@ int ayt_reflect_call_method_c(lua_State* L)
     } else if (std::strcmp(tname, "std::string") == 0) {
         const std::string* sp = static_cast<const std::string*>(retPtr);
         lua_pushlstring(L, sp->data(), sp->size());
+    } else if (auto* containerType = dynamic_cast<ayt::reflect::IContainerTypeInfo*>(retType)) {
+        // R4.1 (2026-07-13): container return (std::vector<T> or
+        // std::array<T, N>). Walk getElementAt(i) and push each
+        // element to a new Lua table. Element-type scope is int /
+        // float (matches the arg-marshal path). R4.1b would extend
+        // to struct elements via pushFieldPrimitive's struct path.
+        auto* elementType = containerType->getElementType();
+        const size_t N = containerType->getContainerSize(retPtr);
+        lua_newtable(L);
+        const int outerIdx = lua_gettop(L);
+        const char* ename = elementType ? elementType->getName() : nullptr;
+        const bool elemIsInt   = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+        const bool elemIsFloat = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
+        if (elemIsInt || elemIsFloat) {
+            const size_t elemSize = elemIsInt ? sizeof(int32_t) : sizeof(float);
+            for (size_t k = 0; k < N; ++k) {
+                const void* elemPtr = containerType->getElementAt(retPtr, k);
+                if (!elemPtr) {
+                    // std::vector<bool> returns nullptr (bit-packed);
+                    // push 0 as a safe default. R4.1 doesn't support
+                    // vector<bool> anyway but this keeps the bridge
+                    // from crashing on a mis-registered type.
+                    lua_pushinteger(L, 0);
+                } else if (elemIsInt) {
+                    int32_t v = 0;
+                    std::memcpy(&v, elemPtr, elemSize);
+                    lua_pushinteger(L, static_cast<lua_Integer>(v));
+                } else {
+                    float v = 0.0f;
+                    std::memcpy(&v, elemPtr, elemSize);
+                    lua_pushnumber(L, static_cast<lua_Number>(v));
+                }
+                lua_rawseti(L, outerIdx, static_cast<int>(k + 1));
+            }
+        } else {
+            // Unsupported element type — push an empty table.
+            // Caller can still inspect length via #t (returns 0).
+            ayt::log::warn("ayt_reflect_call_method: container return element type '%s' not yet supported in R4.1",
+                           ename ? ename : "(null)");
+        }
     } else if (retType->getFieldCount() > 0) {
         // S3.12+R3: struct return. Build a Lua table and fill each
         // field via pushFieldPrimitive. Recursive for nested struct

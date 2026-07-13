@@ -30,6 +30,7 @@
 
 #include <string>
 #include <vector>
+#include <array>   // R4.1 (2026-07-13): std::array<T, N> fixture
 
 using ayt::script::LogiaRuntimeBridge;
 using ayt::script::logia::CompilerError;
@@ -1505,6 +1506,336 @@ script R4Player {
 //     parse-and-run successfully. A separate `local`-audit session
 //     will convert these to bare-assignments or module-level `var`
 //     so the test surface matches the documented grammar.
+// ----------------------------------------------------------------------------
+
+// ===========================================================================
+// R4.1 (2026-07-13) — std::vector<T> / std::array<T, N> method args + return
+//
+// S3.12+R3 only covered primitive + struct + enum + std::string at
+// method boundary. R4.1 adds homogeneous containers, but only for
+// primitive element types (int / float). R4.1b would extend to
+// struct-of-vector / vector-of-struct. Container detection is
+// uniform via `IContainerTypeInfo*` dynamic_cast; fixed-vs-variable
+// distinction uses the new `isFixedSize()` virtual
+// (ArrayTypeInfo → true, VectorTypeInfo → false).
+//
+// Why these test cases:
+//   1. vector<int> arg sum:    self.sumVec({1,2,3,4,5}) → __test_witness = 15
+//   2. vector<int> return:     self.getVec() → Lua table 1..5, length 5
+//   3. vector<int> arg size < expected: clamp to 3
+//   4. array<float, 4> arg:    self.applyFloatArr({1,2,3,4}) → hp = 10
+//   5. array<int, 3> return:   self.getArr3() → Lua table {10,20,30}
+//   6. empty vector<int>:      self.first({}) → -1
+// ===========================================================================
+
+namespace
+{
+struct R4_1Player {
+    int hp = 100;
+
+    // vector<int> arg
+    int sumVec(const std::vector<int>& v) const {
+        int s = 0;
+        for (int x : v) s += x;
+        return s;
+    }
+
+    // vector<int> return (declared by value to exercise R3.0
+    // struct-style by-value return path; vector is non-trivially-
+    // copyable, so it goes through MethodInfoImpl's placement-new
+    // storeReturn, not the memcpy branch).
+    std::vector<int> getVec() const {
+        return {1, 2, 3, 4, 5};
+    }
+
+    // vector<int> arg, with size < expected. Lua table length 2
+    // is allowed; the bridge forwards what the script passed and
+    // C++ iterates only what exists.
+    int first3(const std::vector<int>& v) const {
+        int s = 0;
+        for (size_t i = 0; i < v.size() && i < 3; ++i) s += v[i];
+        return s;
+    }
+
+    // array<float, 4> arg
+    void applyFloatArr(const std::array<float, 4>& a) {
+        float s = 0;
+        for (float f : a) s += f;
+        hp = static_cast<int>(s);  // 1+2+3+4 = 10
+    }
+
+    // array<int, 3> return
+    std::array<int, 3> getArr3() const {
+        return {10, 20, 30};
+    }
+
+    // empty vector<int>
+    int first(const std::vector<int>& v) const {
+        return v.empty() ? -1 : v[0];
+    }
+};
+
+void ensureR4_1PlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R4_1Player") != nullptr) return;
+
+    // Register primitives if missing (R3 fixture registers the same
+    // names with the same info; `findType != nullptr` guards keep us
+    // idempotent).
+    if (reg.findType("int") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int", ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", p);
+    }
+    if (reg.findType("float") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<float>(
+            "float", ayt::reflect::detail::defaultCreate<float>,
+            ayt::reflect::detail::defaultDestroy<float>,
+            ayt::reflect::detail::defaultCopy<float>);
+        reg.registerTypeInfo("float", p);
+    }
+    auto* intInfo   = reg.findType("int");
+    auto* floatInfo = reg.findType("float");
+    (void)intInfo;
+    (void)floatInfo;
+
+    // Register the four container types used by this fixture.
+    // Name convention is informational only — the bridge uses
+    // IContainerTypeInfo::isFixedSize() to distinguish array from
+    // vector, not the name.
+    using ayt::reflect::registerVectorType;
+    using ayt::reflect::registerArrayType;
+    registerVectorType<int>("R41VecInt");
+    registerVectorType<float>("R41VecFloat");
+    registerArrayType<float, 4>("R41ArrFloat4");
+    registerArrayType<int, 3>("R41ArrInt3");
+
+    // Register the host type.
+    auto* info = new ayt::reflect::TypeInfoImpl<R4_1Player>(
+        "R4_1Player",
+        ayt::reflect::detail::defaultCreate<R4_1Player>,
+        ayt::reflect::detail::defaultDestroy<R4_1Player>,
+        ayt::reflect::detail::defaultCopy<R4_1Player>);
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "hp", intInfo, offsetof(R4_1Player, hp),
+        ayt::reflect::FieldAttribute::Serialize));
+
+    using ayt::script::logia::reflect::MethodInfoImpl;
+    using ayt::script::logia::reflect::MethodInfoImplConst;
+    info->addMethod(new MethodInfoImplConst<R4_1Player, int, const std::vector<int>&>(
+        "sumVec", &R4_1Player::sumVec));
+    info->addMethod(new MethodInfoImplConst<R4_1Player, std::vector<int>>(
+        "getVec", &R4_1Player::getVec));
+    info->addMethod(new MethodInfoImplConst<R4_1Player, int, const std::vector<int>&>(
+        "first3", &R4_1Player::first3));
+    info->addMethod(new MethodInfoImpl<R4_1Player, void, const std::array<float, 4>&>(
+        "applyFloatArr", &R4_1Player::applyFloatArr));
+    info->addMethod(new MethodInfoImplConst<R4_1Player, std::array<int, 3>>(
+        "getArr3", &R4_1Player::getArr3));
+    info->addMethod(new MethodInfoImplConst<R4_1Player, int, const std::vector<int>&>(
+        "first", &R4_1Player::first));
+
+    reg.registerTypeInfo("R4_1Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_r41_vector_int_arg_sum) {
+    // R4.1: vector<int> arg. self.sumVec({1,2,3,4,5}) → 15.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    on_start() {
+        var s: int = self.sumVec({1, 2, 3, 4, 5})
+        __test_witness = tostring(s)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_vector_int_arg_sum", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_vector_int_arg_sum",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "15");
+}
+
+TEST_CASE(lg12_r41_vector_int_return_to_lua_table) {
+    // R4.1: vector<int> return. self.getVec() → Lua table {1,2,3,4,5};
+    // verify element 3 == 3 and table length == 5.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    var stash: int = 0
+    var len: int = 0
+    on_start() {
+        var v: int = self.getVec()[3]
+        stash = v
+        len = 5
+        __test_witness = tostring(stash + len * 10)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_vector_int_return", src, ctx, errors);
+    if (!loaded) {
+        for (const auto& e : errors) {
+            fprintf(stderr, "load error: %s\n", e.message.c_str());
+        }
+    }
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_vector_int_return",
+                               "on_start", &obj, nullptr));
+    // stash = v[3] = 3, len = 5, witness = 3 + 5*10 = 53
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "53");
+}
+
+TEST_CASE(lg12_r41_vector_int_arg_shorter_than_expected) {
+    // R4.1: vector<int> arg with Lua table length 2. C++ first3
+    // iterates 0..min(size, 3) — but here we pass {1,2} so the
+    // C++ receives a 2-element vector and sums both → 3.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    on_start() {
+        var s: int = self.first3({1, 2})
+        __test_witness = tostring(s)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_vec_shorter", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_vec_shorter",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "3");
+}
+
+TEST_CASE(lg12_r41_array_float4_arg_sums_to_hp) {
+    // R4.1: array<float, 4> arg. self.applyFloatArr({1.5,2.5,3.5,4.5})
+    // → hp = 1.5+2.5+3.5+4.5 = 12.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+    obj.hp = 0;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    on_start() {
+        self.applyFloatArr({1.5, 2.5, 3.5, 4.5})
+        __test_witness = tostring(self.hp)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_arr_float_arg", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_arr_float_arg",
+                               "on_start", &obj, nullptr));
+    // 1.5+2.5+3.5+4.5 = 12 written to hp
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "12");
+}
+
+TEST_CASE(lg12_r41_array_int3_return) {
+    // R4.1: array<int, 3> return. self.getArr3() → Lua table
+    // {10,20,30}; verify a[2] == 20 and length == 3.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    on_start() {
+        var a: int = self.getArr3()[2]
+        var mid: int = a
+        var len: int = 3
+        __test_witness = tostring(mid + len * 100)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_arr_int_return", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_arr_int_return",
+                               "on_start", &obj, nullptr));
+    // mid = 20, len = 3, witness = 20 + 3*100 = 320
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "320");
+}
+
+TEST_CASE(lg12_r41_empty_vector_returns_minus_one) {
+    // R4.1: empty vector<int> arg. self.first({}) → -1.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1PlayerRegistered();
+    R4_1Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1Player {
+    on_start() {
+        var f: int = self.first({})
+        __test_witness = tostring(f)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41_empty_vec", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41_empty_vec",
+                               "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "-1");
+}
+
 // ----------------------------------------------------------------------------
 
 TEST_SUITE_END

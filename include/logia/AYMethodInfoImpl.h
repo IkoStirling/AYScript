@@ -65,6 +65,7 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <array>   // R4.1 (2026-07-13): std::array<T, N> in readArg
 
 namespace ayt::script::logia::reflect
 {
@@ -116,6 +117,27 @@ namespace detail
     struct LookupType<X, true> {
         using type = std::underlying_type_t<X>;
     };
+
+    // R4.1 (2026-07-13): SFINAE helpers for std::vector<T> /
+    // std::array<T, N> detection in readArg's if-constexpr ladder.
+    // Specializations match exact std::vector / std::array
+    // instantiations; any user-defined container does not match and
+    // falls through to the by-value / by-ref branch below (which
+    // would silently fail at compile time for that container — a
+    // user-side error, not a bridge bug).
+    template <typename>
+    struct is_std_vector : std::false_type {};
+    template <typename T, typename A>
+    struct is_std_vector<std::vector<T, A>> : std::true_type {};
+    template <typename X>
+    inline constexpr bool is_std_vector_v = is_std_vector<X>::value;
+
+    template <typename>
+    struct is_std_array : std::false_type {};
+    template <typename T, size_t N>
+    struct is_std_array<std::array<T, N>> : std::true_type {};
+    template <typename X>
+    inline constexpr bool is_std_array_v = is_std_array<X>::value;
 } // namespace detail
 
 // ===== MethodInfoImpl<T, Ret, Args...> =====
@@ -250,6 +272,22 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
             return std::string(*sp);  // copy into parameter (PMF may
                                        // want std::string& or std::string
                                        // by value — both work).
+        } else if constexpr (detail::is_std_vector_v<ArgT>) {
+            // R4.1 (2026-07-13): std::vector<T> by value (or by
+            // const-ref, which is the common PMF signature). The
+            // bridge heap-allocates the vector and stores the
+            // pointer in the slot. We copy-construct the parameter
+            // from that heap pointer; the bridge deletes the heap
+            // pointer after invoke() returns via the cleanup queue.
+            if (!slot) return ArgT{};
+            const auto* vp = static_cast<const ArgT*>(slot);
+            return ArgT(*vp);
+        } else if constexpr (detail::is_std_array_v<ArgT>) {
+            // R4.1 (2026-07-13): std::array<T, N> by value (or by
+            // const-ref). Same slot convention as std::vector.
+            if (!slot) return ArgT{};
+            const auto* ap = static_cast<const ArgT*>(slot);
+            return ArgT(*ap);
         } else if constexpr (std::is_pointer_v<ArgT>) {
             // T* / const T* / etc. — slot is T*; we pass through.
             if (!slot) return ArgT{};
@@ -406,6 +444,16 @@ private:
             if (!slot) return std::string{};
             const std::string* sp = static_cast<const std::string*>(slot);
             return std::string(*sp);
+        } else if constexpr (detail::is_std_array_v<ArgT>) {
+            // R4.1: std::array<T, N> mirror of the non-const impl.
+            if (!slot) return ArgT{};
+            const auto* ap = static_cast<const ArgT*>(slot);
+            return ArgT(*ap);
+        } else if constexpr (detail::is_std_vector_v<ArgT>) {
+            // R4.1: std::vector<T> mirror of the non-const impl.
+            if (!slot) return ArgT{};
+            const auto* vp = static_cast<const ArgT*>(slot);
+            return ArgT(*vp);
         } else if constexpr (std::is_pointer_v<ArgT>) {
             if (!slot) return ArgT{};
             using Inner = std::remove_cv_t<std::remove_pointer_t<ArgT>>;

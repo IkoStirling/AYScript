@@ -70,7 +70,14 @@ namespace ayt::script
 //       bare `break` / `continue` outside a loop is a hard error.
 //       Codegen emits Lua 5.2+ native `break` / `continue` (no
 //       runtime helper, no goto-juggling).
-constexpr std::size_t kLogiaPipelineVersion = 9u;
+//       2026-07-13 R4.1: bump 9 → 10. Bridge runtime marshal path
+//       extended for std::vector<T> / std::array<T, N> args and
+//       returns (T = int / float). AYReflect adds ArrayTypeInfo +
+//       IContainerTypeInfo::isFixedSize() virtual. Logia source
+//       syntax unchanged (TableExpr was already in place from R3) —
+//       the cache invalidation is the bridge code path itself, not
+//       codegen emit shape.
+constexpr std::size_t kLogiaPipelineVersion = 10u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

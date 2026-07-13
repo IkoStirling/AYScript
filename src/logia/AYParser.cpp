@@ -497,22 +497,49 @@ std::unique_ptr<Expr> Parser::parsePrimary()
     // S3.12+R3: table literal `{k1=v1, k2=v2, ...}`. The grammar
     // allows: identifier = expression, separated by commas, with
     // an optional trailing comma. Empty `{}` is also accepted.
+    //
+    // R4.1 (2026-07-13): also support positional entries
+    // `{v1, v2, v3}` (Lua array-style). The parser peeks for an
+    // identifier followed by `=`; if so, it's a keyed entry. If
+    // the first non-brace token is a value expression, the
+    // subsequent entries are all positional until a `}` or an
+    // explicit identifier=` pair (which is a hard error — mixing
+    // positional and keyed entries in one literal is not allowed
+    // in Lua and we mirror that).
     if (match(TokenType::LeftBrace)) {
         std::vector<TableExpr::Entry> entries;
         if (!check(TokenType::RightBrace)) {
-            do {
-                TableExpr::Entry entry;
-                if (!match(TokenType::Identifier)) {
-                    error("Expected identifier in table literal key");
-                    return nullptr;
-                }
-                std::string key = previous().lexeme;
-                entry.key = std::make_unique<IdentifierExpr>(key);
-                consume(TokenType::Equal, "Expected '=' after table key");
-                entry.value = parseExpression();
-                if (!entry.value) return nullptr;
-                entries.push_back(std::move(entry));
-            } while (match(TokenType::Comma));
+            // Decide the literal's shape by the first non-brace
+            // token: identifier+Equal → keyed; anything else →
+            // positional. We don't try to be cleverer (e.g. parse
+            // one entry and look at the next); the rule is "all
+            // entries share the same shape".
+            const bool positional = !isStartOfKeyedEntry();
+            if (positional) {
+                // Positional form: `{v1, v2, v3}`.
+                do {
+                    TableExpr::Entry entry;
+                    entry.key = nullptr;
+                    entry.value = parseExpression();
+                    if (!entry.value) return nullptr;
+                    entries.push_back(std::move(entry));
+                } while (match(TokenType::Comma));
+            } else {
+                // Keyed form: `{k1=v1, k2=v2, ...}`.
+                do {
+                    TableExpr::Entry entry;
+                    if (!match(TokenType::Identifier)) {
+                        error("Expected identifier in table literal key");
+                        return nullptr;
+                    }
+                    std::string key = previous().lexeme;
+                    entry.key = std::make_unique<IdentifierExpr>(key);
+                    consume(TokenType::Equal, "Expected '=' after table key");
+                    entry.value = parseExpression();
+                    if (!entry.value) return nullptr;
+                    entries.push_back(std::move(entry));
+                } while (match(TokenType::Comma));
+            }
         }
         consume(TokenType::RightBrace, "Expected '}' after table literal");
         return std::make_unique<TableExpr>(std::move(entries));
@@ -571,6 +598,19 @@ Token Parser::advance()
 bool Parser::isAtEnd() const
 {
     return current().type == TokenType::EndOfFile;
+}
+
+// R4.1 (2026-07-13): table-literal shape peek. Returns true iff
+// the current token is Identifier AND the next token is `=`. Used
+// to disambiguate `{k=v, ...}` (keyed) from `{v1, v2, ...}`
+// (positional) at the first entry of a table literal. We use a
+// safe 1-token lookahead (no side effects on `_current`).
+bool Parser::isStartOfKeyedEntry() const
+{
+    if (current().type != TokenType::Identifier) return false;
+    const size_t next = static_cast<size_t>(_current) + 1;
+    if (next >= _tokens.size()) return false;
+    return _tokens[next].type == TokenType::Equal;
 }
 
 void Parser::error(const std::string& message)

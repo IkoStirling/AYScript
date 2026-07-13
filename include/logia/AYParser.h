@@ -63,6 +63,14 @@ private:
     int getPrecedence(TokenType op);
     void synchronize();
 
+    // R4.1 (2026-07-13): in the table-literal branch, the parser
+    // peeks to decide between keyed form `{k=v, ...}` and
+    // positional form `{v1, v2, ...}`. A "keyed start" is an
+    // Identifier immediately followed by `=`; anything else
+    // (including Identifier followed by `,` or `}`) is positional.
+    // The 1-token lookahead is the only spot we need this helper.
+    bool isStartOfKeyedEntry() const;
+
     std::vector<Token> _tokens;
     int _current = 0;
     CompilerErrorReporter _reporter;
