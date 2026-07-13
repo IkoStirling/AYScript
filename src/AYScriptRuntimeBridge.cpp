@@ -834,23 +834,31 @@ int ayt_reflect_call_method_c(lua_State* L)
                     argPtrs[i] = mem;
                     registerCleanup(mem, [](void* p) { ::operator delete(p); });
                 } else if (isFixedSize && elemIsStruct) {
-                    // R4.1b: std::array<MyStruct, N> — raw-byte buffer +
-                    // per-element storeFieldPrimitive recursion. Restriction:
-                    // MyStruct must be trivially-destructible (mirrors R3
-                    // struct-arg scope — std::array cannot resize, so
-                    // non-trivial dtors would need explicit walk on cleanup,
-                    // which the array-path raw-byte allocator doesn't do).
+                    // R4.1d: std::array<MyStruct, N> — typed alloc via
+                    // containerType->create() (delegates to
+                    // ArrayTypeInfo<T, N>::create() = `new std::array<T, N>()`).
+                    // Replaces R4.1b's raw-byte + ::operator delete path
+                    // which leaked element dtors for non-trivially-
+                    // destructible T (memset left bytes uninitialized;
+                    // ::operator delete called no dtors).
+                    //
+                    // ArrayTypeInfo<T,N>::create() default-constructs N
+                    // MyStruct objects (each T{} runs T's default ctor).
+                    // Slots are valid MyStructs ready for field-by-field
+                    // write. Cleanup runs containerType->destroy() =
+                    // `delete array<T,N>` which calls each element's dtor.
+                    //
+                    // Restriction (orthogonal, pre-existing): MyStruct's
+                    // fields must be reflect-supported primitives (same as
+                    // the vector branch above and R3 struct-arg at L745-770).
                     size_t cap = containerType->getContainerSize(nullptr);
                     if (cap == 0) cap = 1;
                     size_t N = (luaLen < cap) ? luaLen : cap;
-                    size_t typeSize = elementType->getSize();
-                    if (typeSize == 0) typeSize = sizeof(uint64_t);
-                    void* mem = ::operator new(cap * typeSize);
-                    std::memset(mem, 0, cap * typeSize);
                     size_t fieldCount = elementType->getFieldCount();
+                    void* typedArr = containerType->create();  // new std::array<MyStruct, N>()
                     for (size_t k = 0; k < N; ++k) {
+                        void* elemSlot = containerType->getElementAt(typedArr, k);
                         lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                        void* elemSlot = static_cast<uint8_t*>(mem) + k * typeSize;
                         if (lua_istable(L, -1)) {
                             for (size_t fi = 0; fi < fieldCount; ++fi) {
                                 auto* field = elementType->getField(fi);
@@ -866,8 +874,11 @@ int ayt_reflect_call_method_c(lua_State* L)
                         }
                         lua_pop(L, 1);
                     }
-                    argPtrs[i] = mem;
-                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                    argPtrs[i] = typedArr;
+                    auto* ct = containerType;  // capture for typed destroy
+                    registerCleanup(typedArr, [ct](void* p) {
+                        ct->destroy(p);  // delete std::array<T, N>() — runs ~T() on each
+                    });
                 } else if (!isFixedSize && elemIsInt) {
                     // R4.1: std::vector<int> — unchanged.
                     auto* vec = new std::vector<int>();
@@ -908,26 +919,34 @@ int ayt_reflect_call_method_c(lua_State* L)
                         delete static_cast<std::vector<std::string>*>(p);
                     });
                 } else if (!isFixedSize && elemIsStruct) {
-                    // R4.1b: std::vector<MyStruct> — std::vector<uint8_t>
-                    // byte buffer, reinterpreted as std::vector<MyStruct>
-                    // at the readArg cast site. Safe only when MyStruct is
-                    // trivially-destructible + trivially-copyable (mirrors
-                    // R3 struct-arg restriction). The bridge cannot
-                    // instantiate `std::vector<MyStruct>` directly because
-                    // the call site sees only ITypeInfo*; the typed
-                    // `MethodInfoImpl<..., std::vector<MyStruct>, ...>`
-                    // template instantiation provides the real type at
-                    // readArg, where `ArgT(*vp)` reinterprets the
-                    // vector<uint8_t>* slot pointer as vector<MyStruct>*.
-                    auto* vec = new std::vector<uint8_t>();  // raw byte buffer
-                    size_t typeSize = elementType->getSize();
-                    if (typeSize == 0) typeSize = sizeof(uint64_t);
-                    vec->resize(luaLen * typeSize);
+                    // R4.1d: std::vector<MyStruct> — typed alloc via
+                    // containerType->create() (delegates to
+                    // VectorTypeInfo<T>::create() = `new std::vector<T>()`).
+                    // Replaces R4.1b's vector<uint8_t> reinterpret path
+                    // which was UB for non-trivially-destructible T
+                    // (vector<MyStruct>'s copy ctor would walk raw bytes
+                    // from a vector<uint8_t> buffer).
+                    //
+                    // Element-fill: containerType->resize(typedVec, luaLen)
+                    // default-constructs luaLen MyStruct objects (calls each
+                    // T's default ctor). containerType->getElementAt(k)
+                    // returns a valid MyStruct*; we write each field via
+                    // storeFieldPrimitive at field offsets. Cleanup runs
+                    // containerType->destroy() = `delete vector<T>` which
+                    // calls each element's dtor.
+                    //
+                    // Restriction (orthogonal, pre-existing — same as R3
+                    // struct-arg path at L745-770): MyStruct's fields must
+                    // be reflect-supported primitives; struct fields with
+                    // std::string sub-fields fail closed in
+                    // storeFieldPrimitive and keep their default-constructed
+                    // values.
                     size_t fieldCount = elementType->getFieldCount();
+                    void* typedVec = containerType->create();  // new std::vector<MyStruct>()
+                    containerType->resize(typedVec, luaLen);
                     for (size_t k = 0; k < luaLen; ++k) {
                         lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                        void* elemSlot = vec->data() + k * typeSize;
-                        std::memset(elemSlot, 0, typeSize);
+                        void* elemSlot = containerType->getElementAt(typedVec, k);
                         if (lua_istable(L, -1)) {
                             for (size_t fi = 0; fi < fieldCount; ++fi) {
                                 auto* field = elementType->getField(fi);
@@ -943,14 +962,10 @@ int ayt_reflect_call_method_c(lua_State* L)
                         }
                         lua_pop(L, 1);
                     }
-                    // Reinterpret vector<uint8_t>* as vector<MyStruct>*
-                    // — see safety comment above. readArg's slot pointer
-                    // is reinterpreted back to vector<MyStruct>*; the
-                    // PMF then copy-constructs a fresh vector<MyStruct>
-                    // by value.
-                    argPtrs[i] = vec;
-                    registerCleanup(vec, [](void* p) {
-                        delete static_cast<std::vector<uint8_t>*>(p);
+                    argPtrs[i] = typedVec;
+                    auto* ct = containerType;  // capture for typed destroy
+                    registerCleanup(typedVec, [ct](void* p) {
+                        ct->destroy(p);  // delete vector<MyStruct>() — runs ~T() on each
                     });
                 } else if (isFixedSize && elemIsString) {
                     // R4.1c: std::array<std::string, N> — placement-new N

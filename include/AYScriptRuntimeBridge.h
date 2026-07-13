@@ -85,6 +85,23 @@ namespace ayt::script
 //       unchanged — pattern is `self.fillInt(x)` where C++ writes
 //       to self.foo and the script reads back. Compile cache
 //       invalidated because bridge code path changed.
+//       2026-07-13 R4.1d: bump 13 → 14. Bridge runtime container
+//       arg-marshal lifted from "trivially-destructible T only" to
+//       any struct T whose fields are reflect-supported primitives.
+//       vector<MyStruct> now allocates via ITypeInfo::create()
+//       (delegates to VectorTypeInfo<T>::create() = `new
+//       std::vector<T>()`) instead of the R4.1b vector<uint8_t>
+//       reinterpret. Element-fill walks IContainerTypeInfo::resize
+//       + getElementAt for typed access. Cleanup runs the typed
+//       IContainerTypeInfo::destroy (= `delete vector<T>`) so each
+//       element's dtor runs. array<MyStruct,N> gets the same
+//       treatment. Return-side vector<MyStruct> / array<MyStruct,N>
+//       was already safe (getElementAt returns &vec[k] of the real
+//       typed vector). Logia source unchanged. Compile cache
+//       invalidated because bridge code path changed. No AYReflect
+//       ABI change — reuses the existing ITypeInfo::create() /
+//       destroy() / IContainerTypeInfo::resize / getElementAt
+//       vtable entries.
 //       2026-07-13 R4.1c: bump 12 → 13. Bridge runtime container
 //       arg-marshal extended for `std::array<std::string, N>`:
 //       placement-new N strings on a heap block, fill from Lua
@@ -104,7 +121,7 @@ namespace ayt::script
 //       sub-table per struct element via pushFieldPrimitive or pushes
 //       each std::string via lua_pushlstring. Logia source unchanged.
 //       Compile cache invalidated because bridge code path changed.
-constexpr std::size_t kLogiaPipelineVersion = 13u;
+constexpr std::size_t kLogiaPipelineVersion = 14u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
