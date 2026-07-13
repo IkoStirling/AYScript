@@ -237,10 +237,10 @@ script PlayerController {
 
 <statement>    ::= <var_decl>
                  | <expr_stmt>
-                 | "if" <expression> <block> ["else" <block>]
+                 | "if" ["("] <expression> [")"] <block> ["else" <block>]                                  (* R5.0.1: parens optional *)
                  | "return" <expression>? ";"
-                 | "while" "(" <expression> ")" <block>                          (* R5.0 2026-07-13 *)
-                 | "for" "(" "var" <identifier> ":" <expression> ")" <block>     (* R5.0 2026-07-13 *)
+                 | "while" ["("] <expression> [")"] <block>                                              (* R5.0.1: parens optional *)
+                 | "for" ["("] "var" <identifier> ":" <expression> ("," <expression>)? [")"] <block>     (* R5.0.1: parens optional, range form *)
 
 <expression>   ::= <assignment> | <logic_or>
 
@@ -702,6 +702,57 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 18. **counter scope 必须由 Lua 提供而非 analyzer 提供**：把 `i` 塞进 `_scope` 看似合理，但会与 Lua 的 `for` 循环-local 语义打架（loop 外的 `i = 5` 会变成 implicit global 而不是 "修改旧 counter"）。统一原则：**Logia 生成的代码里 counter 走 Lua loop-local，analyzer 也不假装拥有这个 counter**。
 19. **`while` 的 emit 用 `do/end` 而非 brace**：Lua 的 `while cond do ... end` 关键字与 Logia 的 brace-only 不冲突 —— brace-only 是 Logia 用户视角的语法决策；emit 出来的 Lua 用 Lua 原生 `do/end` 是 codegen 自由度的体现（与 `if` 的 `then/end` 路径相同）。两者不必统一，brace-only 是 source-level 的，do/end 是 target-level 的。
 20. **`function` / `while` / `for` 三个 keyword 的 scope 策略可以不同**：`function` 必须 script-block-only（parser 强制），`while` / `for` 在 lifecycle body 和 script-block helper body 都允许，**不在 script-block member 位置**。区别在于 `function` 会引入 module-scope 副作用（被 emit 成顶层 Lua function），而 `while` / `for` 是纯 statement 不会越界。`synchronize()` 同时加三个 keyword 是因为它们都可能是 "loop 边界恢复点"，不论 scope。
+
+#### 5.7.4.x+1 R5.0.1 — 可选括号 + `for` 半开区间（2026-07-13）
+
+**状态**：✅ 完成。R5.0 落地后用户反馈两点：(a) 括号强制让人不习惯（人写 `if x > 0` 比 `if (x > 0)` 多），(b) `for (var i : 10)` 强制 1..N 偏离主流的 0..N-1 习惯。R5.0.1 在 R5.0 基础上加两条扩展（无 breaking change）。
+
+**实施摘要**：
+
+1. **`if` / `while` / `for` 三种 statement 的 condition 括号可选**：
+   - 旧：`if (cond) { ... }` / `while (cond) { ... }` / `for (var i : N) { ... }` —— 括号强制
+   - 新：`if cond { ... }` / `while cond { ... }` / `for var i : N { ... }` —— 同等合法
+   - 混搭非法：`if (cond { ... }`（左括号配右括号，没右括号就 hard error，message 明确）
+   - 实现：`parseIfStmt` / `parseWhileStmt` / `parseForStmt` 都用 `match(LeftParen)` peek 后 dispatch：match 成功走 "paren 形式"，失败走 "bare 形式"。两者 emit 出的 Lua 完全一致（BinaryExpr 的 `emitExpr` 自动加括号）。
+   - 顺便也支持 `else if cond { ... }`（之前 R5.0 没显式支持 else if 链，R5.0.1 在 `parseIfStmt` 的 `else` 分支里 peek `If` 后递归 `parseIfStmt()`）。
+
+2. **`for` 半开区间形式 `for (var i : start, end) { body }`**：
+   - 旧（保留）：`for (var i : N)` → `for i = 1, N do`（1..N inclusive）
+   - 新：`for (var i : 0, 10)` → `for i = 0, (10) - 1 do`（0..9 inclusive，即 [0, 10) 半开）
+   - 实现：`parseForStmt` 解析 first expression 后 peek `,`：如果是 `,`，consume 它再 parseExpression 作为 endExpr，把 firstExpression 提到 startExpr（`ForStmt` 的 `start` field 非空）；否则走原路径（`ForStmt::start == nullptr`）。
+   - **Codegen 双形态**：`emitForStmt` 看 `stmt.start` 是否非空：非空 emit `start, (end) - 1`；空 emit `1, bound`。
+   - 括号包裹 `end` 是因为 end 可能是 `n*2` 这种算术表达式，直接拼 `n*2 - 1` 会被 Lua precedence 解析成 `n * (2 - 1) = n` —— 必须用括号显式 group。
+   - 边界：`start == end` 时 body 不跑（Lua 看到 `1 > 0` 跳过）；`start > end - 1` 同理。Lua 5.5 numeric-for 的内置行为，不需要 codegen 特殊处理。
+
+3. **AST 扩展**：
+   - `ForStmt` 加 `ExprPtr start` field + 新 ctor `ForStmt(counterName, start, end, body)`，旧 ctor `ForStmt(counterName, bound, body)` 把 `start = nullptr` 标短形式。
+   - 不影响 analyzer（`analyzeForStmt` 只 walk `bound` + `body`，新加的 `start` 同样 walk 一下）。
+   - 不影响 codegen dispatch（还是 `dynamic_cast<ForStmt*>` 一处）。
+
+**kLogiaPipelineVersion 7 → 8**：codegen 新增 `for i = start, (end) - 1 do` 形态，缓存强制失效。
+
+**测试覆盖**（`Test_LogiaEmitDump.cpp` 21 cases —— 16 R5.0 + 5 R5.0.1）：
+
+| # | Logia source | Expect success | 验证点 |
+|---|---|---|---|
+| 17 | `if x == nil { ... }` (bare) | true | emit `if (x == nil) then ... end`（与 case 05 等价）|
+| 18 | `while count < 5 { ... }` (bare) | true | emit `while (count < 5) do ... end`（与 case 14 等价）|
+| 19 | `for (var i : 0, 10) { ... }` | true | emit `for i = 0, (10) - 1 do ... end` |
+| 20 | `for var i : 0, 10 { ... }` (bare header) | true | 同 19，但 paren-less |
+| 21 | `for (var i : 10) { ... }` 旧短形式 | true | emit `for i = 1, 10 do`（**不**误判为 range），回归 guard |
+
+**结果**：`AYScript_Test` **720/720 全绿**（R5.0 705 + R5.0.1 5 cases + 已有 10 个 dump-case 集成用例）。
+
+**Defer 状态**：R5.0.1 完成了 `break` / `continue` / C-style `for` / range-token (`..<`) 之外的所有"循环语法优化"诉求。剩余 defer：
+- `break` / `continue`：R5.0.1 锁"不破坏控制流图"原则，加 break-label 会膨胀 break-scope 设计面；下一切片
+- C-style `for (i = 1; i <= N; i++)`：无 `++`、无 `;`-list inside paren；下一切片
+- `..<` range token：R5.0.1 的 `start, end` 形式已经覆盖了 `0..<N` 的核心需求（half-open 语义），不需要单独加 token
+
+**Lessons learned (R5.0.1 specific)**：
+
+21. **"强制 parens" 是设计洁癖 vs 工程实用性的取舍**：R5.0 第一版强制 `()` 是为了"if/while/for 三种 control-flow 形态一致"，但用户的真实代码里 `if x > 0` 的出现频率比 `if (x > 0)` 高得多。R5.0.1 把括号从"强制"改成"可加可不加但要配对"——这是 1 行 `match(LeftParen)` 的代价，但消除了一个用户每天会撞到的体感摩擦。
+22. **"0..N-1 vs 1..N"是另一个范式之争**：R5.0 选 1..N 是因为 Logia 的"循环即"counter: 1 to N""心智模型最简单（数组下标从 1 开始这个对不熟悉 Lua/JS 的人友好），但 Lua/JS/C 主流都是 0-indexed。R5.0.1 同时保留 1..N（短形式无歧义）+ 新增 `start, end` 半开（0..N-1 友好）。短形式不破坏是 R5.0.1 不做 breaking change 的关键。
+23. **`for (var i : start, end)` 的 emit 必须用 `(end) - 1` 包裹**：`for i = 0, 10*2 - 1 do` 在 Lua 里是 `for i = 0, 10 * (2 - 1) do`（Lua operator precedence：`+`/`-` 在 `*` 之下）—— 整个循环变成 `0..10` 错位。emit 时显式 `emitExpr(end) + ")" + " - 1"` 拼装是必须的，这是 codegen 处理 arithmetic-in-control-flow 的通用模式。
 
 #### 5.7.5 消费方矩阵
 
@@ -1281,6 +1332,7 @@ AYScript/
 | 2026-07-11 | **S3.12+R4.0 完成（嵌套 struct 字段 marshal）**：`pushFieldPrimitive` + `storeFieldPrimitive` 加 `field->getType()->getFieldCount() > 0` 递归分支 — push 方向构造 Lua sub-table（用绝对索引 `subTableIdx = lua_gettop(L)` 做 `lua_settable` 而非相对 `-3`，避免深递归时相对索引漂移），store 方向 heap-alloc tmp T + memset + `lua_getfield(L, valueStackIdx, subName)` 逐字段递归。R3.0 struct return path (`retType->getFieldCount() > 0`) 自动 extend — 改一行不动。新 `R4Player` fixture（`Vector2` nested in `DamageInfo` + `Stats`）注册用 unique type name `R4Stats`（避开 R3 `Stats` 命名冲突 — 类型注册表用 typeid 找，但 `registerTypeInfo(name)` 的 name 是 process-global key，多 fixture 注册相同 name 会让 `findType("Stats")` 拿到**先**注册的 ITypeInfo，导致 field 数量不对）。新增 2 LG-12 R4.0 测试（`applyDamage({source={x=10,y=20},amount=7})` + `setPosition/getPosition` round-trip）。`AYScript_Test` **671/671 全绿**。**不 bump kLogiaPipelineVersion** (R4.0 不动 codegen，只 marshal 路径新)。Deferred 到 R4.1/R4.5+:vector/array args、nested-struct 内的 std::string、name stripper。Deferred audit:现有测试 5 个文件用 `local` keyword — design §2.3 禁止泄露 Lua 关键字，codegen emit 出 broken split text 但"运气好"在 sol2 + safe_script 下 PASS。 |
 | 2026-07-11 | **Audit fix 完成（语法审计修复）**：三条独立 audit defect 一并修：(a) `function` 加进 Lexer + 新增 `FunctionDeclStmt` AST + `parseFunctionDeclStmt()`（只允许 script-block scope；`on_update` body 内部 `function` 是 parser hard-reject）+ `emitFunctionDecl()` 输出顶层 `function NAME(...) ... end`，让 lifecycle body 通过裸名调用；(b) `local`/`nil`/`function`/etc. keyword leak via soft warning — `ErrorCode::LuaKeywordLeak` + SemanticAnalyzer `analyzeStmt` 检测 `ExprStmt(IdentifierExpr("local"))` 形态 emit warning（不 fail compile，让 15+ R3/R4 测试继续 work）；(c) `Test_LogiaAdapter.cpp::adapter_maps_onUpdate_to_on_update_passes_dt` 升级 numeric-equality 检查（之前只 witness `"on_update_called"`，不验证 dt 数值实际到达 body）+ 清理 `parseLifecycleFunc` stale comment（"codegen ignores the params" 已被实际行为推翻）。`Test_LogiaEmitDump.cpp` 升级为正式 acceptance suite（13 cases，case 9 `function` 在 script-block scope 现在 success=true，case 11 加 helper-function round-trip，case 12 验证 internal-block reject，case 13 验证 `local` soft warning）。`kLogiaPipelineVersion` 5 → 6（codegen 形状 + diagnostic surface 变化）。**Plan-mode 阶段关键教训**：原 audit 把 `local\nname` 错定到 codegen `emitVarDecl` —— agent 通过 emit 实际 trace 确认**真正**根因是 parser 把 `local` 当 identifier 产生两个 statement。诊断与 parse-success 解耦让大批 R3 fixture 兼容。`AYScript_Test` **692/692 全绿**（baseline 671 + audit-fix 21 cases）。 |
 | 2026-07-13 | **R5.0 完成（while / for 循环语句）**：`while (cond) { body }` 与 `for (var i : N) { body }` 在 R5.0 落地为 Logia 一级语法。`include/logia/AYToken.h` 加 `TokenType::While` / `TokenType::For`；`src/logia/AYLexer.cpp` keywords map 收编 `while` / `for`（从此保留字）；`include/logia/AYAst.h` 加 `WhileStmt(condition, body)` / `ForStmt(counterName, bound, body)` AST 节点；`src/logia/AYParser.cpp` 新增 `parseWhileStmt()` / `parseForStmt()` 在 `parseStatement()` dispatch 的 `If` 后插入，`for` header 是专用 counter-var pattern `var Identifier Colon Expr`，**不**复用 `parseVarDecl`（否则 `10` 会被当 type name 报 unknown-type），`synchronize()` 加 `While` / `For` recovery token；`src/logia/AYLuaCodegen.cpp` 新增 `emitWhileStmt` → `while <cond> do ... end` + `emitForStmt` → `for <counter> = 1, <bound> do ... end`（emit 不带 `var` / `:`，Lua `for` 隐式声明 counter），`emitStmt` dispatch 同步扩展；`src/logia/AYSemanticAnalyzer.cpp` 加 `analyzeWhileStmt` / `analyzeForStmt`，**关键不变量**：`for` counter 不进 analyzer `_scope`（Lua `for` 已是 loop-local，强行塞 scope 会与 runtime 视图失配），`analyzeStmt` dispatch 同步扩展；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 6 → 7；`unittest/Test_LogiaEmitDump.cpp` 增 case 14（`while` 在 script-block helper 里）/ 15（`for` + 验证 emit 不带 `var`）/ 16（嵌套 `for`）。`AYScript_Test` **705/705 全绿**（baseline 692 + R5.0 3 cases + 已有的 10 个漏计入的 dump-case 集成用例）。Defer to R5.0.1 / R4.5+：`break` / `continue`、C-style `for`、range `for (i in 1..N)`（需 `..` token）、bound 类型校验（需 expression-type inference）。**Lessons learned**：var-vs-type 歧义由 parser 显式处理而非 grammar 升级；counter scope 由 Lua 提供而非 analyzer 提供（避免 analyzer/runtime 视图失配）；`while`/`for` 走 brace-only 但 emit 用 Lua 原生 `do/end`（brace-only 是 source-level，`do/end` 是 target-level，两者不必统一）。 |
+| 2026-07-13 | **R5.0.1 完成（可选括号 + for 半开区间）**：R5.0 落地后用户反馈两点 — (a) 强制 `if (cond) { ... }` 括号违背人写代码习惯（多数人写 `if x > 0` 不写 `if (x > 0)`），(b) `for (var i : 10)` 强制 1..N 偏离主流 0..N-1 习惯。R5.0.1 在 R5.0 基础上加两条无 breaking change 的扩展：(1) `if cond { ... }` / `while cond { ... }` / `for var i : N { ... }` 三种 statement 括号可选（peented，但加了左括号就强制配对右括号；混搭 `if (cond { ... }` 是 clean parse error）；(2) `for (var i : start, end) { body }` 半开区间形式 emit `for i = start, (end) - 1 do`（Lua numeric-for 是 inclusive，两端相减模拟 [start, end) 语义；括号包裹 `end` 是因为 end 可能是 `n*2` 这种算术，不包会被 Lua precedence 解析成 `n * (2 - 1)`）。`include/logia/AYAst.h` `ForStmt` 加 `ExprPtr start` field + 新 ctor `ForStmt(counterName, start, end, body)`，旧 ctor 标短形式（`start == nullptr`）；`src/logia/AYParser.cpp` `parseIfStmt` / `parseWhileStmt` / `parseForStmt` 用 `match(LeftParen)` peek 后 dispatch 两种形态，`parseForStmt` 在 first expression 后 peek `,` 决定走 start-end range 还是单 bound 短形式，`parseIfStmt` 的 `else` 分支 peek `If` 后递归支持 `else if` 链；`src/logia/AYLuaCodegen.cpp` `emitForStmt` 看 `stmt.start` 双形态：非空 emit `start, (end) - 1`、空 emit `1, bound`；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 7 → 8（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 17（`if` bare）/ 18（`while` bare）/ 19（`for (var i : 0, 10)` half-open）/ 20（`for var i : 0, 10 { ... }` 头 bare）/ 21（`for (var i : 10)` 短形式回归 guard）。`AYScript_Test` **720/720 全绿**（R5.0 705 + R5.0.1 5 cases + 已有 10 个 dump-case 集成用例）。**Lessons learned**：强制括号是设计洁癖 vs 工程实用性的取舍（1 行 `match(LeftParen)` 消除每天撞到的体感摩擦）；0..N-1 vs 1..N 是范式之争（保留短形式 + 加 range 是双赢）；`for i = 0, n*2 - 1 do` 必须 `(end) - 1` 包裹避免 Lua precedence 错位；MSVC `std::vector<unique_ptr>` initializer_list brace-init 容易触发 `construct_at` overload 解析失败，改用 `vector + push_back` 两步式避免。 |
 | 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
 
 ---

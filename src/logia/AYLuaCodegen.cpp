@@ -316,32 +316,50 @@ void LuaCodegen::emitWhileStmt(const WhileStmt& stmt)
 }
 
 // R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`.
+// R5.0.1 (2026-07-13): range form `for (var i : start, end) { body }` →
+//   `for i = start, (end - 1) do` (half-open [start, end)).
 //
 // Critical emission rules:
 //   - The Logia `var` keyword and the colon are deliberately NOT
 //     emitted — Lua's `for` doesn't use `var`; the counter is
 //     implicitly declared by the `for` keyword itself.
-//   - The counter starts at 1 (hardcoded) and runs to `bound`
-//     inclusive (Lua's numeric-for default step is +1, which is
-//     what the user wants). No step argument is emitted.
-//   - `bound` is emitted via emitExpr, so any Logia expression
-//     reducing to a number is accepted (literal, identifier,
-//     function call, arithmetic).
-//   - Lua's `for i = 1, N do ... end` already provides the lexical
+//   - R5.0 short form: counter starts at 1 (hardcoded) and runs to
+//     `bound` inclusive. No step argument is emitted.
+//   - R5.0.1 range form: counter starts at `start` and runs to
+//     `end - 1` inclusive (so the half-open `[start, end)` is
+//     represented using Lua's inclusive numeric-for). The `end - 1`
+//     is emitted as a parenthesized expression to avoid precedence
+//     surprises with arithmetic in the bound (e.g. `end = n*2`
+//     emits `for i = 0, (n * 2 - 1) do`).
+//   - `bound` / `start` / `end` are emitted via emitExpr, so any
+//     Logia expression reducing to a number is accepted (literal,
+//     identifier, function call, arithmetic).
+//   - Lua's `for i = a, b do ... end` already provides the lexical
 //     scope for `i` (loop-local); no codegen-side scope marker is
 //     required.
 //
 // Edge cases handled at runtime (not codegen time):
 //   - `bound == 0` or `bound < 1` → Lua skips the body entirely.
-//   - Non-integer bound → Lua coerces per its numeric-for rules
+//   - `start > end - 1` (i.e. `start >= end`) → Lua skips the body.
+//   - Non-integer bounds → Lua coerces per its numeric-for rules
 //     (truncation toward zero on Lua 5.5).
 void LuaCodegen::emitForStmt(const ForStmt& stmt)
 {
     indent();
     _out += "for ";
     _out += stmt.counterName;
-    _out += " = 1, ";
-    _out += emitExpr(*stmt.bound);
+    _out += " = ";
+    if (stmt.start) {
+        // R5.0.1 range form: emit `start, (end - 1)`.
+        _out += emitExpr(*stmt.start);
+        _out += ", (";
+        _out += emitExpr(*stmt.bound);
+        _out += ") - 1";
+    } else {
+        // R5.0 short form: emit `1, bound`.
+        _out += "1, ";
+        _out += emitExpr(*stmt.bound);
+    }
     _out += " do\n";
 
     ++_indent;

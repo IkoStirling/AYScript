@@ -58,7 +58,13 @@ namespace ayt::script
 //       unavailable from Logia source. No new diagnostic surface —
 //       the only cache-invalidation trigger is the codegen shape
 //       change.
-constexpr std::size_t kLogiaPipelineVersion = 7u;
+//       2026-07-13 R5.0.1: bump 7 → 8. Three surface additions:
+//       (1) `if cond { ... }` (bare form, no parens) accepted
+//       alongside `if (cond) { ... }`; (2) same for `while cond` /
+//       `for var i : N`; (3) `for (var i : start, end) { body }`
+//       half-open range form emits `for i = start, (end) - 1 do`.
+//       Codegen output shape changes only for the new range form.
+constexpr std::size_t kLogiaPipelineVersion = 8u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

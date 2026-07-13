@@ -215,13 +215,35 @@ public:
 //   - The counter is implicitly loop-local at the Lua level; the
 //     analyzer does NOT push it into `_scope` (would cause a name
 //     leak in analyzer view vs. runtime behavior).
+//
+// R5.0.1 (2026-07-13) — optional `start, end` range form:
+//   `for (var i : start, end) { body }` → `for i = start, end - 1 do`.
+//   When `start` is non-null, the for-loop has an explicit half-open
+//   range `[start, end)` — emitted as `for i = start, (end - 1) do`
+//   so Lua's inclusive numeric-for semantics match the user's
+//   half-open expectation. When `start` is null, the legacy R5.0
+//   1..N inclusive form is used.
 class ForStmt : public Stmt {
 public:
+    // R5.0 short form: `for (var i : N) { body }` → 1..N inclusive.
     ForStmt(std::string counterName, ExprPtr bound, std::vector<StmtPtr> body)
         : counterName(std::move(counterName)),
+          start(nullptr),
           bound(std::move(bound)),
           body(std::move(body)) {}
+    // R5.0.1 range form: `for (var i : start, end) { body }` → [start, end).
+    ForStmt(std::string counterName,
+            ExprPtr start,
+            ExprPtr end,
+            std::vector<StmtPtr> body)
+        : counterName(std::move(counterName)),
+          start(std::move(start)),
+          bound(std::move(end)),
+          body(std::move(body)) {}
     std::string counterName;
+    // R5.0.1: non-null for `for (var i : start, end)` range form.
+    // Null for the legacy R5.0 `for (var i : N)` short form.
+    ExprPtr start;
     ExprPtr bound;
     std::vector<StmtPtr> body;
 };

@@ -359,4 +359,104 @@ script NestedLoop {
     CHECK(containsFlat(_lastDump.emittedLua, "tally = (tally + 1)"));
 }
 
+// R5.0.1 (2026-07-13) — `if cond { ... }` (no parens around cond).
+// Mirrors case 05's source but drops the parens. Both forms are
+// now accepted; emitted Lua shape is identical (parens around the
+// condition are part of the BinaryExpr's emit, not the source).
+TEST_CASE(emit_dump_17_if_bare_condition) {
+    const char* src = R"(
+script IfBare {
+    var x: int = 0
+    function check() {
+        if x == nil {
+            y = 1
+        }
+    }
+    on_start() { check() }
+}
+)";
+    dumpCase("17_if_bare_condition", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "if (x == nil) then"));
+    CHECK(containsFlat(_lastDump.emittedLua, "function check()"));
+}
+
+// R5.0.1 — `while cond { body }` (no parens). Mirrors case 14.
+TEST_CASE(emit_dump_18_while_bare_condition) {
+    const char* src = R"(
+script WhileBare {
+    var count: int = 0
+    function tick() {
+        while count < 5 {
+            count = count + 1
+        }
+    }
+    on_start() { tick() }
+}
+)";
+    dumpCase("18_while_bare_condition", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "while (count < 5) do"));
+    CHECK(containsFlat(_lastDump.emittedLua, "function tick()"));
+}
+
+// R5.0.1 — `for var i : 0, 10 { body }` half-open [0, 10).
+// Codegen emits `for i = 0, (10) - 1 do` — i.e. 0..9 inclusive,
+// matching user expectation for the half-open range.
+TEST_CASE(emit_dump_19_for_range_half_open) {
+    const char* src = R"(
+script ForRange {
+    var sum: int = 0
+    function accumulate() {
+        for (var i : 0, 10) {
+            sum = sum + i
+        }
+    }
+    on_start() { accumulate() }
+}
+)";
+    dumpCase("19_for_range_half_open", src, /*expectSuccess=*/true);
+    // Half-open [0, 10) → 0..9 inclusive in Lua's numeric-for.
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1 do"));
+    CHECK(containsFlat(_lastDump.emittedLua, "end"));
+    // Defensive: short-form `var` keyword must NOT leak.
+    CHECK_FALSE(containsFlat(_lastDump.emittedLua, "for var"));
+}
+
+// R5.0.1 — bare-form `for var i : 0, 10 { body }` (no parens around
+// header). Paren-less is also accepted.
+TEST_CASE(emit_dump_20_for_range_bare) {
+    const char* src = R"(
+script ForRangeBare {
+    var sum: int = 0
+    function accumulate() {
+        for var i : 0, 10 {
+            sum = sum + i
+        }
+    }
+    on_start() { accumulate() }
+}
+)";
+    dumpCase("20_for_range_bare", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1 do"));
+}
+
+// R5.0.1 — short-form `for var i : 10` (1..N) still works after
+// adding the range form. Regression guard: parser must NOT mistake
+// the legacy single-bound form for a range with empty start.
+TEST_CASE(emit_dump_21_for_short_form_preserved) {
+    const char* src = R"(
+script ForShort {
+    var sum: int = 0
+    function accumulate() {
+        for (var i : 10) {
+            sum = sum + i
+        }
+    }
+    on_start() { accumulate() }
+}
+)";
+    dumpCase("21_for_short_form_preserved", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 1, 10 do"));
+    CHECK_FALSE(containsFlat(_lastDump.emittedLua, "1, (10) - 1"));
+}
+
 TEST_SUITE_END

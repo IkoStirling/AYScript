@@ -250,7 +250,16 @@ std::unique_ptr<Stmt> Parser::parseReturnStmt()
 
 std::unique_ptr<Stmt> Parser::parseIfStmt()
 {
-    auto condition = parseExpression();
+    // R5.0.1: both `if cond { ... }` and `if (cond) { ... }` are
+    // accepted. Parens are optional but balanced when present —
+    // `if (cond { ... }` is a clean parse error from `consume(RParen)`.
+    ExprPtr condition;
+    if (match(TokenType::LeftParen)) {
+        condition = parseExpression();
+        consume(TokenType::RightParen, "Expected ')' after if condition");
+    } else {
+        condition = parseExpression();
+    }
     consume(TokenType::LeftBrace, "Expected '{' after if condition");
 
     std::vector<StmtPtr> thenBranch = parseBlockBody();
@@ -258,6 +267,20 @@ std::unique_ptr<Stmt> Parser::parseIfStmt()
 
     std::vector<StmtPtr> elseBranch;
     if (match(TokenType::Else)) {
+        // R5.0.1: same optional-paren treatment for the else-branch
+        // condition when chaining `else if`.
+        if (match(TokenType::If)) {
+            // `else if cond { ... }` — re-enter parseIfStmt recursively
+            // so the inner condition can also use either paren style.
+            // Build elseBranch via push_back rather than initializer_list
+            // brace-init (MSVC std::vector<unique_ptr> initializer_list
+            // is fragile when the element is itself a function call).
+            std::vector<StmtPtr> chained;
+            chained.push_back(parseIfStmt());
+            return std::make_unique<IfStmt>(std::move(condition),
+                                            std::move(thenBranch),
+                                            std::move(chained));
+        }
         consume(TokenType::LeftBrace, "Expected '{' after else");
         elseBranch = parseBlockBody();
         consume(TokenType::RightBrace, "Expected '}' after else branch");
@@ -266,67 +289,64 @@ std::unique_ptr<Stmt> Parser::parseIfStmt()
     return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
 }
 
-// R5.0 (2026-07-13): `while (cond) { body }`.
-//
-// Brace-only form (parens required around the condition, matches the
-// existing `if (cond) { ... }` shape). Codegen emits
-// `while <cond> do ... end` — see LuaCodegen::emitWhileStmt.
-//
-// The condition is a full Logia expression (parseExpression), so any
-// comparison / logical / arithmetic that evaluates to a boolean is
-// accepted. Empty body is allowed (parses cleanly, emits a valid
-// empty Lua block).
+// R5.0 (2026-07-13): `while (cond) { body }` → `while <cond> do ... end`.
+// R5.0.1: `while cond { body }` (no parens) also accepted — peek `(`.
 std::unique_ptr<Stmt> Parser::parseWhileStmt()
 {
-    consume(TokenType::LeftParen, "Expected '(' after 'while'");
-    auto condition = parseExpression();
-    consume(TokenType::RightParen, "Expected ')' after while condition");
+    ExprPtr condition;
+    if (match(TokenType::LeftParen)) {
+        condition = parseExpression();
+        consume(TokenType::RightParen, "Expected ')' after while condition");
+    } else {
+        condition = parseExpression();
+    }
     consume(TokenType::LeftBrace, "Expected '{' before while body");
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after while body");
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
 }
 
-// R5.0 (2026-07-13): `for (var i : N) { body }`.
-//
-// CRITICAL: this path consumes `var Identifier Colon Expr` as a
-// dedicated counter-var pattern. It does NOT call parseVarDecl —
-// if it did, the bound `N` would be parsed as a `Type` (a single
-// identifier), and `for (var i : 10)` would fail with
-// `consumeIdentifier("Expected variable type")` because `10` is an
-// IntLiteral, not an Identifier.
-//
-// Outside `for(...)`, `var i : T` continues to be parsed by
-// parseVarDecl exactly as before — `T = 10` at statement scope
-// produces the same clean "unknown type" error a user would see
-// today for any unknown type name.
-//
-// Validation done here:
-//   - `(` is required (opens the for header).
-//   - `var` is required (the counter-var marker).
-//   - `Identifier` is required (no anonymous counter).
-//   - `:` is required (the bound separator).
-//   - `Expr` is the bound (full expression — could be `n`, `n*2`,
-//      `function_returning_int()`, etc.).
-//   - `)` terminates the header.
-//   - `{ body }` follows.
-//
-// Edge cases handled at runtime (not parse time):
-//   - `for (var i : 0)` or `for (var i : -1)` — parses cleanly; Lua
-//      skips the body when start > bound.
+// R5.0 (2026-07-13): `for (var i : N) { body }` → 1..N inclusive.
+// R5.0.1: optional parens + `for (var i : start, end) { body }` half-open range.
 std::unique_ptr<Stmt> Parser::parseForStmt()
 {
-    consume(TokenType::LeftParen, "Expected '(' after 'for'");
-    consume(TokenType::Var, "Expected 'var' inside for(...) header");
+    // R5.0.1: optional `(` after `for`. When absent, the header is
+    // `var i : N {` or `var i : 0, 10 {` — distinguishable from the
+    // body `{` by the `:` (always present in the counter-var form).
+    const bool hasParens = match(TokenType::LeftParen);
+
+    consume(TokenType::Var, "Expected 'var' inside for header");
     const Token counterTok = consumeIdentifier("Expected loop variable name");
     consume(TokenType::Colon, "Expected ':' after loop variable name");
-    auto bound = parseExpression();
-    consume(TokenType::RightParen, "Expected ')' after for header");
+
+    auto firstExpr = parseExpression();
+
+    // R5.0.1 range form: `for (var i : start, end)` — peek `,`.
+    // If we see a comma, consume it + the end expression; if `)`
+    // (parens form) or `{` (bare form), the first expression is the
+    // single bound for the legacy 1..N short form.
+    ExprPtr startExpr;
+    ExprPtr endExpr;
+    if (match(TokenType::Comma)) {
+        startExpr = std::move(firstExpr);
+        endExpr = parseExpression();
+    } else {
+        endExpr = std::move(firstExpr);
+    }
+
+    if (hasParens) {
+        consume(TokenType::RightParen, "Expected ')' after for header");
+    }
     consume(TokenType::LeftBrace, "Expected '{' before for body");
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after for body");
+
+    if (startExpr) {
+        return std::make_unique<ForStmt>(
+            counterTok.lexeme, std::move(startExpr), std::move(endExpr), std::move(body));
+    }
     return std::make_unique<ForStmt>(
-        counterTok.lexeme, std::move(bound), std::move(body));
+        counterTok.lexeme, std::move(endExpr), std::move(body));
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()
