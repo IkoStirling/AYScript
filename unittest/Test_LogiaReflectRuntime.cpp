@@ -3143,6 +3143,42 @@ script X {
     CHECK(bridge.getLuaGlobalString("__test_witness_outer") == "10");
 }
 
+// ============================================================
+// R5.2-B (2026-07-14): break :L / continue :L / ::L::
+// ============================================================
+
+TEST_CASE(lg15_r52b_break_label_outer_loop) {
+    // R5.2-B: inner `for (var j : 3)` does `break :OUTER` when
+    // j == 1. The `::OUTER::` label is hoisted by codegen to
+    // AFTER the outer for (Lua 5.2+ `goto` jumps to it, falling
+    // out of the loop — see LuaCodegen::emitForStmt comment).
+    // On the very first outer iteration (i=1), j=1 immediately
+    // breaks, so x stays at 0 (the j=0 / j=2 of that iteration
+    // never run; the outer for never completes a full pass).
+    LogiaRuntimeBridge bridge;
+
+    const char* src = R"(
+script X {
+    on_start() {
+        var x: int = 0
+        for (var i : 3) {
+            ::OUTER::
+            for (var j : 3) {
+                if (j == 1) { break :OUTER }
+                x = x + 1
+            }
+        }
+        __test_witness = tostring(x)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52b_break_label", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52b_break_label", "on_start", nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "0");
+}
+
 // ----------------------------------------------------------------------------
 
 TEST_SUITE_END

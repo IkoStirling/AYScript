@@ -13,11 +13,11 @@
 
 #include "logia/AYSemanticAnalyzer.h"
 
-#include "AYLogger.h"
+#include "aylog/Logger.h"
 
 // AYReflect surface
-#include "IAYReflect.h"
-#include "AYReflectRegistry.h"
+#include "ayreflect/IReflect.h"
+#include "ayreflect/ReflectRegistry.h"
 #include "AYReflect.h"  // full TypeRegistryImpl definition (linkable)
 
 // S3.2 (LG-04b, B-min): isDerivedFrom is a free function defined in
@@ -32,7 +32,7 @@ bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
 #include "AYEntityModule.h"
 #include "components/AYHealthComponent.h"
 #include "AYReflectMacros.h"  // ayt::reflect::detail::defaultCreate/Destroy/Copy
-#include <AYMathTypes.h>
+#include <aymath/MathTypes.h>
 
 #include <algorithm>
 #include <cstring>
@@ -514,9 +514,15 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         report(d);
     }
 
+    // R5.2-B (2026-07-14): push a function-body label-scope frame.
+    // The frame is kept empty of labels by the rule that `::L::`
+    // only lives in loop bodies, but pushed for stack consistency
+    // so that the "label outside loop" check has a stable parent.
+    _labelStack.emplace_back();
     for (auto& s : fn.body) {
         if (s) analyzeStmt(*s);
     }
+    _labelStack.pop_back();
 }
 
 // R5.0 (2026-07-13): walk a while loop's condition and body.
@@ -532,9 +538,16 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
 void SemanticAnalyzer::analyzeWhileStmt(WhileStmt& w)
 {
     if (w.condition) analyzeExpr(*w.condition);
+    // R5.2-B (2026-07-14): push a label-scope frame for the
+    // while-body. Labels declared here are visible to `break :L`
+    // / `continue :L` inside this body and to nested-loop bodies
+    // (the inner frames have the outer in their `_labelStack`
+    // ancestry). Popped on exit.
+    _labelStack.emplace_back();
     for (auto& s : w.body) {
         if (s) analyzeStmt(*s);
     }
+    _labelStack.pop_back();
 }
 
 // R5.0 (2026-07-13): walk a for loop's bound and body.
@@ -568,26 +581,99 @@ void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
 {
     if (f.start) analyzeExpr(*f.start);
     if (f.bound) analyzeExpr(*f.bound);
+    // R5.2-B (2026-07-14): symmetric label-scope frame for the
+    // for-body. See analyzeWhileStmt's comment.
+    _labelStack.emplace_back();
     for (auto& s : f.body) {
         if (s) analyzeStmt(*s);
     }
+    _labelStack.pop_back();
 }
 
 // R5.1 (2026-07-13): no-op for `break;` inside a loop.
-//
-// The parser's `loopDepth` gate has already verified this BreakStmt
-// appears inside a while / for body. The analyzer's job is just to
-// walk sub-nodes, and BreakStmt has none. Future R5.x passes that
-// add control-flow analysis (e.g. "definitely-returns after this
-// break") would extend this method — R5.1 leaves it empty.
-void SemanticAnalyzer::analyzeBreakStmt(BreakStmt& /*b*/)
+// R5.2-B (2026-07-14): verify label visibility when `break :L` is
+// used. The parser's `loopDepth` gate has already verified this
+// BreakStmt appears inside a while / for body; the label check
+// uses the analyzer's `_labelStack` (pushed in analyzeWhileStmt /
+// analyzeForStmt) to confirm the label was declared in some
+// enclosing loop. The BreakStmt has no sub-nodes to walk.
+void SemanticAnalyzer::analyzeBreakStmt(BreakStmt& b)
 {
+    if (!b.label.empty() && !isLabelVisible(b.label)) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "label '" + b.label +
+                    "' not found in any enclosing loop";
+        d.hint = "declare with `::" + b.label + "::` inside an "
+                 "enclosing while or for body";
+        report(d);
+    }
 }
 
 // R5.1 (2026-07-13): no-op for `continue;` inside a loop.
-// See analyzeBreakStmt's comment for the rationale.
+// R5.2-B (2026-07-14): `continue :L` is not supported in this
+// slice — the parser rejects it before we get here. The
+// `label` field is always empty in practice (kept on the AST
+// for forward compatibility with a future R5.x slice that
+// may add name-mangled continue labels).
 void SemanticAnalyzer::analyzeContinueStmt(ContinueStmt& /*c*/)
 {
+}
+
+// R5.2-B (2026-07-14): `::LABEL::` — register the name in the
+// innermost label-scope frame. The frame corresponds to the
+// enclosing loop body (analyzeWhileStmt / analyzeForStmt pushed
+// it; the function-body frame from analyzeLifecycle is also
+// present but labels in it are illegal). Duplicate names in the
+// same frame are a hard error.
+void SemanticAnalyzer::analyzeLabelDeclStmt(LabelDeclStmt& l)
+{
+    if (_labelStack.empty()) {
+        // Should not happen in practice — analyzeLifecycle pushes
+        // the outermost frame, so the stack is non-empty inside
+        // any lifecycle body. Defensive guard.
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "label '" + l.name + "' declared outside loop";
+        d.hint = "labels may only be declared inside a while or for body";
+        report(d);
+        return;
+    }
+    // The outermost frame is the function-body frame
+    // (analyzeLifecycle); labels declared there are illegal per
+    // the loop-scoped rule. We detect that case by checking the
+    // frame's size relative to its position. Simpler: check
+    // whether the current frame is the only one on the stack.
+    if (_labelStack.size() == 1u) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "label '" + l.name + "' declared outside loop";
+        d.hint = "labels may only be declared inside a while or for body";
+        report(d);
+        return;
+    }
+    if (!_labelStack.back().insert(l.name).second) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.message = "duplicate label '" + l.name + "' in this loop";
+        d.hint = "each label name must be unique within its enclosing loop";
+        report(d);
+    }
+}
+
+// R5.2-B (2026-07-14): walk `_labelStack` from innermost frame
+// outward and return true on first match. False when the stack
+// is empty.
+bool SemanticAnalyzer::isLabelVisible(const std::string& name) const
+{
+    for (auto it = _labelStack.rbegin(); it != _labelStack.rend(); ++it) {
+        if (it->count(name)) return true;
+    }
+    return false;
 }
 
 void SemanticAnalyzer::analyzeStmt(Stmt& s)
@@ -639,6 +725,8 @@ void SemanticAnalyzer::analyzeStmt(Stmt& s)
         analyzeBreakStmt(*bs);
     } else if (auto* cs = dynamic_cast<ContinueStmt*>(&s)) { // R5.1 (2026-07-13)
         analyzeContinueStmt(*cs);
+    } else if (auto* ld = dynamic_cast<LabelDeclStmt*>(&s)) { // R5.2-B (2026-07-14)
+        analyzeLabelDeclStmt(*ld);
     } else if (auto* rs = dynamic_cast<ReturnStmt*>(&s)) {
         if (rs->value) analyzeExpr(*rs->value);
     } else if (auto* vd = dynamic_cast<VarDeclStmt*>(&s)) {

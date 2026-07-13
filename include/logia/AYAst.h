@@ -182,14 +182,25 @@ public:
 // Parser enforces "must be inside a loop" via loopDepth — a bare
 // `break` at script-block or function-body scope is a hard error
 // with message "break outside loop" (and same for continue).
+//
+// R5.2-B (2026-07-14): each may carry an optional label name.
+// `break;` (or `break` with empty label) lowers to Lua `break`.
+// `break :L` lowers to Lua `goto L` — the only way to exit an
+// outer loop from a nested loop body. Same for `continue`. The
+// parser consumes the optional `:IDENT` after the keyword;
+// codegen emits `goto <label>` when label is non-empty.
 class BreakStmt : public Stmt {
 public:
-    BreakStmt() = default;
+    explicit BreakStmt(std::string label = "")
+        : label(std::move(label)) {}
+    std::string label;
 };
 
 class ContinueStmt : public Stmt {
 public:
-    ContinueStmt() = default;
+    explicit ContinueStmt(std::string label = "")
+        : label(std::move(label)) {}
+    std::string label;
 };
 
 // R5.2-A (2026-07-13): explicit block-scope statement. Logia-side
@@ -205,6 +216,20 @@ class BlockStmt : public Stmt {
 public:
     explicit BlockStmt(std::vector<StmtPtr> body) : body(std::move(body)) {}
     std::vector<StmtPtr> body;
+};
+
+// R5.2-B (2026-07-14): `::NAME::` label declaration. Valid only
+// inside a loop body (while / for) — the analyzer enforces this
+// via a stack of label-scope frames pushed/popped by
+// analyzeWhileStmt / analyzeForStmt. A label's visibility extends
+// outward — a `break :L` deep in the body targets the nearest
+// enclosing `::L::`, and Lua's `goto` reaches the same name.
+//
+// Codegen emits Lua 5.2+ `::NAME::` natively.
+class LabelDeclStmt : public Stmt {
+public:
+    explicit LabelDeclStmt(std::string name) : name(std::move(name)) {}
+    std::string name;
 };
 
 class IfStmt : public Stmt {

@@ -66,6 +66,14 @@ enum class TokenType : uint8_t {
     Dot,
     Comma,
     Colon,
+    ColonColon,      // R5.2-B (2026-07-14): `::` opener/closer for
+                     // `::LABEL::` label declarations. Lexer emits
+                     // when scanning `:` and the next char is also
+                     // `:`; otherwise emits the single `Colon` (used
+                     // for var/param/field type annotations). Parser
+                     // treats a `::Identifier::` triplet as a
+                     // LabelDeclStmt. Single-`:` colon usage is
+                     // preserved.
     Semicolon,
     LeftParen,
     RightParen,

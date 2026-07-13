@@ -9,11 +9,11 @@
 #include "AYTest.h"
 #include "logia/AYSemanticAnalyzer.h"
 
-#include "IAYReflect.h"
+#include "ayreflect/IReflect.h"
 #include "AYReflect.h"
 #include "AYReflectMacros.h"
 
-#include <AYMathTypes.h>
+#include <aymath/MathTypes.h>
 
 #include <string>
 

@@ -151,7 +151,19 @@ namespace ayt::script
 //       sub-table per struct element via pushFieldPrimitive or pushes
 //       each std::string via lua_pushlstring. Logia source unchanged.
 //       Compile cache invalidated because bridge code path changed.
-constexpr std::size_t kLogiaPipelineVersion = 16u;
+//       2026-07-14 R5.2-B: bump 16 → 17. New Logia surface:
+//       `::LABEL::` label declaration (loop-scoped, hard error on
+//       duplicate in same loop), `break :L` / `continue :L` for
+//       jumping to an outer loop. Codegen emits Lua 5.2+ `goto L`
+//       and `::L::` (Lua 5.5 runtime bridge, native support).
+//       Analyzer adds `_labelStack` (vector<unordered_set<string>>)
+//       pushed in analyzeWhileStmt / analyzeForStmt / analyzeLifecycle.
+//       Lexer adds 2-char peek in `case ':'` for the `::` token
+//       (single-`:` colon usage preserved). New AST nodes:
+//       LabelDeclStmt; BreakStmt/ContinueStmt gain `std::string label`
+//       field. R5.2-C (bound type validation) is a separate commit.
+//       Compile cache invalidated because codegen output shape changed.
+constexpr std::size_t kLogiaPipelineVersion = 17u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

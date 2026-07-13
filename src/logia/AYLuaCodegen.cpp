@@ -50,6 +50,36 @@ const char* tokenOpName(TokenType t)
 
 } // namespace
 
+// R5.2-B (2026-07-14): emit `::L::` markers for each top-level
+// LabelDeclStmt in `body`, at the current indent. The caller
+// (emitWhileStmt / emitForStmt) invokes this AFTER writing the
+// loop's `end` keyword, so the label lands at the same indent
+// as the loop header — i.e. immediately AFTER the loop. This
+// is what makes `break :L` work: the compiled `goto L` jumps to
+// the label at loop end, falling out of the loop.
+//
+// We do NOT emit the label inside the loop body because Lua
+// 5.2+ forbids re-declaring a label in the same block (a
+// loop's body is one block across all iterations).
+//
+// Implementation note: the body comes in as `const
+// std::vector<StmtPtr>&` (the loop's body field is read-only).
+// Copying `unique_ptr` is forbidden, so we cannot build a
+// "stripped body" vector — the caller walks the body twice
+// (emitBlockSkipLabels iterates the body and skips labels;
+// this helper iterates the body and emits only labels).
+void LuaCodegen::hoistLabelsFromBody(const std::vector<StmtPtr>& body)
+{
+    for (const auto& s : body) {
+        if (auto* ld = dynamic_cast<const LabelDeclStmt*>(s.get())) {
+            indent();
+            _out += "::";
+            _out += ld->name;
+            _out += "::\n";
+        }
+    }
+}
+
 LuaCodegen::LuaCodegen(LuaCodegenOptions options)
     : _options(std::move(options)) {}
 
@@ -206,6 +236,25 @@ void LuaCodegen::emitBlock(const std::vector<StmtPtr>& body)
     }
 }
 
+// R5.2-B (2026-07-14): like emitBlock, but skips top-level
+// LabelDeclStmt nodes. Used by emitWhileStmt / emitForStmt to
+// avoid re-emitting labels that have already been hoisted to
+// immediately before the loop's `for` / `while` header (Lua
+// 5.2+ forbids re-declaring a label in the same block, and a
+// loop body is one block across all iterations).
+//
+// Nested labels (LabelDeclStmt inside an `if` / `do` / nested
+// loop) are NOT skipped here — they reach emitStmt via
+// emitBlock and are emitted verbatim. Hoisting applies only
+// to direct-child labels of the immediate loop body.
+void LuaCodegen::emitBlockSkipLabels(const std::vector<StmtPtr>& body)
+{
+    for (const auto& stmt : body) {
+        if (dynamic_cast<const LabelDeclStmt*>(stmt.get())) continue;
+        emitStmt(*stmt);
+    }
+}
+
 // 2026-07-11 audit fix: emit a top-level Lua function for a
 // script-block-scope helper. Mirrors `emitLifecycleFunc`'s shape but
 // without the `M.` prefix — the function is reachable from every
@@ -252,6 +301,9 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     // braces in source are consumed by the parser; this emit
     // produces the shell only.
     if (auto* blk = dynamic_cast<const BlockStmt*>(&stmt))   { emitBlockStmt(*blk); return; }
+    // R5.2-B (2026-07-14): label declaration. Lowered to Lua
+    // 5.2+ `::NAME::` natively. Codegen only writes the marker.
+    if (auto* lbl = dynamic_cast<const LabelDeclStmt*>(&stmt)) { emitLabelDeclStmt(*lbl); return; }
     if (auto* r = dynamic_cast<const ReturnStmt*>(&stmt))  { emitReturnStmt(*r); return; }
     if (auto* e = dynamic_cast<const ExprStmt*>(&stmt))    { emitExprStmt(*e); return; }
     // 2026-07-11 audit fix: defensive — parser rejects `function`
@@ -314,17 +366,28 @@ void LuaCodegen::emitIfStmt(const IfStmt& stmt)
 // no precomputation is done by codegen.
 void LuaCodegen::emitWhileStmt(const WhileStmt& stmt)
 {
+    // R5.2-B (2026-07-14): top-level `LabelDeclStmt`s in the
+    // while-body are hoisted to AFTER the `while` block.
+    // The `::L::` markers are NOT emitted inside the loop body
+    // because Lua 5.2+ forbids re-declaring a label in the same
+    // block (a `while` body is one block across all iterations).
+    // Hoisting to AFTER the loop makes `break :L` work: the
+    // compiled `goto L` jumps to the label at loop end, falling
+    // out of the loop. (`continue :L` is not supported in R5.2-B
+    // — the parser rejects it. `continue` itself still works as
+    // a bare statement.)
     indent();
     _out += "while ";
     _out += emitExpr(*stmt.condition);
     _out += " do\n";
 
     ++_indent;
-    emitBlock(stmt.body);
+    emitBlockSkipLabels(stmt.body);
     --_indent;
 
     indent();
     _out += "end\n";
+    hoistLabelsFromBody(stmt.body);
 }
 
 // R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`.
@@ -357,6 +420,9 @@ void LuaCodegen::emitWhileStmt(const WhileStmt& stmt)
 //     (truncation toward zero on Lua 5.5).
 void LuaCodegen::emitForStmt(const ForStmt& stmt)
 {
+    // R5.2-B (2026-07-14): hoist top-level LabelDeclStmts out of
+    // the for-body to AFTER the `for` block. See emitWhileStmt
+    // for the rationale.
     indent();
     _out += "for ";
     _out += stmt.counterName;
@@ -375,43 +441,44 @@ void LuaCodegen::emitForStmt(const ForStmt& stmt)
     _out += " do\n";
 
     ++_indent;
-    emitBlock(stmt.body);
+    emitBlockSkipLabels(stmt.body);
     --_indent;
 
     indent();
     _out += "end\n";
+    hoistLabelsFromBody(stmt.body);
 }
 
 // R5.1 (2026-07-13): `break;` → Lua `break`.
-//
-// Lua 5.2+ supports `break` natively (the only control-flow keyword
-// added in Lua 5.2; the rest of 5.x kept the same control-flow set).
-// AYScript runs on Lua 5.5 per the runtime bridge contract
-// (see LogiaRuntimeBridge setup), so a direct emit is safe.
-//
-// The parser's loopDepth gate has already verified this `break` is
-// inside a loop body. If a malformed AST ever surfaces a bare BreakStmt
-// outside a loop, the emitted Lua will raise a `break outside loop`
-// syntax error at Lua's parser — which matches the error message the
-// user would see in source-level terms, just one layer down.
-void LuaCodegen::emitBreakStmt(const BreakStmt& /*stmt*/)
+// R5.2-B (2026-07-14): `break :L` → `goto L`. Lua 5.2+ supports
+// `goto` natively; this is the only way to exit an outer loop
+// from a nested loop body. The parser's loopDepth gate +
+// analyzer's label-visibility check together guarantee the
+// label exists at codegen time.
+void LuaCodegen::emitBreakStmt(const BreakStmt& stmt)
 {
     indent();
-    _out += "break\n";
+    if (stmt.label.empty()) {
+        _out += "break\n";
+    } else {
+        _out += "goto ";
+        _out += stmt.label;
+        _out += "\n";
+    }
 }
 
 // R5.1 (2026-07-13): `continue;` → Lua `continue`.
-//
-// Lua 5.2+ supports `continue` natively (no goto-juggling required).
-// Lua 5.5 (our runtime) handles `continue` as a first-class keyword.
-// Direct emit is the simplest path.
-//
-// Same defensive note as emitBreakStmt: parser's loopDepth gate is the
-// primary correctness boundary; the emit itself is unconditional.
-void LuaCodegen::emitContinueStmt(const ContinueStmt& /*stmt*/)
+// R5.2-B (2026-07-14): same optional `:LABEL` extension as break.
+void LuaCodegen::emitContinueStmt(const ContinueStmt& stmt)
 {
     indent();
-    _out += "continue\n";
+    if (stmt.label.empty()) {
+        _out += "continue\n";
+    } else {
+        _out += "goto ";
+        _out += stmt.label;
+        _out += "\n";
+    }
 }
 
 // R5.2-A (2026-07-13): explicit `do ... end` shell. The body is
@@ -431,6 +498,17 @@ void LuaCodegen::emitBlockStmt(const BlockStmt& stmt)
     --_indent;
     indent();
     _out += "end\n";
+}
+
+// R5.2-B (2026-07-14): `::NAME::` shell. Lua 5.2+ supports label
+// declarations natively. Same indent convention as `do/end` (the
+// label sits at the same indent as the surrounding statement).
+void LuaCodegen::emitLabelDeclStmt(const LabelDeclStmt& stmt)
+{
+    indent();
+    _out += "::";
+    _out += stmt.name;
+    _out += "::\n";
 }
 
 void LuaCodegen::emitReturnStmt(const ReturnStmt& stmt)

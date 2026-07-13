@@ -62,6 +62,7 @@ private:
     void emitFunctionDecl(const FunctionDeclStmt& fn);   // 2026-07-11 audit fix
 
     void emitBlock(const std::vector<StmtPtr>& body);
+    void emitBlockSkipLabels(const std::vector<StmtPtr>& body);  // R5.2-B (2026-07-14)
     void emitStmt(const Stmt& stmt);
 
     // Expressions — return a string that is a valid Lua expression in the
@@ -82,6 +83,23 @@ private:
     void emitBreakStmt(const BreakStmt& stmt);   // R5.1 (2026-07-13)
     void emitContinueStmt(const ContinueStmt& stmt); // R5.1 (2026-07-13)
     void emitBlockStmt(const BlockStmt& stmt);  // R5.2-A (2026-07-13)
+    void emitLabelDeclStmt(const LabelDeclStmt& stmt);  // R5.2-B (2026-07-14)
+
+    // R5.2-B (2026-07-14): helper used by emitWhileStmt /
+    // emitForStmt. Walks `body` (the loop's direct child
+    // statements); emits each top-level `LabelDeclStmt`'s
+    // `::L::` marker at the current indent. Caller invokes
+    // this AFTER writing the loop's `end` keyword, so the
+    // label lands immediately AFTER the loop. This is what
+    // makes `break :L` work: the compiled `goto L` jumps to
+    // the label at loop end, falling out of the loop.
+    //
+    // The label is NOT emitted inside the loop body because
+    // Lua 5.2+ forbids re-declaring a label in the same block
+    // (a loop's body is one block across all iterations).
+    // emitBlockSkipLabels is paired with this helper to walk
+    // the body and skip top-level labels at body-walk time.
+    void hoistLabelsFromBody(const std::vector<StmtPtr>& body);
     void emitReturnStmt(const ReturnStmt& stmt);
     void emitExprStmt(const ExprStmt& stmt);
 

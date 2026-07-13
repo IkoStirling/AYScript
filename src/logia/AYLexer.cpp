@@ -53,7 +53,15 @@ void Lexer::scanToken(std::vector<Token>& out)
         makeToken(out, TokenType::Comma, 1);
         break;
     case ':':
-        makeToken(out, TokenType::Colon, 1);
+        // R5.2-B (2026-07-14): `::` is the label-decl opener/closer.
+        // 2-char peek — if next is `:`, emit `ColonColon`; otherwise
+        // emit single `Colon` (preserves `var x: int` / param /
+        // for-header type annotations unchanged).
+        if (match(':')) {
+            makeToken(out, TokenType::ColonColon, 2);
+        } else {
+            makeToken(out, TokenType::Colon, 1);
+        }
         break;
     case ';':
         makeToken(out, TokenType::Semicolon, 1);

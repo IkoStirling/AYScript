@@ -214,6 +214,13 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     if (match(TokenType::Do)) {
         return parseDoBlock();
     }
+    // R5.2-B (2026-07-14): `::LABEL::` label declaration. The first
+    // `::` has already been consumed by the match() here;
+    // parseLabelDecl handles the IDENT and the closing `::`. The
+    // label's name is recorded for codegen + downstream analyzer use.
+    if (match(TokenType::ColonColon)) {
+        return parseLabelDecl();
+    }
     if (check(TokenType::Var)) {
         return parseVarDecl();
     }
@@ -375,24 +382,48 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
 }
 
 // R5.1 (2026-07-13): `break;` (or `break` + stmt-end) inside a loop body.
-// The `match(TokenType::Break)` in parseStatement has already consumed
-// the keyword token by the time we get here. We only need to enforce
-// the loop-depth gate and accept the optional trailing semicolon.
+// R5.2-B (2026-07-14): optionally followed by `:LABEL` to break out
+// of an outer loop. The `match(TokenType::Break)` in parseStatement
+// has already consumed the keyword token by the time we get here.
+// We enforce the loop-depth gate, then optionally consume `:IDENT`,
+// then the trailing semicolon.
 std::unique_ptr<Stmt> Parser::parseBreakStmt()
 {
     if (_loopDepth == 0) {
         error("'break' outside loop");
         return nullptr;
     }
+    std::string label;
+    if (match(TokenType::Colon)) {
+        const Token nameTok = consumeIdentifier(
+            "Expected label name after 'break :'");
+        label = nameTok.lexeme;
+    }
     match(TokenType::Semicolon);
-    return std::make_unique<BreakStmt>();
+    return std::make_unique<BreakStmt>(std::move(label));
 }
 
-// R5.1 (2026-07-13): `continue;` inside a loop body. Same gate as break.
+// R5.1 (2026-07-13): `continue;` inside a loop body. Same gate
+// as break.
+// R5.2-B (2026-07-14): `continue :LABEL` is NOT supported in this
+// slice. Lua 5.2+ has no clean way to "continue the outer
+// loop's next iteration" from inside a nested loop (a label
+// that lets `break :L` jump to loop-end would let
+// `continue :L` re-execute the loop header, which Lua
+// faithfully does — same loop counter, dead loop). Until a
+// future slice picks that up, `continue` is bare-only and
+// `continue :L` is a hard error.
 std::unique_ptr<Stmt> Parser::parseContinueStmt()
 {
     if (_loopDepth == 0) {
         error("'continue' outside loop");
+        return nullptr;
+    }
+    if (match(TokenType::Colon)) {
+        const Token nameTok = consumeIdentifier(
+            "Expected label name after 'continue :'");
+        error("'continue :' labels are not supported in R5.2-B "
+              "(only 'break :L' is; bare 'continue' is)");
         return nullptr;
     }
     match(TokenType::Semicolon);
@@ -413,6 +444,20 @@ std::unique_ptr<Stmt> Parser::parseDoBlock()
     consume(TokenType::RightBrace, "Expected '}' after do-block body");
     consume(TokenType::End, "Expected 'end' to close do-block");
     return std::make_unique<BlockStmt>(std::move(body));
+}
+
+// R5.2-B (2026-07-14): `::LABEL::` — label declaration. The
+// opening `::` has already been consumed by parseStatement's
+// match dispatch. We expect: IDENT, then `::`. The label's name
+// is the only payload (codegen emits `::NAME::`; analyzer
+// tracks it for break/continue visibility checks).
+std::unique_ptr<Stmt> Parser::parseLabelDecl()
+{
+    const Token nameTok = consumeIdentifier(
+        "Expected label name after '::'");
+    consume(TokenType::ColonColon,
+            "Expected '::' to close label declaration");
+    return std::make_unique<LabelDeclStmt>(nameTok.lexeme);
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()
@@ -710,6 +755,7 @@ void Parser::synchronize()
         case TokenType::For:     // R5.0 (2026-07-13): loop recovery.
         case TokenType::Break:   // R5.1 (2026-07-13): loop-body statement.
         case TokenType::Continue:// R5.1 (2026-07-13): loop-body statement.
+        case TokenType::ColonColon: // R5.2-B (2026-07-14): label-decl recovery.
         case TokenType::RightBrace:
             return;
         default:

@@ -33,6 +33,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ayt::reflect
@@ -102,10 +103,16 @@ private:
     void analyzeForStmt(ForStmt& f);       // R5.0 (2026-07-13)
     void analyzeBreakStmt(BreakStmt& b);   // R5.1 (2026-07-13): no-op (parser already gated)
     void analyzeContinueStmt(ContinueStmt& c); // R5.1 (2026-07-13): no-op
+    void analyzeLabelDeclStmt(LabelDeclStmt& l); // R5.2-B (2026-07-14)
     void analyzeStmt(Stmt& s);
     void analyzeExpr(Expr& e);
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);
     void analyzeIdentifierExpr(IdentifierExpr& id);
+
+    // R5.2-B (2026-07-14): label visibility helper. Walks
+    // `_labelStack` from innermost frame outward and returns true
+    // on first match. Returns false when the stack is empty.
+    bool isLabelVisible(const std::string& name) const;
 
     // Resolve a type name (string) to an ITypeInfo*. Returns nullptr on
     // miss. Built-in types (int/float/bool/string/Entity) return nullptr
@@ -140,6 +147,15 @@ private:
         const void* decl = nullptr;
     };
     std::unordered_map<std::string, ScopeEntry> _scope;
+
+    // R5.2-B (2026-07-14): stack of label-name sets, one frame per
+    // enclosing loop body. Pushed in analyzeWhileStmt /
+    // analyzeForStmt (loop-scope frames); analyzeLifecycle is the
+    // outermost function-body frame (kept empty-of-labels by the
+    // rule that labels only live in loop bodies, but pushed anyway
+    // so the stack is non-empty when descending into a loop body).
+    // Popped on exit. The vector is empty outside a function body.
+    std::vector<std::unordered_set<std::string>> _labelStack;
 
     // Type of the currently-analyzed `self` (the host type matching
     // the script's name). nullptr if no current script (shouldn't

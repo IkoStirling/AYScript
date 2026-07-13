@@ -23,7 +23,7 @@
 #include "AYScriptSubSystem.h"
 #include "logia/AYCompilerError.h"
 #include "AYTest.h"
-#include "AYLogger.h"
+#include "aylog/Logger.h"
 
 #include <IAYEntity.h>
 #include <AYWorld.h>

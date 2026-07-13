@@ -164,4 +164,175 @@ script T {
     CHECK_FALSE(result.errors.empty());
 }
 
+// ============================================================
+// R5.2-B (2026-07-14): label declarations, break :L, continue :L
+// ============================================================
+
+namespace {
+
+// Walk a `body` vector and return the first node whose dynamic type
+// matches T. Returns nullptr if not found. Used by the R5.2-B
+// parser tests to fetch a BreakStmt / ContinueStmt / LabelDeclStmt
+// out of an arbitrary body vector without writing per-test
+// dynamic_cast loops.
+template <typename T>
+T* findFirstInBody(const std::vector<StmtPtr>& body)
+{
+    for (const auto& s : body) {
+        if (auto* p = dynamic_cast<T*>(s.get())) return p;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+TEST_CASE(parse_r52b_label_decl) {
+    // R5.2-B: `::FOUND::` parses to a LabelDeclStmt with name
+    // "FOUND". Mirrors the R5.2-A parser-test pattern.
+    const char* source = R"(
+script T {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            break
+        }
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    CHECK(result.errors.empty());
+
+    const LifecycleFuncDecl* onStart =
+        findLifecycle(*result.program->scripts[0], LifecycleKind::OnStart);
+    CHECK(onStart != nullptr);
+    CHECK(onStart->body.size() == 1u);
+
+    const auto* fs = dynamic_cast<const ForStmt*>(onStart->body[0].get());
+    CHECK(fs != nullptr);
+
+    const auto* ld = findFirstInBody<LabelDeclStmt>(fs->body);
+    CHECK(ld != nullptr);
+    CHECK(ld->name == "FOUND");
+}
+
+TEST_CASE(parse_r52b_break_with_label) {
+    // R5.2-B: `break :FOUND` produces a BreakStmt with the label
+    // field set to "FOUND".
+    const char* source = R"(
+script T {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            break :FOUND
+        }
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    CHECK(result.errors.empty());
+
+    const LifecycleFuncDecl* onStart =
+        findLifecycle(*result.program->scripts[0], LifecycleKind::OnStart);
+    CHECK(onStart != nullptr);
+
+    const auto* fs = dynamic_cast<const ForStmt*>(onStart->body[0].get());
+    CHECK(fs != nullptr);
+
+    const auto* bs = findFirstInBody<BreakStmt>(fs->body);
+    CHECK(bs != nullptr);
+    CHECK(bs->label == "FOUND");
+}
+
+TEST_CASE(parse_r52b_continue_with_label_rejected) {
+    // R5.2-B (2026-07-14): `continue :L` is NOT supported in this
+    // slice. The parser rejects it with a hard error. Only
+    // `break :L` and bare `continue` are valid.
+    const char* source = R"(
+script T {
+    on_start() {
+        for (var i : 1) {
+            continue :FOUND
+        }
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+}
+
+TEST_CASE(parse_r52b_undefined_label_is_error) {
+    // R5.2-B: `break :NEVERDECLARED` references a label that is
+    // not declared in any enclosing loop. The analyzer emits a
+    // hard error. Verify compile fails and the message names the
+    // missing label.
+    const char* source = R"(
+script T {
+    on_start() {
+        for (var i : 1) {
+            break :NEVERDECLARED
+        }
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+    bool found = false;
+    for (const auto& e : result.errors) {
+        if (e.message.find("NEVERDECLARED") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE(parse_r52b_label_outside_loop_is_error) {
+    // R5.2-B: `::FOO::` at function-body scope (not inside any
+    // loop) is a hard error per the loop-scoped rule. The
+    // analyzer's "_labelStack.size() == 1" check (size 1 = the
+    // outer function-body frame) catches it.
+    const char* source = R"(
+script T {
+    on_start() {
+        ::FOO::
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+}
+
+TEST_CASE(parse_r52b_duplicate_label_is_error) {
+    // R5.2-B: two `::FOUND::` in the same for-body is a hard
+    // error on the second declaration.
+    const char* source = R"(
+script T {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            ::FOUND::
+        }
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+    bool found = false;
+    for (const auto& e : result.errors) {
+        if (e.message.find("duplicate") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+}
+
 TEST_SUITE_END

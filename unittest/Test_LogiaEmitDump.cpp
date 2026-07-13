@@ -621,4 +621,105 @@ script ChainBare {
     CHECK(containsFlat(_lastDump.emittedLua, "if (n < 0) then"));
 }
 
+// ============================================================
+// R5.2-B (2026-07-14): label declarations, break :L, continue :L
+// ============================================================
+
+// R5.2-B — `::FOUND::` lowers to Lua 5.2+ native `::FOUND::`.
+TEST_CASE(emit_dump_29_label_decl_emits_marker) {
+    const char* src = R"(
+script Lab {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            break
+        }
+    }
+}
+)";
+    dumpCase("29_label_decl_emits_marker", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "::FOUND::"));
+}
+
+// R5.2-B — `break :FOUND` lowers to `goto FOUND` (the only way
+// to exit an outer loop in Lua 5.2+).
+TEST_CASE(emit_dump_30_break_with_label_emits_goto) {
+    const char* src = R"(
+script Brk {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            break :FOUND
+        }
+    }
+}
+)";
+    dumpCase("30_break_with_label_emits_goto", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "goto FOUND"));
+}
+
+// R5.2-B (2026-07-14, scope decision) — `continue :L` is NOT
+// supported in this slice. The parser rejects it. Test that
+// the source fails to compile and the message names "continue".
+TEST_CASE(emit_dump_31_continue_label_rejected) {
+    const char* src = R"(
+script Cont {
+    on_start() {
+        for (var i : 1) {
+            continue :OUTER
+        }
+    }
+}
+)";
+    dumpCase("31_continue_label_rejected", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("continue"));
+}
+
+// R5.2-B — `::L::` at function-body scope (no enclosing loop) is
+// a hard error from the analyzer.
+TEST_CASE(emit_dump_32_label_outside_loop_is_error) {
+    const char* src = R"(
+script Out {
+    on_start() {
+        ::FOO::
+    }
+}
+)";
+    dumpCase("32_label_outside_loop_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("outside loop"));
+}
+
+// R5.2-B — `break :NEVER` referencing an undeclared label is a
+// hard error.
+TEST_CASE(emit_dump_33_undefined_label_is_error) {
+    const char* src = R"(
+script Und {
+    on_start() {
+        for (var i : 1) {
+            break :NEVER
+        }
+    }
+}
+)";
+    dumpCase("33_undefined_label_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("NEVER"));
+}
+
+// R5.2-B — duplicate `::FOUND::` in the same loop is a hard
+// error from the analyzer.
+TEST_CASE(emit_dump_34_duplicate_label_is_error) {
+    const char* src = R"(
+script Dup {
+    on_start() {
+        for (var i : 1) {
+            ::FOUND::
+            ::FOUND::
+        }
+    }
+}
+)";
+    dumpCase("34_duplicate_label_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("duplicate"));
+}
+
 TEST_SUITE_END

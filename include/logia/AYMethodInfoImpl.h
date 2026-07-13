@@ -57,7 +57,7 @@
 // detail::TlsReturnSlot below.
 // ============================================================
 
-#include "IAYReflect.h"
+#include "ayreflect/IReflect.h"
 #include "AYReflect.h"
 
 #include <cstring>
