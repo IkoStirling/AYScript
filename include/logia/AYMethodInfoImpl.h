@@ -66,6 +66,7 @@
 #include <utility>
 #include <vector>
 #include <array>   // R4.1 (2026-07-13): std::array<T, N> in readArg
+#include <typeinfo>
 
 namespace ayt::script::logia::reflect
 {
@@ -125,19 +126,54 @@ namespace detail
     // falls through to the by-value / by-ref branch below (which
     // would silently fail at compile time for that container — a
     // user-side error, not a bridge bug).
+    //
+    // Note: readArg's ArgT is the *raw* PMF param type, which may
+    // be const std::vector<int>& (input) or std::vector<int>&
+    // (out-param) or std::vector<int> (by-value). The trait must
+    // match the *underlying* std::vector, so we strip ref/const
+    // in the trait's argument before dispatching.
     template <typename>
     struct is_std_vector : std::false_type {};
     template <typename T, typename A>
     struct is_std_vector<std::vector<T, A>> : std::true_type {};
     template <typename X>
-    inline constexpr bool is_std_vector_v = is_std_vector<X>::value;
+    inline constexpr bool is_std_vector_v = is_std_vector<
+        std::remove_cv_t<std::remove_reference_t<X>>>::value;
 
     template <typename>
     struct is_std_array : std::false_type {};
     template <typename T, size_t N>
     struct is_std_array<std::array<T, N>> : std::true_type {};
     template <typename X>
-    inline constexpr bool is_std_array_v = is_std_array<X>::value;
+    inline constexpr bool is_std_array_v = is_std_array<
+        std::remove_cv_t<std::remove_reference_t<X>>>::value;
+
+    // R4.2 (2026-07-13): is_out_param_v<ArgT> is true iff ArgT is
+    // a non-const lvalue reference or a non-const pointer. The
+    // bridge uses this to heap-allocate a fresh T and pass a
+    // writable reference/pointer; readArg's out-param branch
+    // returns a reference/pointer into the slot. const T& /
+    // const T* / by-value T are NOT out-params (input-only).
+    //
+    // Implementation note: the partial specializations match the
+    // *stripped* T, then we re-check the const qualification of
+    // the original ArgT. `T&` would match both `const int&` and
+    // `int&` because the partial spec doesn't see const; we
+    // therefore use SFINAE on the original ArgT to disambiguate.
+    template <typename ArgT, typename = void>
+    struct is_out_param : std::false_type {};
+    // non-const T&: enable_if checks the original ArgT is not const.
+    template <typename ArgT>
+    struct is_out_param<ArgT, std::enable_if_t<
+        std::is_lvalue_reference_v<ArgT> &&
+        !std::is_const_v<std::remove_reference_t<ArgT>>>> : std::true_type {};
+    // non-const T*: similar.
+    template <typename ArgT>
+    struct is_out_param<ArgT, std::enable_if_t<
+        std::is_pointer_v<ArgT> &&
+        !std::is_const_v<std::remove_pointer_t<ArgT>>>> : std::true_type {};
+    template <typename T>
+    inline constexpr bool is_out_param_v = is_out_param<T>::value;
 } // namespace detail
 
 // ===== MethodInfoImpl<T, Ret, Args...> =====
@@ -172,11 +208,16 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
     }
     template <std::size_t... I>
     const void* invokeImpl(T* self, const void* const* args, std::index_sequence<I...>) const {
+        // R4.2 (2026-07-13): direct pack expansion preserves
+        // lvalue ref category for out-params (T& / T*). For
+        // input-only types the result is by value; the PMF binds
+        // a const ref or by-value param to it. Both impls here
+        // and in the const specialization use this form.
         if constexpr (std::is_same_v<Ret, void>) {
-            (self->*_pmf)(readArg<I>(args)...);
+            (self->*_pmf)(read<I>(args)...);
             return nullptr;
         } else {
-            Ret r = (self->*_pmf)(readArg<I>(args)...);
+            Ret r = (self->*_pmf)(read<I>(args)...);
             return storeReturn(std::move(r));
         }
     }
@@ -249,6 +290,54 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
     // (see file-level "Slot convention" comment). readArg returns the
     // parameter by value to the PMF call; for const T& / T* / etc.,
     // the implicit conversion gives the PMF the right reference.
+    // R4.2 (2026-07-13): out-param readArg — returns T& (for T&)
+    // or T* (for T*) into the slot. Called by invokeImpl's
+    // if-constexpr dispatch when ArgT is a non-const lvalue ref
+    // or non-const pointer (the C++ "out-param" idiom). The PMF
+    // writes through this; the bridge reads the heap T back to
+    // Lua in the post-invoke write-back loop.
+    //
+    // Two overloads — one for T&, one for T* — so each has a
+    // single deduced return type (avoids MSVC C3487 with mixed
+    // ref/pointer return paths in the same template).
+    template <std::size_t I, typename ArgT_ = std::tuple_element_t<I, std::tuple<Args...>>,
+              std::enable_if_t<std::is_lvalue_reference_v<ArgT_>, int> = 0>
+    static ArgT_ readOutArg(const void* const* args) {
+        using ArgT = ArgT_;
+        using Target = std::remove_reference_t<ArgT>;
+        const void* slot = (args && args[I]) ? args[I] : nullptr;
+        if (!slot) {
+            static thread_local Target fallback{};
+            return fallback;
+        }
+        Target* p = static_cast<Target*>(const_cast<void*>(slot));
+        return static_cast<ArgT>(*p);
+    }
+
+    template <std::size_t I, typename ArgT_ = std::tuple_element_t<I, std::tuple<Args...>>,
+              std::enable_if_t<std::is_pointer_v<ArgT_>, int> = 0>
+    static ArgT_ readOutArg(const void* const* args) {
+        using ArgT = ArgT_;
+        using Target = std::remove_pointer_t<ArgT>;
+        const void* slot = (args && args[I]) ? args[I] : nullptr;
+        if (!slot) {
+            static thread_local Target zero{};
+            return &zero;
+        }
+        Target* p = static_cast<Target*>(const_cast<void*>(slot));
+        return p;
+    }
+
+    template <std::size_t I>
+    static decltype(auto) read(const void* const* args) {
+        using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
+        if constexpr (detail::is_out_param_v<ArgT>) {
+            return readOutArg<I>(args);
+        } else {
+            return readArg<I>(args);
+        }
+    }
+
     template <std::size_t I>
     static auto readArg(const void* const* args) {
         using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
@@ -279,20 +368,41 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
             // pointer in the slot. We copy-construct the parameter
             // from that heap pointer; the bridge deletes the heap
             // pointer after invoke() returns via the cleanup queue.
+            // Note: ArgT may be `const std::vector<T>&` (input) or
+            // `std::vector<T>&` (out-param). Strip the reference
+            // when casting slot to a pointer (you can't have a
+            // pointer to a reference).
             if (!slot) return ArgT{};
-            const auto* vp = static_cast<const ArgT*>(slot);
+            const auto* vp = static_cast<const std::remove_reference_t<ArgT>*>(slot);
+            return ArgT(*vp);
+        } else if constexpr (detail::is_std_array_v<ArgT>) {
+            // R4.1 (2026-07-13): std::vector<T> by value (or by
+            // const-ref, which is the common PMF signature). The
+            // bridge heap-allocates the vector and stores the
+            // pointer in the slot. We copy-construct the parameter
+            // from that heap pointer; the bridge deletes the heap
+            // pointer after invoke() returns via the cleanup queue.
+            if (!slot) return ArgT{};
+            const auto* vp = static_cast<const std::remove_reference_t<ArgT>*>(slot);
             return ArgT(*vp);
         } else if constexpr (detail::is_std_array_v<ArgT>) {
             // R4.1 (2026-07-13): std::array<T, N> by value (or by
             // const-ref). Same slot convention as std::vector.
             if (!slot) return ArgT{};
-            const auto* ap = static_cast<const ArgT*>(slot);
+            const auto* ap = static_cast<const std::remove_reference_t<ArgT>*>(slot);
             return ArgT(*ap);
         } else if constexpr (std::is_pointer_v<ArgT>) {
-            // T* / const T* / etc. — slot is T*; we pass through.
+            // T* / const T* / etc. — slot is a T* (pointer to T,
+            // e.g. heap-allocated T for an out-param, or pointer
+            // to a stack slot for an in-param). We pass through
+            // with the right const qualification so the PMF gets
+            // a pointer it can write through (T*) or read from
+            // (const T*). R4.2: T* out-params are now correctly
+            // supported because the bridge stores `argPtrs[i] =
+            // heapPtr` (a T*) and the PMF gets a writable T*.
             if (!slot) return ArgT{};
             using Inner = std::remove_cv_t<std::remove_pointer_t<ArgT>>;
-            const Inner* p = *static_cast<const Inner* const*>(slot);
+            auto* p = static_cast<Inner*>(const_cast<void*>(slot));
             return const_cast<ArgT>(p);
         } else if constexpr (std::is_lvalue_reference_v<ArgT>) {
             // const T& / T& — slot is T*; deref and return reference.
@@ -307,7 +417,12 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
                 return fallback;
             }
             using Target = std::remove_reference_t<ArgT>;
-            return *static_cast<Target*>(const_cast<void*>(slot));
+            // R4.2 (2026-07-13): decltype(auto) return preserves the
+            // reference category. For non-const T& (out-param), the
+            // PMF gets a writable reference into the slot; for const
+            // T& (input), the static_cast adds the const so the
+            // deduced return type matches ArgT exactly.
+            return static_cast<ArgT>(*static_cast<Target*>(const_cast<void*>(slot)));
         } else {
             // By value (primitive or struct). For trivially-copyable
             // types, memcpy the slot. For struct types, the bridge
@@ -368,6 +483,35 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
         }
         return cache;
     }
+
+    // R4.2 (2026-07-13): out-param detection. True iff ArgT is
+    // a non-const lvalue reference or a non-const pointer; the
+    // C++ idiom for "write-back" parameters. const T& / const T* /
+    // by-value T are NOT out-params.
+    bool getParamIsOut(size_t index) const override {
+        if (index >= sizeof...(Args)) return false;
+        return paramIsOutAtImpl(index, std::index_sequence_for<Args...>{});
+    }
+
+    template <std::size_t... I>
+    bool paramIsOutAtImpl(size_t index, std::index_sequence<I...>) const {
+        bool result = false;
+        ((index == I ? (result = paramIsOutForIndex<I>()), 0 : 0), ...);
+        return result;
+    }
+
+    template <std::size_t I>
+    static constexpr bool paramIsOutForIndex() {
+        using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
+        if constexpr (std::is_lvalue_reference_v<ArgT>) {
+            // T& (non-const lvalue ref) is out; const T& is not.
+            return !std::is_const_v<std::remove_reference_t<ArgT>>;
+        } else if constexpr (std::is_pointer_v<ArgT>) {
+            // T* (non-const pointer) is out; const T* is not.
+            return !std::is_const_v<std::remove_pointer_t<ArgT>>;
+        }
+        return false;
+    }
 };
 
 // ===== const-PMF specialization =====
@@ -402,11 +546,13 @@ struct MethodInfoImplConst : public ayt::reflect::IMethodInfo {
 private:
     template <std::size_t... I>
     const void* invokeImpl(const T* self, const void* const* args, std::index_sequence<I...>) const {
+        // R4.2 (2026-07-13): see non-const invokeImpl — direct
+        // pack expansion preserves lvalue ref for out-params.
         if constexpr (std::is_same_v<Ret, void>) {
-            (self->*_pmf)(readArg<I>(args)...);
+            (self->*_pmf)(read<I>(args)...);
             return nullptr;
         } else {
-            Ret r = (self->*_pmf)(readArg<I>(args)...);
+            Ret r = (self->*_pmf)(read<I>(args)...);
             return storeReturn(std::move(r));
         }
     }
@@ -430,6 +576,54 @@ private:
         }
     }
 
+    // R4.2 (2026-07-13): out-param readArg — returns T& (for T&)
+    // or T* (for T*) into the slot. Called by invokeImpl's
+    // if-constexpr dispatch when ArgT is a non-const lvalue ref
+    // or non-const pointer (the C++ "out-param" idiom). The PMF
+    // writes through this; the bridge reads the heap T back to
+    // Lua in the post-invoke write-back loop.
+    //
+    // Two overloads — one for T&, one for T* — so each has a
+    // single deduced return type (avoids MSVC C3487 with mixed
+    // ref/pointer return paths in the same template).
+    template <std::size_t I, typename ArgT_ = std::tuple_element_t<I, std::tuple<Args...>>,
+              std::enable_if_t<std::is_lvalue_reference_v<ArgT_>, int> = 0>
+    static ArgT_ readOutArg(const void* const* args) {
+        using ArgT = ArgT_;
+        using Target = std::remove_reference_t<ArgT>;
+        const void* slot = (args && args[I]) ? args[I] : nullptr;
+        if (!slot) {
+            static thread_local Target fallback{};
+            return fallback;
+        }
+        Target* p = static_cast<Target*>(const_cast<void*>(slot));
+        return static_cast<ArgT>(*p);
+    }
+
+    template <std::size_t I, typename ArgT_ = std::tuple_element_t<I, std::tuple<Args...>>,
+              std::enable_if_t<std::is_pointer_v<ArgT_>, int> = 0>
+    static ArgT_ readOutArg(const void* const* args) {
+        using ArgT = ArgT_;
+        using Target = std::remove_pointer_t<ArgT>;
+        const void* slot = (args && args[I]) ? args[I] : nullptr;
+        if (!slot) {
+            static thread_local Target zero{};
+            return &zero;
+        }
+        Target* p = static_cast<Target*>(const_cast<void*>(slot));
+        return p;
+    }
+
+    template <std::size_t I>
+    static decltype(auto) read(const void* const* args) {
+        using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
+        if constexpr (detail::is_out_param_v<ArgT>) {
+            return readOutArg<I>(args);
+        } else {
+            return readArg<I>(args);
+        }
+    }
+
     template <std::size_t I>
     static auto readArg(const void* const* args) {
         using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
@@ -450,14 +644,31 @@ private:
             const auto* ap = static_cast<const ArgT*>(slot);
             return ArgT(*ap);
         } else if constexpr (detail::is_std_vector_v<ArgT>) {
-            // R4.1: std::vector<T> mirror of the non-const impl.
+            // R4.1 (2026-07-13): std::vector<T> by value (or by
+            // const-ref, which is the common PMF signature). The
+            // bridge heap-allocates the vector and stores the
+            // pointer in the slot. We copy-construct the parameter
+            // from that heap pointer; the bridge deletes the heap
+            // pointer after invoke() returns via the cleanup queue.
+            // Note: ArgT may be `const std::vector<T>&` (input) or
+            // `std::vector<T>&` (out-param). Strip the reference
+            // when casting slot to a pointer (you can't have a
+            // pointer to a reference).
             if (!slot) return ArgT{};
-            const auto* vp = static_cast<const ArgT*>(slot);
+            const auto* vp = static_cast<const std::remove_reference_t<ArgT>*>(slot);
             return ArgT(*vp);
+        } else if constexpr (detail::is_std_array_v<ArgT>) {
+            // R4.1: std::array<T, N> mirror. Strip ref from ArgT
+            // before casting to pointer (see vector branch comment).
+            if (!slot) return ArgT{};
+            const auto* ap = static_cast<const std::remove_reference_t<ArgT>*>(slot);
+            return ArgT(*ap);
         } else if constexpr (std::is_pointer_v<ArgT>) {
+            // R4.2: slot is T* (pointer to T); pass through.
+            // Mirror of the non-const impl's pointer branch.
             if (!slot) return ArgT{};
             using Inner = std::remove_cv_t<std::remove_pointer_t<ArgT>>;
-            const Inner* p = *static_cast<const Inner* const*>(slot);
+            auto* p = static_cast<Inner*>(const_cast<void*>(slot));
             return const_cast<ArgT>(p);
         } else if constexpr (std::is_lvalue_reference_v<ArgT>) {
             if (!slot) {
@@ -465,7 +676,10 @@ private:
                 return fallback;
             }
             using Target = std::remove_reference_t<ArgT>;
-            return *static_cast<Target*>(const_cast<void*>(slot));
+            // R4.2: decltype(auto) preserves the reference category.
+            // const T& gets a const reference; T& gets a writable
+            // reference into the slot (out-param write-back).
+            return static_cast<ArgT>(*static_cast<Target*>(const_cast<void*>(slot)));
         } else {
             ArgT v{};
             if (slot) {
@@ -513,6 +727,30 @@ private:
             cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
         }
         return cache;
+    }
+
+    // R4.2 (2026-07-13): out-param detection (mirrors non-const impl).
+    bool getParamIsOut(size_t index) const override {
+        if (index >= sizeof...(Args)) return false;
+        return paramIsOutAtImpl(index, std::index_sequence_for<Args...>{});
+    }
+
+    template <std::size_t... I>
+    bool paramIsOutAtImpl(size_t index, std::index_sequence<I...>) const {
+        bool result = false;
+        ((index == I ? (result = paramIsOutForIndex<I>()), 0 : 0), ...);
+        return result;
+    }
+
+    template <std::size_t I>
+    static constexpr bool paramIsOutForIndex() {
+        using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
+        if constexpr (std::is_lvalue_reference_v<ArgT>) {
+            return !std::is_const_v<std::remove_reference_t<ArgT>>;
+        } else if constexpr (std::is_pointer_v<ArgT>) {
+            return !std::is_const_v<std::remove_pointer_t<ArgT>>;
+        }
+        return false;
     }
 };
 

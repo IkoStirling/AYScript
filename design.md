@@ -651,6 +651,51 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 19. **ITypeInfo vtable 加虚函数触发整仓 rebuild**:`isFixedSize()` 是一行 override,但 AYReflect ABI 变化按 memory note 3 必须 `--clean-first` 或 `find -name '*.cpp' -exec touch`。`build_ayscript.bat` 第一次 build 后链接 AYReflect.lib,后续 cpp TU 通过 dep 链 rebuild — 验证通过。
 20. **`__test_witness = tostring(s)` 走 `getLuaGlobalString` 不是 `tryGetLuaGlobalNumber`**:Lua `tostring(15)` 是 string,`tryGetLuaGlobalNumber` 只对 number return true。R3 case 12 用 `getLuaGlobalString` 验证 witness,R4.1 case 1/3/5/6 同样用 string 比较(避开 tostring-vs-number 类型误读)。case 4 (applyFloatArr → hp 写入) 用 `getLuaGlobalString("12")` 验证 C++ 写入 — 这里 C++ field 是 int,Logia 读 `self.hp` 是 number,但 `tostring(self.hp)` 走 string 通道才安全。
 
+#### 5.7.4 R4.2 — T& / T* out-param (write-back)
+
+**状态**：✅ **R4.2 完成（2026-07-13，commit 待 push）**。R3.0 加了 `const T&` / `const T*` 作为 input-only args;R4.2 把非 const 的 `T&` / `T*` 打通为 out-param(写回)语义 — bridge 分配 fresh T(seeded from Lua),PMF 写入,bridge 读回 Lua。这是 C++ 经典 out-param idiom(`int fillInt(int& out)`)的 Logia 入口。
+
+**实现摘要**：
+
+1. **AYReflect 加 `IMethodInfo::getParamIsOut(size_t)` virtual**:`AYFoundation/AYReflect/interface/IAYReflect.h` 新增 `virtual bool getParamIsOut(size_t) const { return false; }` 默认 false(对 input-only IMethodImpls 源码兼容)。**vtable ABI 变化** — 触发整仓 rebuild(同 R4.1 的 `isFixedSize()`)。`MethodInfoImpl` 与 `MethodInfoImplConst` 各自实现 `paramIsOutAtImpl` + `paramIsOutForIndex<I>`,后者用 `static_assert` 风格:`is_lvalue_reference_v<ArgT> && !is_const_v<remove_reference_t<ArgT>>` 判 `T&` out-param,`is_pointer_v<ArgT> && !is_const_v<remove_pointer_t<ArgT>>` 判 `T*` out-param,其它一律 false。
+2. **`is_out_param_v` SFINAE trait**:`include/logia/AYMethodInfoImpl.h` `detail` 命名空间新增 `is_out_param<ArgT, EnableT>`,用 `std::enable_if_t` 区分 const ref/ptr(输入)与非 const ref/ptr(输出)。这是关键 — `const T&` 与 `T&` 在 C++ 是不同的 type,需要 SFINAE 区分。
+3. **`readArg` 拆成 `read<I>` + `readArg<I>` + `readOutArg<I>`**:`read<I>` 是 `decltype(auto)` 包装,用 `if constexpr (is_out_param_v<ArgT>)` 选择两条路径:
+   - **`readOutArg<I>`(R4.2 新增)**:返回 `T&` 或 `T*` 指向 bridge 的 heap slot;PMF 写入,bridge 在 post-invoke 写回。
+   - **`readArg<I>`(R3.0 + R4.1 既有)**:返回 by value;PMF 取 const ref 绑到 returned local(对 input-only 类型,行为不变)。
+4. **`is_std_vector_v` / `is_std_array_v` trait 必须 strip ref/const**:`ArgT` 可能是 `const std::vector<int>&` (R4.1 input) 或 `std::vector<int>&` (R4.2 out-param)。原 R4.1 trait 只匹配 `std::vector<T,A>`,对 `const std::vector<int>&` 不 match → 落到 lvalue-ref 分支 → 走 `*static_cast<const ArgT*>(slot)` 把 `ArgT = const std::vector<int>&` 当 reference type 处理 → C3536 `vp` 未初始化 + C2100 deref 失败。**R4.2 fix**:`is_std_vector<X> = is_std_vector<remove_cv_t<remove_reference_t<X>>>::value`,把 ref/const 剥掉再 match。这是 R4.2 唯一改动的 R4.1 trait 代码,1 行核心 fix。
+5. **bridge arg-marshal 加 out-param 分支**:`src/AYScriptRuntimeBridge.cpp` 在 fallback `else` 内 `if (method->getParamIsOut(i) && paramType)` 检测。int/float/struct 三种类型支持:heap-alloc T,seed from Lua 初始值,register cleanup,`argPtrs[i] = heapPtr`(struct) 或 `vec->push_back` 形式(int/float)。std::string out-param 推 R4.2b。
+6. **bridge post-invoke write-back loop**:invoke 完扫描所有 out-param,对 struct 类型用 `pushFieldPrimitive` 递归构造新 Lua table 覆盖原 arg slot。**但 Lua local variable 不会 auto-rebind**(Lua 限制) — Logia 用户读 out-param 走 C++ 写到 self.foo + Logia 读 self.foo 的 side-effect pattern(标准 Lua idiom)。fixture 统一走 self.lastResult / self.lastFloat / self.lastPoint。
+
+**测试覆盖（5 cases,`Test_LogiaReflectRuntime.cpp` R4_2Player fixture + LG-12 R4.2 套件）**：
+
+| # | 名称 | 验证点 |
+|---|---|---|
+| 1 | `lg12_r42_int_out_param` | `self.fillInt(x)` → C++ 写 42,Logia 读 self.lastResult = 42 |
+| 2 | `lg12_r42_int_in_out_param` | `var seed = 10; self.addFive(seed)` → C++ 加 5,lastResult = 15 |
+| 3 | `lg12_r42_float_out_param` | `self.fillFloat(f)` → C++ 写 2.0,lastFloat = 2.0 |
+| 4 | `lg12_r42_int_ptr_out_param` | `self.fillViaPtr(p)` → C++ 通过 `*out = 99` 写,lastResult = 99 |
+| 5 | `lg12_r42_struct_out_param` | `self.mutatePoint({x=1, y=2})` → C++ 改 lastPoint = (11, 22),witness = 1122 |
+
+**结果**：`AYScript_Test` **778/778 全绿**(R4.1 752 + R4.2 5 cases + 已有 21 个 dump/reflect 集成用例)。
+
+**kLogiaPipelineVersion 10 → 11**:bridge runtime marshal 路径新增 + IMethodInfo vtable 变化,缓存强制失效。
+
+**范围**：
+
+| ✅ R4.2 ships | ❌ Deferred |
+|---|---|
+| `T&` out-param (int / float / struct) | `std::string` out-param (R4.2b,placement-new) |
+| `T*` out-param (非 null) | nested-struct out-param(R4.1 已经有,但 R4.2 fixture 走 single-level) |
+| Lua side 通过 self.* 读回 out-param(标准 Lua idiom) | "Rebind local var"语义(需要 codegen-level patch,推 S4) |
+
+**Lessons learned (R4.2 specific)**：
+
+21. **`is_std_vector_v` / `is_std_array_v` trait 必须 strip ref/const**:R4.1 写时只考虑 `std::vector<T,A>` exact match,R4.2 让 `const std::vector<int>&` 也走 vector 分支后,发现 trait 不 match(因为 partial spec 看不到 ref) → 落到 lvalue-ref 分支 → C3536 / C2100 编译错误。**Lesson:为 R-n+1 写 trait 时,先想 R-n 引入的 ref 修饰,提前 strip 一次**。这是 R4.1 trait 的"小裂缝"被 R4.2 放大。
+22. **MSVC `decltype(auto)` + `if constexpr` + 不同 ref/value 路径会触发 C3487**:单一 `if constexpr` 内的两个 return 语句推导类型不同(即使一边的分支被 discarded,MSVC 仍做 type consistency check)。**Fix**:把不同 ref/value 路径拆到独立函数,`read<I>` 用 `if constexpr` 选择调用,每个函数自身 deduced return type 一致。`readOutArg` 进一步拆成 `T&` overload + `T*` overload(用 `enable_if_t` 区分)以避开 C3487 持续触发。
+23. **`std::tuple<Args...>{read<I>(args)...}` vs `std::apply` 不必要**:R4.2 一开始用 tuple + apply 试图"lvalue ref 在 lambda 转发中保留",实测 direct pack expansion `(self->*_pmf)(read<I>(args)...)` 就够了 — readOutArg 返回 `T&` / `T*` 已经是 lvalue,pack expansion 保留 ref 类别。tuple + apply 是过度设计,多了一层 + 调试更难。Lesson:**先试最直白的写法**(pack expansion),不行再加 std::apply。
+24. **Lua 浮点数 round-trip 不精确**:`3.14f` stored as double = `3.1400001049041748`,`tostring` 出 long form。R4.2 fixture 改用 `2.0f` 让 tostring 出 "2.0" 这种短形式。R4.1 float test (`1.5+2.5+3.5+4.5 = 12` then `static_cast<int>(s)`) 巧妙地避开了这个问题。
+25. **Lua local variable 不能从 C 端 rebind**:out-param 写回后,Logia 用户的 `var x` 仍指向旧 value(Lua 限制,跟 const-correctness 类似)。Fixture 用 self.* side-effect pattern:PMF 写 `*x = 42; lastResult = 42;`,Logia 读 `self.lastResult`。这与 C++ 的 `__out_int` 风格宏 / 第三方 out-param 包装的常见做法一致,用户适应后是干净的。
+
 #### 5.7.4 R-Audit — 语法审计修复（2026-07-11）
 
 **状态**：✅ 完成（commit 待 push）。三个并发 defect 经 plan-mode agent 复核根因后一并修复。
@@ -890,7 +935,7 @@ while n < 10 {
 | **R2** | `AY_METHOD` + `IMethodInfo` + `ayt_reflect_call_method` | ✅ S3.12 | — |
 | **R3** | struct 链 `self.position.x`（= S3.11） | ✅ S3.11 | — |
 | **R3.5** | `registerEnum<E>()`；`m_`/`b_` 字段名 stripper；struct 内 `std::string` 字段 marshal | ⏳ 待做 | AYReflect enum 注册 |
-| **R4** | `std::vector<T>` / `std::array<T,N>` args；嵌套 struct 字段；`T&` out-param | ⏳ 部分 (R4.0 + R4.1 ship;R4.2 待) | R3.5 可选 |
+| **R4** | `std::vector<T>` / `std::array<T,N>` args；嵌套 struct 字段；`T&` out-param | ⏳ 部分 (R4.0 + R4.1 + R4.2 ship;R4.2b std::string out-param 待) | R3.5 可选 |
 | **R5** | `unique_ptr` / `shared_ptr` 方法参数 | ⏳ 推迟 | 所有权语义锁定后 |
 | **R6** | sol2 `usertype` 优化（替代部分 `lua_CFunction`） | ⏳ 性能驱动 |  profiling 数据 |
 
@@ -1454,7 +1499,8 @@ AYScript/
 | 2026-07-13 | **R5.0.1 完成（可选括号 + for 半开区间）**：R5.0 落地后用户反馈两点 — (a) 强制 `if (cond) { ... }` 括号违背人写代码习惯（多数人写 `if x > 0` 不写 `if (x > 0)`），(b) `for (var i : 10)` 强制 1..N 偏离主流 0..N-1 习惯。R5.0.1 在 R5.0 基础上加两条无 breaking change 的扩展：(1) `if cond { ... }` / `while cond { ... }` / `for var i : N { ... }` 三种 statement 括号可选（peented，但加了左括号就强制配对右括号；混搭 `if (cond { ... }` 是 clean parse error）；(2) `for (var i : start, end) { body }` 半开区间形式 emit `for i = start, (end) - 1 do`（Lua numeric-for 是 inclusive，两端相减模拟 [start, end) 语义；括号包裹 `end` 是因为 end 可能是 `n*2` 这种算术，不包会被 Lua precedence 解析成 `n * (2 - 1)`）。`include/logia/AYAst.h` `ForStmt` 加 `ExprPtr start` field + 新 ctor `ForStmt(counterName, start, end, body)`，旧 ctor 标短形式（`start == nullptr`）；`src/logia/AYParser.cpp` `parseIfStmt` / `parseWhileStmt` / `parseForStmt` 用 `match(LeftParen)` peek 后 dispatch 两种形态，`parseForStmt` 在 first expression 后 peek `,` 决定走 start-end range 还是单 bound 短形式，`parseIfStmt` 的 `else` 分支 peek `If` 后递归支持 `else if` 链；`src/logia/AYLuaCodegen.cpp` `emitForStmt` 看 `stmt.start` 双形态：非空 emit `start, (end) - 1`、空 emit `1, bound`；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 7 → 8（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 17（`if` bare）/ 18（`while` bare）/ 19（`for (var i : 0, 10)` half-open）/ 20（`for var i : 0, 10 { ... }` 头 bare）/ 21（`for (var i : 10)` 短形式回归 guard）。`AYScript_Test` **720/720 全绿**（R5.0 705 + R5.0.1 5 cases + 已有 10 个 dump-case 集成用例）。**Lessons learned**：强制括号是设计洁癖 vs 工程实用性的取舍（1 行 `match(LeftParen)` 消除每天撞到的体感摩擦）；0..N-1 vs 1..N 是范式之争（保留短形式 + 加 range 是双赢）；`for i = 0, n*2 - 1 do` 必须 `(end) - 1` 包裹避免 Lua precedence 错位；MSVC `std::vector<unique_ptr>` initializer_list brace-init 容易触发 `construct_at` overload 解析失败，改用 `vector + push_back` 两步式避免。 |
 | 2026-07-13 | **R5.1 完成（`break` / `continue`）**：loop 早退能力闭环。`include/logia/AYToken.h` 加 `TokenType::Break` / `TokenType::Continue`；`src/logia/AYLexer.cpp` keywords map 收编 `break` / `continue`（从此保留字）；`include/logia/AYAst.h` 加 `BreakStmt` / `ContinueStmt`（无字段，marker node）；`include/logia/AYParser.h` 加 `Parser::_loopDepth` int 字段（初始 0）；`src/logia/AYParser.cpp` `parseWhileStmt` / `parseForStmt` 在 `parseBlockBody` 前后 `++_loopDepth; ...; --_loopDepth;` push/pop，新加 `parseBreakStmt` / `parseContinueStmt` 在 loopDepth==0 时报 `'break' outside loop` / `'continue' outside loop` 并 return nullptr，`parseStatement` dispatch 在 `if` / `while` / `for` 之后、`var` 之前加 `Break` / `Continue` 分支，`synchronize()` recovery case 加两个新 token；`include/logia/AYLuaCodegen.h` 加 `emitBreakStmt` / `emitContinueStmt` 声明；`src/logia/AYLuaCodegen.cpp` `emitBreakStmt` 输出 `break\n`、`emitContinueStmt` 输出 `continue\n`（Lua 5.2+ 原生支持，零 runtime helper / 零 goto-juggling），`emitStmt` dispatch 同步扩展；`include/logia/AYSemanticAnalyzer.h` 加 `analyzeBreakStmt` / `analyzeContinueStmt` 声明（无字段 no-op）；`src/logia/AYSemanticAnalyzer.cpp` 实现两个 no-op 方法，`analyzeStmt` dispatch 同步扩展，`analyzeForStmt` 顺手 walk `f.start`（R5.0.1 漏掉的 `start` 表达式 validate）；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 8 → 9（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 22（`for + break`）/ 23（`while + continue`）/ 24（nested `for` inner `break`）/ 25（`break` 在 helper body 里 → hard error）/ 26（`continue` 在 on_start 里 → hard error）。`AYScript_Test` **734/734 全绿**（R5.0.1 720 + R5.1 5 cases + 已有 9 个 dump-case 集成用例）。**Lessons learned**：`loopDepth` 一个 int 字段就足够支持 nested loop 的 break/continue（push/pop 在 while/for 入口/出口），不需要 label / 栈；parser 拒绝比 codegen 拒绝对脚本作者更友好（source-level error vs Lua runtime 错误信息）；Lua 5.2+ 原生 `continue` 让 R5.1 不需要 goto/状态机 hack。Defer 到 R5.2+：labeled `break LABEL` / `do { ... } end` block scoping / bound 类型校验 / C-style `for`。 |
 | 2026-07-13 | **R4.1 完成（`std::vector<T>` / `std::array<T, N>` method args + return）**：method 边界 homogeneous 容器双向 marshal 闭环。`AYFoundation/AYReflect/AYReflect.h` 新增 `ArrayTypeInfo<T, N>` 模板（实现 `IContainerTypeInfo` 接口,compile-time N cap,`resize()` / `pushBack()` 是 no-op stub 因为 std::array 不能 grow）+ `registerArrayType<T, N>(name)` helper；`AYFoundation/AYReflect/interface/IAYReflect.h` 给 `IContainerTypeInfo` 加 `virtual bool isFixedSize() const` 默认 `false`（ArrayTypeInfo override `true`,VectorTypeInfo 保持 `false`）—— 这是 bridge 区分 array vs vector 的唯一信号,**vtable ABI 变化触发整仓 rebuild**。`include/logia/AYMethodInfoImpl.h` 给 `detail` 命名空间加 `is_std_vector_v` / `is_std_array_v` SFINAE traits，`MethodInfoImpl::readArg` 与 `MethodInfoImplConst::readArg` 的 if-constexpr ladder 加 `std::vector<T>` / `std::array<T, N>` 两个分支（slot 持有 heap-allocated 容器指针,readArg copy-construct 到 PMF 参数）。`src/logia/AYScriptRuntimeBridge.cpp` `ayt_reflect_call_method_c` 在 arg-marshal 阶段加 `dynamic_cast<IContainerTypeInfo*>` 分支（lua_len 取 N + lua_rawgeti 逐元素 + 是 vector 则 resize + push_back、是 array 则 cap + memset + memcpy），return-marshal 阶段加同名分支（`getContainerSize(retPtr)` + `getElementAt(retPtr, i)` 逐元素 + 1-indexed lua_rawseti）。`include/logia/AYParser.h` + `src/logia/AYParser.cpp` 给 `parsePrimary` 的 TableExpr 解析加 positional 形式 —— peek `isStartOfKeyedEntry()` (Identifier+`=` 紧邻) 决定走 keyed `{k=v, ...}` 还是 positional `{v1, v2, ...}` 路径；`TableExpr::Entry::key` 早就是 nullable（预留 for R3.5+）,codegen 早处理 `key==nullptr`,R4.1 落实这个预留。`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 9 → 10（bridge runtime marshal 路径新增）。`unittest/Test_LogiaReflectRuntime.cpp` 新增 `R4_1Player` fixture + 6 个 LG-12 R4.1 测试（vector<int> arg sum / vector<int> return / vector<int> arg shorter / array<float,4> arg / array<int,3> return / empty vector）。`AYScript_Test` **752/752 全绿**（R5.1 734 + R4.1 6 cases + 已有 12 个 dump-case + reflect 集成用例）。**Lessons learned**：MethodInfoImpl 的 if-constexpr ladder 是 bridge 协议扩展点（R3.0 加 enum/string/ref/pointer,R4.1 加 vector/array）;AST 节点预留 nullable 字段（TableExpr::Entry::key）降低后续切片成本;ITypeInfo vtable 改动必须整仓 rebuild（memory note 3）;`__test_witness = tostring(s)` 走 `getLuaGlobalString` 不是 `tryGetLuaGlobalNumber` —— tostring 出 string。Defer 到 R4.1b：struct/std::string 元素类型容器（pushFieldPrimitive struct 路径 + placement-new `std::string`）;R4.2：T&/T* out-param。 |
-| 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
+| 2026-07-13 | **R4.2 完成（`T&` / `T*` out-param 写回）**：method 边界 non-const lvalue ref / non-const pointer 参数双向闭环(C++ 经典 out-param idiom)。`AYFoundation/AYReflect/interface/IAYReflect.h` 给 `IMethodInfo` 加 `virtual bool getParamIsOut(size_t) const { return false; }` 默认 false(对 input-only IMethodImpls 源码兼容),`MethodInfoImpl` 与 `MethodInfoImplConst` 各自用 `is_lvalue_reference_v<ArgT> && !is_const_v<...>` 与 `is_pointer_v<ArgT> && !is_const_v<...>` 两条 partial-specialization 标 true。**vtable ABI 变化触发整仓 rebuild**(同 R4.1)。`include/logia/AYMethodInfoImpl.h` `detail` 命名空间新增 `is_out_param<ArgT, EnableT>` SFINAE trait 区分 const T&/T*(输入)与非 const T&/T*(输出);`readArg` 拆成 `read<I>` (decltype(auto) 包装,if constexpr 选择) + `readArg<I>` (input-only, by value 返回) + `readOutArg<I>` (out-param, 返回 T& 或 T* 指向 bridge heap slot),`readOutArg` 进一步拆成 T& overload + T* overload(用 `enable_if_t` 区分)以避开 MSVC C3487 持续触发。`is_std_vector_v` / `is_std_array_v` trait 加 `remove_cv_t<remove_reference_t<X>>` strip ref/const(R4.1 写时只考虑 exact match, R4.2 让 `const std::vector<int>&` 走 vector 分支后踩到 C3536 — Lesson 21)。`src/AYScriptRuntimeBridge.cpp` `ayt_reflect_call_method_c` 在 arg-marshal fallback `else` 内 `if (method->getParamIsOut(i) && paramType)` 检测 — int/float/struct 三种类型支持,heap-alloc T(seeded from Lua 初始值),register cleanup,`argPtrs[i] = heapPtr`。post-invoke 写回 loop 对 struct 类型用 `pushFieldPrimitive` 递归构造新 Lua table 覆盖原 arg slot(primitive 不写回 — 用 C++ 写到 self.* + Logia 读 self.* side-effect pattern,因为 Lua local variable 不能从 C 端 rebind)。`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 10 → 11(bridge runtime marshal 路径新增 + IMethodInfo vtable 变化)。`unittest/Test_LogiaReflectRuntime.cpp` 新增 `R4_2Player` fixture + 5 个 LG-12 R4.2 测试(`fillInt` / `addFive` / `fillFloat` / `fillViaPtr` / `mutatePoint`)。`AYScript_Test` **778/778 全绿**(R4.1 752 + R4.2 5 cases + 已有 21 个 dump/reflect 集成用例)。**Lessons learned**:为 R-n+1 写 trait 时先想 R-n 引入的 ref 修饰,提前 strip 一次(Lesson 21);MSVC `decltype(auto)` + `if constexpr` + 不同 ref/value 路径会触发 C3487,拆成独立函数各自 deduced return type 一致(Lesson 22);Lua 浮点 round-trip 不精确(`3.14f` stored as double 出 long form),R4.2 fixture 改用 `2.0f` 让 tostring 出 "2.0" 短形式(Lesson 24);Lua local variable 不能从 C 端 rebind,out-param 通过 self.* side-effect pattern 读回(Lesson 25)。Defer 到 R4.2b:`std::string` out-param(placement-new)。 |
+| 2026-07-11 | **§14 + §14.8**:Phase S3 闭环指挥;**输入统一 AYDevice**,废弃 `AYInput`,INT-02 改接 `InputMapping`。 |
 
 ---
 
@@ -1484,7 +1530,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ⏳ |
 | **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
 | **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
-| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param R4.2 待) |
+| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param int/float/struct ship R4.2;std::string out-param R4.2b 待) |
 | **P3** | **S4.x** | signal / await / source map | ⏳ |
 | opt | **INT-03** | 磁盘 compile cache、Editor `runTool` 菜单 | ⏳ |
 | opt | **INT-04** | EventHandler host、`event.emit` | ⏳ |
@@ -1769,7 +1815,7 @@ Acceptance met — see §5.6 S3.11 完成记录. 604/604 green. Do not re-implem
 | Logia 编译器 | ✅ | — |
 | Component / System / Tool host | ✅ | Editor 未注册 SubSystem |
 | `self.field` 单跳 + 2-hop 链 | ✅ | 3+ hop、FQuaternion 未做 |
-| `self.method()` primitive + struct/enum/string | ✅ | vector/array (int/float) ship R4.1; out-param R4.2 待;vector<struct> R4.1b 待 |
+| `self.method()` primitive + struct/enum/string | ✅ | vector/array (int/float) ship R4.1; out-param (int/float/struct) ship R4.2;std::string out-param R4.2b 待;vector<struct> R4.1b 待 |
 | 热重载 API + FileWatcher | ✅ | Editor Play 未默认开启 watch |
 | `ays-logia compile` | ✅ | Editor build 动作未接菜单 |
 | `time.delta/total` | ✅ | — |

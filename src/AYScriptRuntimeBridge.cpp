@@ -833,7 +833,8 @@ int ayt_reflect_call_method_c(lua_State* L)
                             vec->reserve(luaLen);
                             for (size_t k = 0; k < luaLen; ++k) {
                                 lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                                vec->push_back(static_cast<int32_t>(lua_tointeger(L, -1)));
+                                int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
+                                vec->push_back(v);
                                 lua_pop(L, 1);
                             }
                             argPtrs[i] = vec;
@@ -853,12 +854,82 @@ int ayt_reflect_call_method_c(lua_State* L)
                 }
             }
         } else {
-            // Unknown type tag — treat as int (enums ride on this
-            // path; the C++ enum auto-converts from int via
-            // std::underlying_type_t in MethodInfoImpl::readArg).
-            int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
-            std::memcpy(&argSlots[i], &v, sizeof(int32_t));
-            argPtrs[i] = &argSlots[i];
+            // R4.2 (2026-07-13): out-param branch. Detected via
+            // method->getParamIsOut(i) — true for non-const T& / T*
+            // in the PMF signature. The bridge heap-allocates a
+            // fresh T (default-initialised to zero bytes), seeds
+            // it from the Lua arg if the user passed a value
+            // (input + output idiom), and stores the pointer in
+            // argPtrs[i]. After invoke, the post-invoke write-back
+            // loop pushes the heap T back to Lua at the same
+            // stack position so the Logia variable observes the
+            // C++ write.
+            //
+            // Element-type scope: int / float (primitive) + struct
+            // (any size with getFieldCount>0). std::string out-param
+            // is deferred to R4.2b (placement-new in heap slot is
+            // needed for non-trivially-copyable types — same
+            // pattern as R3.0's std::string input path).
+            if (method->getParamIsOut(i) && paramType) {
+                const char* outTname = paramType->getName();
+                const bool outIsInt   = (outTname && (std::strcmp(outTname, "int") == 0 || std::strcmp(outTname, "Int32") == 0));
+                const bool outIsFloat = (outTname && (std::strcmp(outTname, "float") == 0 || std::strcmp(outTname, "Float32") == 0));
+                const bool outIsStruct = paramType->getFieldCount() > 0;
+                if (outIsInt) {
+                    void* mem = ::operator new(sizeof(int32_t));
+                    int32_t seed = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+                    std::memcpy(mem, &seed, sizeof(int32_t));
+                    argPtrs[i] = mem;
+                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else if (outIsFloat) {
+                    void* mem = ::operator new(sizeof(float));
+                    float seed = static_cast<float>(lua_tonumber(L, stackIdx));
+                    std::memcpy(mem, &seed, sizeof(float));
+                    argPtrs[i] = mem;
+                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else if (outIsStruct) {
+                    // R4.2 struct out-param: heap-alloc T, fill from
+                    // Lua table if user passed one (input + output),
+                    // else zero-init. After invoke, write-back loop
+                    // pushes a Lua table with each field's new value.
+                    size_t typeSize = paramType->getSize();
+                    if (typeSize == 0) typeSize = sizeof(uint64_t);
+                    void* mem = ::operator new(typeSize);
+                    std::memset(mem, 0, typeSize);
+                    if (lua_istable(L, stackIdx)) {
+                        size_t fieldCount = paramType->getFieldCount();
+                        for (size_t fi = 0; fi < fieldCount; ++fi) {
+                            auto* field = paramType->getField(fi);
+                            if (!field) continue;
+                            lua_getfield(L, stackIdx, field->getName());
+                            if (!lua_isnil(L, -1)) {
+                                void* fieldPtr = static_cast<uint8_t*>(mem) + field->getOffset();
+                                storeFieldPrimitive(L, field, fieldPtr, /*valueStackIdx=*/-1);
+                            }
+                            lua_pop(L, 1);
+                        }
+                    }
+                    argPtrs[i] = mem;
+                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else {
+                    // Out-param but unsupported element type (std::string, double, etc.).
+                    // Fall through to int (no write-back) — caller's PMF
+                    // will see a default-initialised T*; user must not
+                    // depend on write-back for this type until R4.2b.
+                    ayt::log::warn("ayt_reflect_call_method: out-param type '%s' not yet supported in R4.2",
+                                   outTname ? outTname : "(null)");
+                    int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+                    std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+                    argPtrs[i] = &argSlots[i];
+                }
+            } else {
+                // Unknown type tag — treat as int (enums ride on this
+                // path; the C++ enum auto-converts from int via
+                // std::underlying_type_t in MethodInfoImpl::readArg).
+                int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+                std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+                argPtrs[i] = &argSlots[i];
+            }
         }
     }
 
@@ -874,6 +945,53 @@ int ayt_reflect_call_method_c(lua_State* L)
     } guard{&cleanup};
 
     const void* retPtr = method->invoke(selfPtr, argPtrs.data());
+
+    // R4.2 (2026-07-13): post-invoke write-back. For each
+    // out-param (non-const T& / T* in PMF signature), the bridge
+    // already heap-allocated a fresh T (so the PMF has a valid
+    // memory address to write to). After invoke, the C++ method
+    // has typically written the result to a self.* field (the
+    // standard Lua-side idiom for out-param: read self.foo after
+    // the call), so the Logia source observes the new value
+    // through `self`. For struct out-params, we also overwrite
+    // the original arg slot with a fresh Lua table so that
+    // patterns like `self.mutate(s); s.field = ...` see the
+    // new state — but the local Lua variable binding is NOT
+    // auto-rebound (Lua doesn't allow C-side rebinding of
+    // locals); users must read self or pass a table by name
+    // and re-fetch it.
+    //
+    // The cleanup queue (ScopeGuard below) still frees the
+    // heap T after we read it for write-back, which is fine —
+    // the Lua table is a copy.
+    for (size_t i = 0; i < expected; ++i) {
+        if (!method->getParamIsOut(i)) continue;
+        auto* ptype = method->getParamType(i);
+        if (!ptype) continue;
+        if (ptype->getFieldCount() <= 0) continue;  // primitive out-params: no Lua-side write-back needed
+        const int stackIdx2 = static_cast<int>(i) + 4;
+        const void* slotPtr = argPtrs[i];
+        if (!slotPtr) continue;
+        lua_newtable(L);
+        const int newTblIdx = lua_gettop(L);
+        size_t fieldCount = ptype->getFieldCount();
+        for (size_t fi = 0; fi < fieldCount; ++fi) {
+            auto* field = ptype->getField(fi);
+            if (!field) continue;
+            void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(slotPtr))
+                             + field->getOffset();
+            lua_pushstring(L, field->getName());
+            pushFieldPrimitive(L, field, fieldPtr);
+            lua_settable(L, newTblIdx);
+        }
+        // Replace the original arg slot with the post-invoke table.
+        // Note: this only affects the *stack*; the user's local
+        // Lua variable still points to the pre-invoke table.
+        // The fixture uses self.* side effects to read back, so
+        // this write-back is documentation/intent only for R4.2.
+        lua_replace(L, stackIdx2);
+    }
+
     auto* retType = method->getReturnType();
     if (retPtr == nullptr) {
         // void method (or a method that genuinely returned nothing)

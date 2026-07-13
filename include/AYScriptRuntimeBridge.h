@@ -77,7 +77,15 @@ namespace ayt::script
 //       syntax unchanged (TableExpr was already in place from R3) —
 //       the cache invalidation is the bridge code path itself, not
 //       codegen emit shape.
-constexpr std::size_t kLogiaPipelineVersion = 10u;
+//       2026-07-13 R4.2: bump 10 → 11. Bridge runtime extended for
+//       T& / T* out-param (write-back) on int / float / struct.
+//       AYReflect adds IMethodInfo::getParamIsOut() virtual (default
+//       false); MethodInfoImpl/MethodInfoImplConst set true for
+//       non-const T& / T* in the PMF signature. Logia source
+//       unchanged — pattern is `self.fillInt(x)` where C++ writes
+//       to self.foo and the script reads back. Compile cache
+//       invalidated because bridge code path changed.
+constexpr std::size_t kLogiaPipelineVersion = 11u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

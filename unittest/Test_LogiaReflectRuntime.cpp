@@ -1836,6 +1836,333 @@ script R4_1Player {
     CHECK(bridge.getLuaGlobalString("__test_witness") == "-1");
 }
 
+// ===========================================================================
+// R4.2 (2026-07-13) — T& / T* out-param (write-back)
+//
+// S3.12+R3 covered `const T&` / `const T*` as INPUT-only args. R4.2 adds
+// non-const `T&` / `T*` as OUT-PARAM args: the bridge heap-allocates a
+// fresh T (seeded from the Lua arg if the user passed one), the C++
+// method writes to it, and the bridge reads the heap T back to a Lua
+// table (struct out-param) or relies on the C++ method to write the
+// result to a self.* field that Logia reads back (primitive out-param).
+//
+// Why self.* for primitives: Lua locals cannot be rebound by C code.
+// The pattern is `self.fillInt(x); var v: int = self.lastResult` —
+// the C++ method writes both `*x` (out-param, currently discarded by
+// Lua) and `lastResult` (side effect the script reads). R4.2 doesn't
+// push primitive out-params back to the Lua stack because the binding
+// wouldn't be visible to the script anyway.
+//
+// Element-type scope (R4.2): int / float (primitive) + struct. R4.2b
+// adds std::string out-param.
+//
+// Test cases:
+//   1. int& out-param via self.* side effect
+//   2. int& in+out (seed value, C++ adds 5, witness = seed + 5)
+//   3. float& out-param (3.14)
+//   4. int* out-param (treats nullptr as "default-init", C++ writes 99)
+//   5. struct& out-param (C++ mutates fields, self.* side effect reads back)
+// ===========================================================================
+
+namespace
+{
+struct R4_2Player {
+    int hp = 0;
+    float speed = 0.0f;
+    int lastResult = 0;
+    float lastFloat = 0.0f;
+
+    struct Point {
+        int x = 0;
+        int y = 0;
+    };
+    Point lastPoint;
+
+    // int& out-param: write 42 to *out, mirror to lastResult
+    // so Logia can read back.
+    void fillInt(int& out) {
+        out = 42;
+        lastResult = out;
+    }
+
+    // int& in + out: C++ adds 5 to whatever Lua passed.
+    void addFive(int& value) {
+        value = value + 5;
+        lastResult = value;
+    }
+
+    // float& out-param (use 2.0 — 3.14f doesn't round-trip
+    // through double cleanly; tostring(3.14f stored as double)
+    // gives "3.1400001049041748" in Lua).
+    void fillFloat(float& out) {
+        out = 2.0f;
+        lastFloat = out;
+    }
+
+    // int* out-param: same as int& but written via pointer.
+    // The PMF signature uses T* instead of T&; the bridge treats
+    // them identically for out-param purposes. Caller passes a
+    // valid seed (we just write through).
+    void fillViaPtr(int* out) {
+        if (out) {
+            *out = 99;
+            lastResult = *out;
+        }
+    }
+
+    // struct& out-param: C++ mutates the point. The bridge
+    // heap-allocates Point, fills from Lua table if passed (input
+    // idiom), C++ writes, and the post-invoke write-back loop
+    // overwrites the original Lua table slot with a fresh one
+    // (intents-only for local rebinding — the test reads self.lastPoint
+    // for verification).
+    void mutatePoint(Point& p) {
+        p.x = p.x + 10;
+        p.y = p.y + 20;
+        lastPoint = p;
+    }
+};
+
+void ensureR4_2PlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R4_2Player") != nullptr) return;
+
+    if (reg.findType("int") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int", ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", p);
+    }
+    if (reg.findType("float") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<float>(
+            "float", ayt::reflect::detail::defaultCreate<float>,
+            ayt::reflect::detail::defaultDestroy<float>,
+            ayt::reflect::detail::defaultCopy<float>);
+        reg.registerTypeInfo("float", p);
+    }
+    auto* intInfo   = reg.findType("int");
+    auto* floatInfo = reg.findType("float");
+
+    // Register Point (the struct out-param type). Use a unique name
+    // ("R4_2Point") to avoid colliding with any other fixture.
+    auto* pointInfo = new ayt::reflect::TypeInfoImpl<R4_2Player::Point>(
+        "R4_2Point",
+        ayt::reflect::detail::defaultCreate<R4_2Player::Point>,
+        ayt::reflect::detail::defaultDestroy<R4_2Player::Point>,
+        ayt::reflect::detail::defaultCopy<R4_2Player::Point>);
+    pointInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "x", intInfo, offsetof(R4_2Player::Point, x),
+        ayt::reflect::FieldAttribute::Serialize));
+    pointInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "y", intInfo, offsetof(R4_2Player::Point, y),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("R4_2Point", pointInfo);
+
+    // Register R4_2Player host type.
+    auto* info = new ayt::reflect::TypeInfoImpl<R4_2Player>(
+        "R4_2Player",
+        ayt::reflect::detail::defaultCreate<R4_2Player>,
+        ayt::reflect::detail::defaultDestroy<R4_2Player>,
+        ayt::reflect::detail::defaultCopy<R4_2Player>);
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "hp", intInfo, offsetof(R4_2Player, hp),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "speed", floatInfo, offsetof(R4_2Player, speed),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastResult", intInfo, offsetof(R4_2Player, lastResult),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastFloat", floatInfo, offsetof(R4_2Player, lastFloat),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastPoint", pointInfo, offsetof(R4_2Player, lastPoint),
+        ayt::reflect::FieldAttribute::Serialize));
+
+    using ayt::script::logia::reflect::MethodInfoImpl;
+    // out-param methods: int&, float&, int*, struct& — all non-const.
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, int&>(
+        "fillInt", &R4_2Player::fillInt));
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, int&>(
+        "addFive", &R4_2Player::addFive));
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, float&>(
+        "fillFloat", &R4_2Player::fillFloat));
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, int*>(
+        "fillViaPtr", &R4_2Player::fillViaPtr));
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, R4_2Player::Point&>(
+        "mutatePoint", &R4_2Player::mutatePoint));
+
+    reg.registerTypeInfo("R4_2Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_r42_int_out_param) {
+    // R4.2: int& out-param. C++ writes 42; Logia reads self.lastResult.
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var x: int = 0
+        self.fillInt(x)
+        __test_witness = tostring(self.lastResult)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42_int_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42_int_out", "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "42");
+    CHECK(obj.lastResult == 42);
+}
+
+TEST_CASE(lg12_r42_int_in_out_param) {
+    // R4.2: int& in + out. C++ adds 5 to whatever Lua seeded.
+    // The bridge seeds the heap T from the Lua arg (input idiom);
+    // C++ adds 5; result via self.lastResult.
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var seed: int = 10
+        self.addFive(seed)
+        __test_witness = tostring(self.lastResult)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42_int_in_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42_int_in_out", "on_start", &obj, nullptr));
+    // 10 + 5 = 15
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "15");
+    CHECK(obj.lastResult == 15);
+}
+
+TEST_CASE(lg12_r42_float_out_param) {
+    // R4.2: float& out-param. C++ writes 3.14.
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var f: float = 0.0
+        self.fillFloat(f)
+        __test_witness = tostring(self.lastFloat)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42_float_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42_float_out", "on_start", &obj, nullptr));
+    // C++ stores 3.14 in lastFloat; tostring gives "3.14" (Lua default
+    // float-to-string formatting).
+    std::string w = bridge.getLuaGlobalString("__test_witness");
+    // Lua tostring(2.0) → "2.0" (with decimal), not "2".
+    CHECK(w == "2.0");
+    CHECK(obj.lastFloat == 2.0f);
+}
+
+TEST_CASE(lg12_r42_int_ptr_out_param) {
+    // R4.2: int* (non-const) out-param. Bridge treats identically
+    // to int& for out-param purposes. C++ writes 99 via *out.
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var p: int = 0
+        self.fillViaPtr(p)
+        __test_witness = tostring(self.lastResult)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42_int_ptr_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42_int_ptr_out", "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "99");
+    CHECK(obj.lastResult == 99);
+}
+
+TEST_CASE(lg12_r42_struct_out_param) {
+    // R4.2: struct& out-param. Lua passes {x=1, y=2}; C++ adds 10/20;
+    // result read back via self.lastPoint (R4.2 struct write-back via
+    // lua_replace can't rebind the local, so we use the side-effect
+    // pattern uniformly with primitive out-params).
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        self.mutatePoint({x=1, y=2})
+        var p: int = self.lastPoint.x
+        var q: int = self.lastPoint.y
+        __test_witness = tostring(p * 100 + q)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42_struct_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42_struct_out", "on_start", &obj, nullptr));
+    // p = 1 + 10 = 11, q = 2 + 20 = 22, witness = 11*100 + 22 = 1122
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "1122");
+    CHECK(obj.lastPoint.x == 11);
+    CHECK(obj.lastPoint.y == 22);
+}
+
 // ----------------------------------------------------------------------------
 
 TEST_SUITE_END
