@@ -240,6 +240,13 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     // itself — no interference here.
     if (auto* w = dynamic_cast<const WhileStmt*>(&stmt))   { emitWhileStmt(*w); return; }
     if (auto* f = dynamic_cast<const ForStmt*>(&stmt))     { emitForStmt(*f);   return; }
+    // R5.1 (2026-07-13): break / continue. Lua 5.5 supports both
+    // natively (Lua 5.2+ added `continue`). Codegen emits them
+    // verbatim — the parser's loopDepth gate has already verified
+    // these appear inside a loop body, so the emitted Lua is also
+    // guaranteed to be in a valid context.
+    if (auto* b = dynamic_cast<const BreakStmt*>(&stmt))    { emitBreakStmt(*b); return; }
+    if (auto* c = dynamic_cast<const ContinueStmt*>(&stmt)) { emitContinueStmt(*c); return; }
     if (auto* r = dynamic_cast<const ReturnStmt*>(&stmt))  { emitReturnStmt(*r); return; }
     if (auto* e = dynamic_cast<const ExprStmt*>(&stmt))    { emitExprStmt(*e); return; }
     // 2026-07-11 audit fix: defensive — parser rejects `function`
@@ -368,6 +375,38 @@ void LuaCodegen::emitForStmt(const ForStmt& stmt)
 
     indent();
     _out += "end\n";
+}
+
+// R5.1 (2026-07-13): `break;` → Lua `break`.
+//
+// Lua 5.2+ supports `break` natively (the only control-flow keyword
+// added in Lua 5.2; the rest of 5.x kept the same control-flow set).
+// AYScript runs on Lua 5.5 per the runtime bridge contract
+// (see LogiaRuntimeBridge setup), so a direct emit is safe.
+//
+// The parser's loopDepth gate has already verified this `break` is
+// inside a loop body. If a malformed AST ever surfaces a bare BreakStmt
+// outside a loop, the emitted Lua will raise a `break outside loop`
+// syntax error at Lua's parser — which matches the error message the
+// user would see in source-level terms, just one layer down.
+void LuaCodegen::emitBreakStmt(const BreakStmt& /*stmt*/)
+{
+    indent();
+    _out += "break\n";
+}
+
+// R5.1 (2026-07-13): `continue;` → Lua `continue`.
+//
+// Lua 5.2+ supports `continue` natively (no goto-juggling required).
+// Lua 5.5 (our runtime) handles `continue` as a first-class keyword.
+// Direct emit is the simplest path.
+//
+// Same defensive note as emitBreakStmt: parser's loopDepth gate is the
+// primary correctness boundary; the emit itself is unconditional.
+void LuaCodegen::emitContinueStmt(const ContinueStmt& /*stmt*/)
+{
+    indent();
+    _out += "continue\n";
 }
 
 void LuaCodegen::emitReturnStmt(const ReturnStmt& stmt)

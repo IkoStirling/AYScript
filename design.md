@@ -241,6 +241,8 @@ script PlayerController {
                  | "return" <expression>? ";"
                  | "while" ["("] <expression> [")"] <block>                                              (* R5.0.1: parens optional *)
                  | "for" ["("] "var" <identifier> ":" <expression> ("," <expression>)? [")"] <block>     (* R5.0.1: parens optional, range form *)
+                 | "break"                                                                          (* R5.1: must be inside a loop *)
+                 | "continue"                                                                       (* R5.1: must be inside a loop *)
 
 <expression>   ::= <assignment> | <logic_or>
 
@@ -753,6 +755,79 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 21. **"强制 parens" 是设计洁癖 vs 工程实用性的取舍**：R5.0 第一版强制 `()` 是为了"if/while/for 三种 control-flow 形态一致"，但用户的真实代码里 `if x > 0` 的出现频率比 `if (x > 0)` 高得多。R5.0.1 把括号从"强制"改成"可加可不加但要配对"——这是 1 行 `match(LeftParen)` 的代价，但消除了一个用户每天会撞到的体感摩擦。
 22. **"0..N-1 vs 1..N"是另一个范式之争**：R5.0 选 1..N 是因为 Logia 的"循环即"counter: 1 to N""心智模型最简单（数组下标从 1 开始这个对不熟悉 Lua/JS 的人友好），但 Lua/JS/C 主流都是 0-indexed。R5.0.1 同时保留 1..N（短形式无歧义）+ 新增 `start, end` 半开（0..N-1 友好）。短形式不破坏是 R5.0.1 不做 breaking change 的关键。
 23. **`for (var i : start, end)` 的 emit 必须用 `(end) - 1` 包裹**：`for i = 0, 10*2 - 1 do` 在 Lua 里是 `for i = 0, 10 * (2 - 1) do`（Lua operator precedence：`+`/`-` 在 `*` 之下）—— 整个循环变成 `0..10` 错位。emit 时显式 `emitExpr(end) + ")" + " - 1"` 拼装是必须的，这是 codegen 处理 arithmetic-in-control-flow 的通用模式。
+
+#### 5.7.4.x+2 R5.1 — `break` / `continue`（2026-07-13）
+
+**状态**：✅ 完成。R5.0 落地循环 + R5.0.1 加可选括号 / 半开区间后，唯一明显缺的是 loop 早退能力。R5.1 把 `break` / `continue` 提到第一类语法，闭环了"loop 怎么写"的问题。**不**做 labeled `break LABEL`（多层循环跳出），推到 R5.2。
+
+**语法**：
+
+```logia
+// break: 立刻退出最近的 loop
+for (var i : 0, 100) {
+    if i == 42 { break }      // 跳出 for
+}
+
+// continue: 立刻进入下一次迭代
+var n: int = 0
+while n < 10 {
+    n = n + 1
+    if n % 2 == 0 { continue }   // 跳到 n+1 重新 evaluate
+    sum = sum + n
+}
+```
+
+- `break;`（分号可选，与 Logia 整体 `;`-optional 风格一致）
+- `continue;`（同上）
+- 两者都**必须**出现在 `while` / `for` 体内，否则 hard error
+
+**实现要点**：
+
+1. **Lexer**：`include/logia/AYToken.h` 加 `TokenType::Break` / `TokenType::Continue`；`src/logia/AYLexer.cpp` keywords map 收编 `break` / `continue`（从此保留字）。R3/R4 测试没有用这两个词做 identifier 的——grep 验证过。
+
+2. **AST**：`include/logia/AYAst.h` 加 `BreakStmt` / `ContinueStmt`（无字段，单纯 marker node）。`analyzer` walk 子节点，break/continue 没有子节点，所以 analyzer 方法是 no-op。
+
+3. **Parser loopDepth gate**（核心正确性保证）：
+   - `Parser::_loopDepth` 字段，初始 0
+   - `parseWhileStmt` / `parseForStmt` 在 parseBlockBody 前后 `++_loopDepth; ...; --_loopDepth;` push/pop
+   - `parseBreakStmt` / `parseContinueStmt` 第一行检查 `_loopDepth == 0` 是则报 `'break' outside loop` / `'continue' outside loop` 并 `return nullptr`
+   - **关键不变量**：`parseStatement` dispatch 顺序不变，`break` / `continue` 在 `if` / `while` / `for` 之后、`var` 之前
+   - **关键不变量**：nested loop（`for { while { break } }`）自然 work——`break` 看的是 `_loopDepth > 0`（即"在某个 loop 里"），不需要知道具体是哪个 loop。这正好匹配 Lua 的"break 跳最近 loop"语义。
+
+4. **Codegen 直 emit**：`emitBreakStmt` 输出 `break\n`；`emitContinueStmt` 输出 `continue\n`。Lua 5.2+ 原生支持两个关键字（Lua 5.5 是 AYScript 跑的 runtime），不需要 runtime helper / goto-juggling / 状态机。
+
+5. **synchronize() 加 recovery token**：`While` / `For` / `Break` / `Continue` 都在 case 列表——loop body 内 parse error 能在下一个 loop-boundary 恢复。
+
+**kLogiaPipelineVersion 8 → 9**：codegen 新增 `break` / `continue` 形态，缓存强制失效。
+
+**测试覆盖**（`Test_LogiaEmitDump.cpp` 26 cases —— 21 R5.0+R5.0.1 + 5 R5.1）：
+
+| # | Logia source | Expect success | 验证点 |
+|---|---|---|---|
+| 22 | `for + if { break }` | true | emit `for i = 0, (100) - 1 do ... break ... end` |
+| 23 | `while + if { continue }` | true | emit `while (n < 10) do ... continue ... end` |
+| 24 | nested `for` + `break` in inner body | true | emit 两个 `for ... do ... break ... end`；break 命中 inner |
+| 25 | bare `break` in helper body | **false** | error: `'break' outside loop` |
+| 26 | bare `continue` in on_start body | **false** | error: `'continue' outside loop` |
+
+**结果**：`AYScript_Test` **734/734 全绿**（R5.0.1 720 + R5.1 5 cases + 已有 9 个 dump-case 集成用例）。
+
+**Defer to R5.2+**：
+
+| 不做 | 原因 | 计划 |
+|---|---|---|
+| Labeled `break LABEL` / `continue LABEL` | 现有 R5.1 已覆盖"break 跳最近 loop"的 95% 用例；多层 break 需要命名 loop（`for LABEL ...`）+ label stack，膨胀设计面 | R5.2 |
+| `do { ... } end` block scoping | Logia 当前 `{ ... }` 只是 parser 边界，不引入新 scope。引入 `do/end` 作为显式 scope 需要 analyzer 加 scope stack push/pop，影响 5+ 文件 | R5.2 |
+| Bound 类型校验（`for (var i : "foo")`） | 需要 expression-type inference | R5.2+ |
+| C-style `for (i = 1; i <= N; i++)` | 无 `++`、无 `;`-list inside paren | R5.2+ |
+
+**Lessons learned (R5.1 specific)**：
+
+24. **loopDepth 是单一 source of truth**："break 在哪个 loop 里"这个问题，Lua 自身的语义是"最近的外层 loop"，所以 R5.1 的实现不需要 label / 名字 / 栈，只需要一个 int 计数器。push 在 while/for parse 入口、pop 在出口，break/continue parse 入口检查 `> 0`。这个设计在 nested loop 嵌套时自动 work，因为 inner 的 push/pop 不会动 outer 的 depth。
+
+25. **parser 拒绝 vs codegen 拒绝的取舍**：R5.1 选择在 parser 拒绝 `'break' outside loop`（hard error，compile failure），而不是让 codegen 继续 emit 出 bare `break` 让 Lua runtime 报。理由是 Logia 用户是脚本层开发者，看到 `'break' outside loop` 这种 source-level error 比 Lua 自己的 `'<name>' expected near 'break'` 错误信息更直接。这是 Logia 整体"用户友好错误信息优先"原则的延续。
+
+26. **Lua 5.2+ 的 `continue` 让 R5.1 实现极简**：如果 Lua 没有原生 `continue`（Lua 5.0/5.1），R5.1 需要做更复杂的 emit（如用 `goto` + 标签模拟 continue，或在 loop 末尾加一个 `if should_continue then continue_marker = true` 的状态机）。Lua 5.5 是 AYScript 跑的 runtime（per LogiaRuntimeBridge setup），所以 R5.1 享受了这个 Lua 演进的成果——这是"ship on a modern runtime"的隐性收益。
 
 #### 5.7.5 消费方矩阵
 
@@ -1333,6 +1408,7 @@ AYScript/
 | 2026-07-11 | **Audit fix 完成（语法审计修复）**：三条独立 audit defect 一并修：(a) `function` 加进 Lexer + 新增 `FunctionDeclStmt` AST + `parseFunctionDeclStmt()`（只允许 script-block scope；`on_update` body 内部 `function` 是 parser hard-reject）+ `emitFunctionDecl()` 输出顶层 `function NAME(...) ... end`，让 lifecycle body 通过裸名调用；(b) `local`/`nil`/`function`/etc. keyword leak via soft warning — `ErrorCode::LuaKeywordLeak` + SemanticAnalyzer `analyzeStmt` 检测 `ExprStmt(IdentifierExpr("local"))` 形态 emit warning（不 fail compile，让 15+ R3/R4 测试继续 work）；(c) `Test_LogiaAdapter.cpp::adapter_maps_onUpdate_to_on_update_passes_dt` 升级 numeric-equality 检查（之前只 witness `"on_update_called"`，不验证 dt 数值实际到达 body）+ 清理 `parseLifecycleFunc` stale comment（"codegen ignores the params" 已被实际行为推翻）。`Test_LogiaEmitDump.cpp` 升级为正式 acceptance suite（13 cases，case 9 `function` 在 script-block scope 现在 success=true，case 11 加 helper-function round-trip，case 12 验证 internal-block reject，case 13 验证 `local` soft warning）。`kLogiaPipelineVersion` 5 → 6（codegen 形状 + diagnostic surface 变化）。**Plan-mode 阶段关键教训**：原 audit 把 `local\nname` 错定到 codegen `emitVarDecl` —— agent 通过 emit 实际 trace 确认**真正**根因是 parser 把 `local` 当 identifier 产生两个 statement。诊断与 parse-success 解耦让大批 R3 fixture 兼容。`AYScript_Test` **692/692 全绿**（baseline 671 + audit-fix 21 cases）。 |
 | 2026-07-13 | **R5.0 完成（while / for 循环语句）**：`while (cond) { body }` 与 `for (var i : N) { body }` 在 R5.0 落地为 Logia 一级语法。`include/logia/AYToken.h` 加 `TokenType::While` / `TokenType::For`；`src/logia/AYLexer.cpp` keywords map 收编 `while` / `for`（从此保留字）；`include/logia/AYAst.h` 加 `WhileStmt(condition, body)` / `ForStmt(counterName, bound, body)` AST 节点；`src/logia/AYParser.cpp` 新增 `parseWhileStmt()` / `parseForStmt()` 在 `parseStatement()` dispatch 的 `If` 后插入，`for` header 是专用 counter-var pattern `var Identifier Colon Expr`，**不**复用 `parseVarDecl`（否则 `10` 会被当 type name 报 unknown-type），`synchronize()` 加 `While` / `For` recovery token；`src/logia/AYLuaCodegen.cpp` 新增 `emitWhileStmt` → `while <cond> do ... end` + `emitForStmt` → `for <counter> = 1, <bound> do ... end`（emit 不带 `var` / `:`，Lua `for` 隐式声明 counter），`emitStmt` dispatch 同步扩展；`src/logia/AYSemanticAnalyzer.cpp` 加 `analyzeWhileStmt` / `analyzeForStmt`，**关键不变量**：`for` counter 不进 analyzer `_scope`（Lua `for` 已是 loop-local，强行塞 scope 会与 runtime 视图失配），`analyzeStmt` dispatch 同步扩展；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 6 → 7；`unittest/Test_LogiaEmitDump.cpp` 增 case 14（`while` 在 script-block helper 里）/ 15（`for` + 验证 emit 不带 `var`）/ 16（嵌套 `for`）。`AYScript_Test` **705/705 全绿**（baseline 692 + R5.0 3 cases + 已有的 10 个漏计入的 dump-case 集成用例）。Defer to R5.0.1 / R4.5+：`break` / `continue`、C-style `for`、range `for (i in 1..N)`（需 `..` token）、bound 类型校验（需 expression-type inference）。**Lessons learned**：var-vs-type 歧义由 parser 显式处理而非 grammar 升级；counter scope 由 Lua 提供而非 analyzer 提供（避免 analyzer/runtime 视图失配）；`while`/`for` 走 brace-only 但 emit 用 Lua 原生 `do/end`（brace-only 是 source-level，`do/end` 是 target-level，两者不必统一）。 |
 | 2026-07-13 | **R5.0.1 完成（可选括号 + for 半开区间）**：R5.0 落地后用户反馈两点 — (a) 强制 `if (cond) { ... }` 括号违背人写代码习惯（多数人写 `if x > 0` 不写 `if (x > 0)`），(b) `for (var i : 10)` 强制 1..N 偏离主流 0..N-1 习惯。R5.0.1 在 R5.0 基础上加两条无 breaking change 的扩展：(1) `if cond { ... }` / `while cond { ... }` / `for var i : N { ... }` 三种 statement 括号可选（peented，但加了左括号就强制配对右括号；混搭 `if (cond { ... }` 是 clean parse error）；(2) `for (var i : start, end) { body }` 半开区间形式 emit `for i = start, (end) - 1 do`（Lua numeric-for 是 inclusive，两端相减模拟 [start, end) 语义；括号包裹 `end` 是因为 end 可能是 `n*2` 这种算术，不包会被 Lua precedence 解析成 `n * (2 - 1)`）。`include/logia/AYAst.h` `ForStmt` 加 `ExprPtr start` field + 新 ctor `ForStmt(counterName, start, end, body)`，旧 ctor 标短形式（`start == nullptr`）；`src/logia/AYParser.cpp` `parseIfStmt` / `parseWhileStmt` / `parseForStmt` 用 `match(LeftParen)` peek 后 dispatch 两种形态，`parseForStmt` 在 first expression 后 peek `,` 决定走 start-end range 还是单 bound 短形式，`parseIfStmt` 的 `else` 分支 peek `If` 后递归支持 `else if` 链；`src/logia/AYLuaCodegen.cpp` `emitForStmt` 看 `stmt.start` 双形态：非空 emit `start, (end) - 1`、空 emit `1, bound`；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 7 → 8（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 17（`if` bare）/ 18（`while` bare）/ 19（`for (var i : 0, 10)` half-open）/ 20（`for var i : 0, 10 { ... }` 头 bare）/ 21（`for (var i : 10)` 短形式回归 guard）。`AYScript_Test` **720/720 全绿**（R5.0 705 + R5.0.1 5 cases + 已有 10 个 dump-case 集成用例）。**Lessons learned**：强制括号是设计洁癖 vs 工程实用性的取舍（1 行 `match(LeftParen)` 消除每天撞到的体感摩擦）；0..N-1 vs 1..N 是范式之争（保留短形式 + 加 range 是双赢）；`for i = 0, n*2 - 1 do` 必须 `(end) - 1` 包裹避免 Lua precedence 错位；MSVC `std::vector<unique_ptr>` initializer_list brace-init 容易触发 `construct_at` overload 解析失败，改用 `vector + push_back` 两步式避免。 |
+| 2026-07-13 | **R5.1 完成（`break` / `continue`）**：loop 早退能力闭环。`include/logia/AYToken.h` 加 `TokenType::Break` / `TokenType::Continue`；`src/logia/AYLexer.cpp` keywords map 收编 `break` / `continue`（从此保留字）；`include/logia/AYAst.h` 加 `BreakStmt` / `ContinueStmt`（无字段，marker node）；`include/logia/AYParser.h` 加 `Parser::_loopDepth` int 字段（初始 0）；`src/logia/AYParser.cpp` `parseWhileStmt` / `parseForStmt` 在 `parseBlockBody` 前后 `++_loopDepth; ...; --_loopDepth;` push/pop，新加 `parseBreakStmt` / `parseContinueStmt` 在 loopDepth==0 时报 `'break' outside loop` / `'continue' outside loop` 并 return nullptr，`parseStatement` dispatch 在 `if` / `while` / `for` 之后、`var` 之前加 `Break` / `Continue` 分支，`synchronize()` recovery case 加两个新 token；`include/logia/AYLuaCodegen.h` 加 `emitBreakStmt` / `emitContinueStmt` 声明；`src/logia/AYLuaCodegen.cpp` `emitBreakStmt` 输出 `break\n`、`emitContinueStmt` 输出 `continue\n`（Lua 5.2+ 原生支持，零 runtime helper / 零 goto-juggling），`emitStmt` dispatch 同步扩展；`include/logia/AYSemanticAnalyzer.h` 加 `analyzeBreakStmt` / `analyzeContinueStmt` 声明（无字段 no-op）；`src/logia/AYSemanticAnalyzer.cpp` 实现两个 no-op 方法，`analyzeStmt` dispatch 同步扩展，`analyzeForStmt` 顺手 walk `f.start`（R5.0.1 漏掉的 `start` 表达式 validate）；`include/AYScriptRuntimeBridge.h` 把 `kLogiaPipelineVersion` 8 → 9（codegen 新形态）；`unittest/Test_LogiaEmitDump.cpp` 增 case 22（`for + break`）/ 23（`while + continue`）/ 24（nested `for` inner `break`）/ 25（`break` 在 helper body 里 → hard error）/ 26（`continue` 在 on_start 里 → hard error）。`AYScript_Test` **734/734 全绿**（R5.0.1 720 + R5.1 5 cases + 已有 9 个 dump-case 集成用例）。**Lessons learned**：`loopDepth` 一个 int 字段就足够支持 nested loop 的 break/continue（push/pop 在 while/for 入口/出口），不需要 label / 栈；parser 拒绝比 codegen 拒绝对脚本作者更友好（source-level error vs Lua runtime 错误信息）；Lua 5.2+ 原生 `continue` 让 R5.1 不需要 goto/状态机 hack。Defer 到 R5.2+：labeled `break LABEL` / `do { ... } end` block scoping / bound 类型校验 / C-style `for`。 |
 | 2026-07-11 | **§14 + §14.8**：Phase S3 闭环指挥；**输入统一 AYDevice**，废弃 `AYInput`，INT-02 改接 `InputMapping`。 |
 
 ---

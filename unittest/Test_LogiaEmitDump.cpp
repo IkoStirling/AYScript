@@ -459,4 +459,109 @@ script ForShort {
     CHECK_FALSE(containsFlat(_lastDump.emittedLua, "1, (10) - 1"));
 }
 
+// R5.1 (2026-07-13) — `break;` inside a `for` loop. Codegen emits
+// the bare `break` keyword at the correct indent. Parser's
+// loopDepth gate has accepted the source (the `break` is inside
+// the for body), so the test should compile and emit clean Lua.
+TEST_CASE(emit_dump_22_break_in_for) {
+    const char* src = R"(
+script BreakFor {
+    var first_match: int = -1
+    function find() {
+        for (var i : 0, 100) {
+            if i == 42 {
+                first_match = i
+                break
+            }
+        }
+    }
+    on_start() { find() }
+}
+)";
+    dumpCase("22_break_in_for", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "break"));
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (100) - 1 do"));
+}
+
+// R5.1 — `continue;` inside a `while` loop. Skips to the next
+// iteration. Codegen emits bare `continue`.
+TEST_CASE(emit_dump_23_continue_in_while) {
+    const char* src = R"(
+script ContinueWhile {
+    var sum: int = 0
+    function accumulate() {
+        var n: int = 0
+        while n < 10 {
+            n = n + 1
+            if n % 2 == 0 {
+                continue
+            }
+            sum = sum + n
+        }
+    }
+    on_start() { accumulate() }
+}
+)";
+    dumpCase("23_continue_in_while", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "continue"));
+    CHECK(containsFlat(_lastDump.emittedLua, "while (n < 10) do"));
+}
+
+// R5.1 — break/continue in nested loops. Each `break` targets the
+// innermost loop (Lua's native semantics; R5.1 does not support
+// labeled `break LABEL` — that would be a future R5.2 extension).
+TEST_CASE(emit_dump_24_break_in_nested_loops) {
+    const char* src = R"(
+script NestedBreak {
+    var found: int = 0
+    function search() {
+        for (var i : 0, 10) {
+            for (var j : 0, 10) {
+                if j == 3 {
+                    found = i * 100 + j
+                    break
+                }
+            }
+        }
+    }
+    on_start() { search() }
+}
+)";
+    dumpCase("24_break_in_nested_loops", src, /*expectSuccess=*/true);
+    // Both `break` keywords should be emitted (one per the source).
+    // The first break targets the inner for; the inner for body
+    // contains no second break (only one break in the source).
+    CHECK(containsFlat(_lastDump.emittedLua, "break"));
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1 do"));
+    CHECK(containsFlat(_lastDump.emittedLua, "for j = 0, (10) - 1 do"));
+}
+
+// R5.1 (negative) — `break` outside a loop is a hard error. The
+// parser's loopDepth gate catches it.
+TEST_CASE(emit_dump_25_break_outside_loop_is_error) {
+    const char* src = R"(
+script BreakOutside {
+    function notALoop() {
+        break
+    }
+    on_start() { notALoop() }
+}
+)";
+    dumpCase("25_break_outside_loop_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("'break' outside loop"));
+}
+
+// R5.1 (negative) — `continue` outside a loop is a hard error.
+TEST_CASE(emit_dump_26_continue_outside_loop_is_error) {
+    const char* src = R"(
+script ContinueOutside {
+    on_start() {
+        continue
+    }
+}
+)";
+    dumpCase("26_continue_outside_loop_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("'continue' outside loop"));
+}
+
 TEST_SUITE_END

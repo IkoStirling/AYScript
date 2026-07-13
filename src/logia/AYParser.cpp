@@ -197,6 +197,15 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     if (match(TokenType::For)) {
         return parseForStmt();
     }
+    // R5.1 (2026-07-13): break / continue are valid only inside a
+    // loop body. The loopDepth gate inside parseBreakStmt /
+    // parseContinueStmt raises a hard error when seen outside.
+    if (match(TokenType::Break)) {
+        return parseBreakStmt();
+    }
+    if (match(TokenType::Continue)) {
+        return parseContinueStmt();
+    }
     if (check(TokenType::Var)) {
         return parseVarDecl();
     }
@@ -301,7 +310,12 @@ std::unique_ptr<Stmt> Parser::parseWhileStmt()
         condition = parseExpression();
     }
     consume(TokenType::LeftBrace, "Expected '{' before while body");
+    // R5.1: push loop depth so any `break` / `continue` inside the
+    // body is recognized as inside a loop. The body's parseBlockBody
+    // is the same recursive entry as before — only the gate changes.
+    ++_loopDepth;
     std::vector<StmtPtr> body = parseBlockBody();
+    --_loopDepth;
     consume(TokenType::RightBrace, "Expected '}' after while body");
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
 }
@@ -338,7 +352,10 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
         consume(TokenType::RightParen, "Expected ')' after for header");
     }
     consume(TokenType::LeftBrace, "Expected '{' before for body");
+    // R5.1: push loop depth (see parseWhileStmt's comment).
+    ++_loopDepth;
     std::vector<StmtPtr> body = parseBlockBody();
+    --_loopDepth;
     consume(TokenType::RightBrace, "Expected '}' after for body");
 
     if (startExpr) {
@@ -347,6 +364,31 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
     }
     return std::make_unique<ForStmt>(
         counterTok.lexeme, std::move(endExpr), std::move(body));
+}
+
+// R5.1 (2026-07-13): `break;` (or `break` + stmt-end) inside a loop body.
+// The `match(TokenType::Break)` in parseStatement has already consumed
+// the keyword token by the time we get here. We only need to enforce
+// the loop-depth gate and accept the optional trailing semicolon.
+std::unique_ptr<Stmt> Parser::parseBreakStmt()
+{
+    if (_loopDepth == 0) {
+        error("'break' outside loop");
+        return nullptr;
+    }
+    match(TokenType::Semicolon);
+    return std::make_unique<BreakStmt>();
+}
+
+// R5.1 (2026-07-13): `continue;` inside a loop body. Same gate as break.
+std::unique_ptr<Stmt> Parser::parseContinueStmt()
+{
+    if (_loopDepth == 0) {
+        error("'continue' outside loop");
+        return nullptr;
+    }
+    match(TokenType::Semicolon);
+    return std::make_unique<ContinueStmt>();
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()
@@ -602,6 +644,8 @@ void Parser::synchronize()
         case TokenType::If:
         case TokenType::While:   // R5.0 (2026-07-13): loop recovery.
         case TokenType::For:     // R5.0 (2026-07-13): loop recovery.
+        case TokenType::Break:   // R5.1 (2026-07-13): loop-body statement.
+        case TokenType::Continue:// R5.1 (2026-07-13): loop-body statement.
         case TokenType::RightBrace:
             return;
         default:

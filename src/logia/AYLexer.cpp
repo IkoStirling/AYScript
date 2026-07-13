@@ -156,6 +156,12 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         // and the new keywords close the same gap for these two).
         {"while", TokenType::While},
         {"for", TokenType::For},
+        // R5.1 (2026-07-13): loop control. Both are reserved keywords
+        // now (no R3/R4 tests use `break` / `continue` as identifiers).
+        // Valid only inside a loop body — the parser's loopDepth gate
+        // rejects bare references at any other context.
+        {"break", TokenType::Break},
+        {"continue", TokenType::Continue},
         {"return", TokenType::Return},
         {"true", TokenType::True},
         {"false", TokenType::False},

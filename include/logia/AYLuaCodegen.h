@@ -79,6 +79,8 @@ private:
     void emitIfStmt(const IfStmt& stmt);
     void emitWhileStmt(const WhileStmt& stmt);   // R5.0 (2026-07-13)
     void emitForStmt(const ForStmt& stmt);       // R5.0 (2026-07-13)
+    void emitBreakStmt(const BreakStmt& stmt);   // R5.1 (2026-07-13)
+    void emitContinueStmt(const ContinueStmt& stmt); // R5.1 (2026-07-13)
     void emitReturnStmt(const ReturnStmt& stmt);
     void emitExprStmt(const ExprStmt& stmt);
 

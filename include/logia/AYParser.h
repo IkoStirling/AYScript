@@ -39,7 +39,16 @@ private:
     std::unique_ptr<Stmt> parseIfStmt();
     std::unique_ptr<Stmt> parseWhileStmt();   // R5.0 (2026-07-13): while (cond) { body }
     std::unique_ptr<Stmt> parseForStmt();     // R5.0 (2026-07-13): for (var i : N) { body }
+    std::unique_ptr<Stmt> parseBreakStmt();   // R5.1 (2026-07-13): break; (only inside loop)
+    std::unique_ptr<Stmt> parseContinueStmt();// R5.1 (2026-07-13): continue; (only inside loop)
     std::vector<StmtPtr> parseBlockBody();
+
+    // R5.1: track loop nesting depth. parseWhileStmt / parseForStmt
+    // push +1 around their body's parseBlockBody call and pop -1
+    // after. parseBreakStmt / parseContinueStmt read this to enforce
+    // "must be inside a loop" — a bare `break` at function-body or
+    // script-block scope is a hard error.
+    int _loopDepth = 0;
 
     const Token& current() const;
     const Token& previous() const;

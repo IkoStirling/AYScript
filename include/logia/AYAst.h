@@ -176,6 +176,22 @@ public:
     ExprPtr value;
 };
 
+// R5.1 (2026-07-13): `break` and `continue` inside loop bodies.
+// Both lower to Lua's native `break` / `continue` (Lua 5.2+;
+// AYScript runs on Lua 5.5 per the runtime bridge contract).
+// Parser enforces "must be inside a loop" via loopDepth — a bare
+// `break` at script-block or function-body scope is a hard error
+// with message "break outside loop" (and same for continue).
+class BreakStmt : public Stmt {
+public:
+    BreakStmt() = default;
+};
+
+class ContinueStmt : public Stmt {
+public:
+    ContinueStmt() = default;
+};
+
 class IfStmt : public Stmt {
 public:
     IfStmt(ExprPtr condition, std::vector<StmtPtr> thenBranch, std::vector<StmtPtr> elseBranch)

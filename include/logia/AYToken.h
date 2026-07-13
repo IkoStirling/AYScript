@@ -24,6 +24,8 @@ enum class TokenType : uint8_t {
     Else,
     While,            // R5.0 (2026-07-13): `while (cond) { body }` → `while cond do ... end`
     For,              // R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`
+    Break,            // R5.1 (2026-07-13): `break;` (or `break` + stmt-end) inside loop body
+    Continue,         // R5.1 (2026-07-13): `continue;` inside loop body
     Return,
     True,
     False,

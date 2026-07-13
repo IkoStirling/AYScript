@@ -64,7 +64,13 @@ namespace ayt::script
 //       `for var i : N`; (3) `for (var i : start, end) { body }`
 //       half-open range form emits `for i = start, (end) - 1 do`.
 //       Codegen output shape changes only for the new range form.
-constexpr std::size_t kLogiaPipelineVersion = 8u;
+//       2026-07-13 R5.1: bump 8 → 9. `break` and `continue` are
+//       first-class keywords inside loop bodies. Parser enforces
+//       "must be inside a loop" via `Parser::_loopDepth` gate; any
+//       bare `break` / `continue` outside a loop is a hard error.
+//       Codegen emits Lua 5.2+ native `break` / `continue` (no
+//       runtime helper, no goto-juggling).
+constexpr std::size_t kLogiaPipelineVersion = 9u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

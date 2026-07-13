@@ -559,12 +559,35 @@ void SemanticAnalyzer::analyzeWhileStmt(WhileStmt& w)
 // bound expression reduces to `int` and emit a soft warning otherwise.
 // S2.5 / LG-05 only stamps types on `self.<field>` leaf reads via
 // AYReflect; adding general expression-type inference is out of scope.
+//
+// R5.0.1 (2026-07-13): also walk the optional `start` expression in
+// the half-open range form `for (var i : start, end)` — analyzer
+// needs to validate the start expression the same way it validates
+// the bound.
 void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
 {
+    if (f.start) analyzeExpr(*f.start);
     if (f.bound) analyzeExpr(*f.bound);
     for (auto& s : f.body) {
         if (s) analyzeStmt(*s);
     }
+}
+
+// R5.1 (2026-07-13): no-op for `break;` inside a loop.
+//
+// The parser's `loopDepth` gate has already verified this BreakStmt
+// appears inside a while / for body. The analyzer's job is just to
+// walk sub-nodes, and BreakStmt has none. Future R5.x passes that
+// add control-flow analysis (e.g. "definitely-returns after this
+// break") would extend this method — R5.1 leaves it empty.
+void SemanticAnalyzer::analyzeBreakStmt(BreakStmt& /*b*/)
+{
+}
+
+// R5.1 (2026-07-13): no-op for `continue;` inside a loop.
+// See analyzeBreakStmt's comment for the rationale.
+void SemanticAnalyzer::analyzeContinueStmt(ContinueStmt& /*c*/)
+{
 }
 
 void SemanticAnalyzer::analyzeStmt(Stmt& s)
@@ -612,6 +635,10 @@ void SemanticAnalyzer::analyzeStmt(Stmt& s)
         analyzeWhileStmt(*ws);
     } else if (auto* fs = dynamic_cast<ForStmt*>(&s)) {       // R5.0 (2026-07-13)
         analyzeForStmt(*fs);
+    } else if (auto* bs = dynamic_cast<BreakStmt*>(&s)) {    // R5.1 (2026-07-13)
+        analyzeBreakStmt(*bs);
+    } else if (auto* cs = dynamic_cast<ContinueStmt*>(&s)) { // R5.1 (2026-07-13)
+        analyzeContinueStmt(*cs);
     } else if (auto* rs = dynamic_cast<ReturnStmt*>(&s)) {
         if (rs->value) analyzeExpr(*rs->value);
     } else if (auto* vd = dynamic_cast<VarDeclStmt*>(&s)) {

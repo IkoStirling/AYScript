@@ -100,6 +100,8 @@ private:
     void analyzeLifecycle(LifecycleFuncDecl& fn);
     void analyzeWhileStmt(WhileStmt& w);   // R5.0 (2026-07-13)
     void analyzeForStmt(ForStmt& f);       // R5.0 (2026-07-13)
+    void analyzeBreakStmt(BreakStmt& b);   // R5.1 (2026-07-13): no-op (parser already gated)
+    void analyzeContinueStmt(ContinueStmt& c); // R5.1 (2026-07-13): no-op
     void analyzeStmt(Stmt& s);
     void analyzeExpr(Expr& e);
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);
