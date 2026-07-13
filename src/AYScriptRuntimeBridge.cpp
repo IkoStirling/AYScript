@@ -795,62 +795,167 @@ int ayt_reflect_call_method_c(lua_State* L)
                 argPtrs[i] = &argSlots[i];
             } else {
                 const char* ename = elementType->getName();
-                const bool elemIsInt   = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
-                const bool elemIsFloat = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
+                const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+                const bool elemIsFloat  = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
+                const bool elemIsString = (ename && std::strcmp(ename, "std::string") == 0);
+                const bool elemIsStruct = (elementType->getFieldCount() > 0);
+                const bool isFixedSize  = containerType->isFixedSize();
 
-                if (!elemIsInt && !elemIsFloat) {
-                    ayt::log::warn("ayt_reflect_call_method: container element type '%s' not yet supported in R4.1",
+                if (!elemIsInt && !elemIsFloat && !elemIsString && !elemIsStruct) {
+                    // Still unsupported — bool / double / nested-container
+                    // elements. R4.1b keeps the warn+nullptr policy for
+                    // these and the std::array<std::string, N> case below.
+                    ayt::log::warn("ayt_reflect_call_method: container element type '%s' not yet supported in R4.1b",
                                    ename ? ename : "(null)");
                     argPtrs[i] = nullptr;
-                } else {
+                } else if (isFixedSize && (elemIsInt || elemIsFloat)) {
+                    // R4.1: std::array<T, N> of primitive — unchanged path.
                     const size_t elemSize = elemIsInt ? sizeof(int32_t) : sizeof(float);
-                    const bool isFixedSize = containerType->isFixedSize();
-
-                    if (isFixedSize) {
-                        // std::array<T, N>: cap = compile-time N.
-                        size_t cap = containerType->getContainerSize(nullptr);
-                        if (cap == 0) cap = 1;  // defensive (ArrayTypeInfo asserts N>0)
-                        size_t N = (luaLen < cap) ? luaLen : cap;
-                        void* mem = ::operator new(cap * elemSize);
-                        std::memset(mem, 0, cap * elemSize);
-                        for (size_t k = 0; k < N; ++k) {
-                            lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                            if (elemIsInt) {
-                                int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
-                                std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
-                            } else {
-                                float v = static_cast<float>(lua_tonumber(L, -1));
-                                std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
-                            }
-                            lua_pop(L, 1);
-                        }
-                        argPtrs[i] = mem;
-                        registerCleanup(mem, [](void* p) { ::operator delete(p); });
-                    } else {
-                        // std::vector<T>: heap-alloc, push_back each.
+                    size_t cap = containerType->getContainerSize(nullptr);
+                    if (cap == 0) cap = 1;  // defensive (ArrayTypeInfo asserts N>0)
+                    size_t N = (luaLen < cap) ? luaLen : cap;
+                    void* mem = ::operator new(cap * elemSize);
+                    std::memset(mem, 0, cap * elemSize);
+                    for (size_t k = 0; k < N; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
                         if (elemIsInt) {
-                            auto* vec = new std::vector<int>();
-                            vec->reserve(luaLen);
-                            for (size_t k = 0; k < luaLen; ++k) {
-                                lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                                int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
-                                vec->push_back(v);
-                                lua_pop(L, 1);
-                            }
-                            argPtrs[i] = vec;
-                            registerCleanup(vec, [](void* p) { delete static_cast<std::vector<int>*>(p); });
+                            int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
+                            std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
                         } else {
-                            auto* vec = new std::vector<float>();
-                            vec->reserve(luaLen);
-                            for (size_t k = 0; k < luaLen; ++k) {
-                                lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
-                                vec->push_back(static_cast<float>(lua_tonumber(L, -1)));
+                            float v = static_cast<float>(lua_tonumber(L, -1));
+                            std::memcpy(static_cast<uint8_t*>(mem) + k * elemSize, &v, elemSize);
+                        }
+                        lua_pop(L, 1);
+                    }
+                    argPtrs[i] = mem;
+                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else if (isFixedSize && elemIsStruct) {
+                    // R4.1b: std::array<MyStruct, N> — raw-byte buffer +
+                    // per-element storeFieldPrimitive recursion. Restriction:
+                    // MyStruct must be trivially-destructible (mirrors R3
+                    // struct-arg scope — std::array cannot resize, so
+                    // non-trivial dtors would need explicit walk on cleanup,
+                    // which the array-path raw-byte allocator doesn't do).
+                    size_t cap = containerType->getContainerSize(nullptr);
+                    if (cap == 0) cap = 1;
+                    size_t N = (luaLen < cap) ? luaLen : cap;
+                    size_t typeSize = elementType->getSize();
+                    if (typeSize == 0) typeSize = sizeof(uint64_t);
+                    void* mem = ::operator new(cap * typeSize);
+                    std::memset(mem, 0, cap * typeSize);
+                    size_t fieldCount = elementType->getFieldCount();
+                    for (size_t k = 0; k < N; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        void* elemSlot = static_cast<uint8_t*>(mem) + k * typeSize;
+                        if (lua_istable(L, -1)) {
+                            for (size_t fi = 0; fi < fieldCount; ++fi) {
+                                auto* field = elementType->getField(fi);
+                                if (!field) continue;
+                                lua_getfield(L, -1, field->getName());
+                                if (!lua_isnil(L, -1)) {
+                                    void* fieldPtr = static_cast<uint8_t*>(elemSlot)
+                                                     + field->getOffset();
+                                    storeFieldPrimitive(L, field, fieldPtr, -1);
+                                }
                                 lua_pop(L, 1);
                             }
-                            argPtrs[i] = vec;
-                            registerCleanup(vec, [](void* p) { delete static_cast<std::vector<float>*>(p); });
                         }
+                        lua_pop(L, 1);
                     }
+                    argPtrs[i] = mem;
+                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else if (!isFixedSize && elemIsInt) {
+                    // R4.1: std::vector<int> — unchanged.
+                    auto* vec = new std::vector<int>();
+                    vec->reserve(luaLen);
+                    for (size_t k = 0; k < luaLen; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        int32_t v = static_cast<int32_t>(lua_tointeger(L, -1));
+                        vec->push_back(v);
+                        lua_pop(L, 1);
+                    }
+                    argPtrs[i] = vec;
+                    registerCleanup(vec, [](void* p) { delete static_cast<std::vector<int>*>(p); });
+                } else if (!isFixedSize && elemIsFloat) {
+                    // R4.1: std::vector<float> — unchanged.
+                    auto* vec = new std::vector<float>();
+                    vec->reserve(luaLen);
+                    for (size_t k = 0; k < luaLen; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        vec->push_back(static_cast<float>(lua_tonumber(L, -1)));
+                        lua_pop(L, 1);
+                    }
+                    argPtrs[i] = vec;
+                    registerCleanup(vec, [](void* p) { delete static_cast<std::vector<float>*>(p); });
+                } else if (!isFixedSize && elemIsString) {
+                    // R4.1b: std::vector<std::string> — push_back each
+                    // lua_tostring value. ~vector<std::string> destroys
+                    // each element on delete (R3 std::string input pattern).
+                    auto* vec = new std::vector<std::string>();
+                    vec->reserve(luaLen);
+                    for (size_t k = 0; k < luaLen; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        const char* s = lua_tostring(L, -1);
+                        vec->emplace_back(s ? s : "");
+                        lua_pop(L, 1);
+                    }
+                    argPtrs[i] = vec;
+                    registerCleanup(vec, [](void* p) {
+                        delete static_cast<std::vector<std::string>*>(p);
+                    });
+                } else if (!isFixedSize && elemIsStruct) {
+                    // R4.1b: std::vector<MyStruct> — std::vector<uint8_t>
+                    // byte buffer, reinterpreted as std::vector<MyStruct>
+                    // at the readArg cast site. Safe only when MyStruct is
+                    // trivially-destructible + trivially-copyable (mirrors
+                    // R3 struct-arg restriction). The bridge cannot
+                    // instantiate `std::vector<MyStruct>` directly because
+                    // the call site sees only ITypeInfo*; the typed
+                    // `MethodInfoImpl<..., std::vector<MyStruct>, ...>`
+                    // template instantiation provides the real type at
+                    // readArg, where `ArgT(*vp)` reinterprets the
+                    // vector<uint8_t>* slot pointer as vector<MyStruct>*.
+                    auto* vec = new std::vector<uint8_t>();  // raw byte buffer
+                    size_t typeSize = elementType->getSize();
+                    if (typeSize == 0) typeSize = sizeof(uint64_t);
+                    vec->resize(luaLen * typeSize);
+                    size_t fieldCount = elementType->getFieldCount();
+                    for (size_t k = 0; k < luaLen; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        void* elemSlot = vec->data() + k * typeSize;
+                        std::memset(elemSlot, 0, typeSize);
+                        if (lua_istable(L, -1)) {
+                            for (size_t fi = 0; fi < fieldCount; ++fi) {
+                                auto* field = elementType->getField(fi);
+                                if (!field) continue;
+                                lua_getfield(L, -1, field->getName());
+                                if (!lua_isnil(L, -1)) {
+                                    void* fieldPtr = static_cast<uint8_t*>(elemSlot)
+                                                     + field->getOffset();
+                                    storeFieldPrimitive(L, field, fieldPtr, -1);
+                                }
+                                lua_pop(L, 1);
+                            }
+                        }
+                        lua_pop(L, 1);
+                    }
+                    // Reinterpret vector<uint8_t>* as vector<MyStruct>*
+                    // — see safety comment above. readArg's slot pointer
+                    // is reinterpreted back to vector<MyStruct>*; the
+                    // PMF then copy-constructs a fresh vector<MyStruct>
+                    // by value.
+                    argPtrs[i] = vec;
+                    registerCleanup(vec, [](void* p) {
+                        delete static_cast<std::vector<uint8_t>*>(p);
+                    });
+                } else if (isFixedSize && elemIsString) {
+                    // std::array<std::string, N> — placement-new N strings
+                    // in a heap block + per-element dtor walk on cleanup.
+                    // Deferred to R4.1c (size-of-patch concern; the user
+                    // accepted vector<struct>/vector<string>/array<struct>
+                    // for this slice but punted the string-array case).
+                    ayt::log::warn("ayt_reflect_call_method: std::array<std::string, N> not yet supported in R4.1b (deferred to R4.1c)");
+                    argPtrs[i] = nullptr;
                 }
             }
         } else {
@@ -1034,44 +1139,90 @@ int ayt_reflect_call_method_c(lua_State* L)
         const std::string* sp = static_cast<const std::string*>(retPtr);
         lua_pushlstring(L, sp->data(), sp->size());
     } else if (auto* containerType = dynamic_cast<ayt::reflect::IContainerTypeInfo*>(retType)) {
-        // R4.1 (2026-07-13): container return (std::vector<T> or
-        // std::array<T, N>). Walk getElementAt(i) and push each
-        // element to a new Lua table. Element-type scope is int /
-        // float (matches the arg-marshal path). R4.1b would extend
-        // to struct elements via pushFieldPrimitive's struct path.
+        // R4.1b (2026-07-13): container return (std::vector<T> or
+        // std::array<T, N>). Walk getElementAt(i) and push each element
+        // to a new Lua table. Element-type scope is {int, float,
+        // std::string, struct}. The struct branch builds a Lua
+        // sub-table per element via pushFieldPrimitive (recurses into
+        // nested struct fields for free). 1-indexed layout matches
+        // the R4.1 positional TableExpr emit shape — Logia reads via
+        // getVec()[k] (Lua 1-indexed).
         auto* elementType = containerType->getElementType();
         const size_t N = containerType->getContainerSize(retPtr);
         lua_newtable(L);
         const int outerIdx = lua_gettop(L);
-        const char* ename = elementType ? elementType->getName() : nullptr;
-        const bool elemIsInt   = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
-        const bool elemIsFloat = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
-        if (elemIsInt || elemIsFloat) {
-            const size_t elemSize = elemIsInt ? sizeof(int32_t) : sizeof(float);
-            for (size_t k = 0; k < N; ++k) {
-                const void* elemPtr = containerType->getElementAt(retPtr, k);
-                if (!elemPtr) {
-                    // std::vector<bool> returns nullptr (bit-packed);
-                    // push 0 as a safe default. R4.1 doesn't support
-                    // vector<bool> anyway but this keeps the bridge
-                    // from crashing on a mis-registered type.
-                    lua_pushinteger(L, 0);
-                } else if (elemIsInt) {
-                    int32_t v = 0;
-                    std::memcpy(&v, elemPtr, elemSize);
-                    lua_pushinteger(L, static_cast<lua_Integer>(v));
-                } else {
-                    float v = 0.0f;
-                    std::memcpy(&v, elemPtr, elemSize);
-                    lua_pushnumber(L, static_cast<lua_Number>(v));
-                }
-                lua_rawseti(L, outerIdx, static_cast<int>(k + 1));
-            }
+
+        if (!elementType || N == 0) {
+            // Empty table — caller observes #t == 0.
         } else {
-            // Unsupported element type — push an empty table.
-            // Caller can still inspect length via #t (returns 0).
-            ayt::log::warn("ayt_reflect_call_method: container return element type '%s' not yet supported in R4.1",
-                           ename ? ename : "(null)");
+            const char* ename = elementType->getName();
+            const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+            const bool elemIsFloat  = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
+            const bool elemIsString = (ename && std::strcmp(ename, "std::string") == 0);
+            const bool elemIsStruct = (elementType->getFieldCount() > 0);
+
+            if (!elemIsInt && !elemIsFloat && !elemIsString && !elemIsStruct) {
+                // bool / double / nested-container — push empty table,
+                // caller observes #t == 0. Mirrors arg-marshal fail-closed.
+                ayt::log::warn("ayt_reflect_call_method: container return element type '%s' not yet supported in R4.1b",
+                               ename ? ename : "(null)");
+            } else {
+                for (size_t k = 0; k < N; ++k) {
+                    const void* elemPtr = containerType->getElementAt(retPtr, k);
+                    if (!elemPtr) {
+                        // std::vector<bool> returns nullptr (bit-packed);
+                        // push nil. R4.1b doesn't claim vector<bool>
+                        // support anyway but this keeps the bridge from
+                        // crashing on a mis-registered type.
+                        lua_pushnil(L);
+                    } else if (elemIsInt) {
+                        int32_t v = 0;
+                        std::memcpy(&v, elemPtr, sizeof(int32_t));
+                        lua_pushinteger(L, static_cast<lua_Integer>(v));
+                    } else if (elemIsFloat) {
+                        float v = 0.0f;
+                        std::memcpy(&v, elemPtr, sizeof(float));
+                        lua_pushnumber(L, static_cast<lua_Number>(v));
+                    } else if (elemIsString) {
+                        const std::string* sp = static_cast<const std::string*>(elemPtr);
+                        lua_pushlstring(L, sp->data(), sp->size());
+                    } else {
+                        // elemIsStruct — build a sub-table per element.
+                        // Uses pushFieldPrimitive which already handles
+                        // primitive leaves + nested-struct fields (R4.0).
+                        // The sub-table is left on top of the Lua stack
+                        // and the outer lua_rawseti assigns it at
+                        // outerIdx[k+1] (which also pops the value).
+                        lua_newtable(L);
+                        const int subIdx = lua_gettop(L);
+                        size_t fieldCount = elementType->getFieldCount();
+                        for (size_t fi = 0; fi < fieldCount; ++fi) {
+                            auto* field = elementType->getField(fi);
+                            if (!field) continue;
+                            void* fieldPtr = static_cast<uint8_t*>(
+                                                 const_cast<void*>(elemPtr))
+                                             + field->getOffset();
+                            // pushFieldPrimitive pushes the value at
+                            // fieldPtr; capture its top-of-stack slot for
+                            // the lua_settable below.
+                            if (pushFieldPrimitive(L, field, fieldPtr) == 1) {
+                                lua_pushstring(L, field->getName());
+                                lua_settable(L, subIdx);
+                            } else {
+                                // pushFieldPrimitive returned 0 — pop
+                                // any leftover nil so the stack stays
+                                // balanced.
+                                if (lua_gettop(L) > subIdx) {
+                                    lua_pop(L, 1);
+                                }
+                            }
+                        }
+                        // sub-table now at top of stack — fall through
+                        // to lua_rawseti which assigns + pops it.
+                    }
+                    lua_rawseti(L, outerIdx, static_cast<int>(k + 1));
+                }
+            }
         }
     } else if (retType->getFieldCount() > 0) {
         // S3.12+R3: struct return. Build a Lua table and fill each

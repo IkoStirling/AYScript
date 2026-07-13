@@ -644,6 +644,61 @@ C++  AY_PROPERTY(Type, name, FieldAttribute::...)
 | Positional TableExpr `{v1, v2, v3}` (parser + codegen) | `std::vector<std::vector<T>>` (R4.1d) |
 | `IContainerTypeInfo::isFixedSize()` virtual | `T&` / `T*` out-param (R4.2) |
 
+#### 5.7.4 R4.1b — container element types: struct / std::string
+
+**状态**：✅ **R4.1b 完成（2026-07-13,commit 待 push）**。R4.1 留下 3 个未完成 case —— `std::vector<MyStruct>` / `std::vector<std::string>` / `std::array<MyStruct,N>` 都没在 method 边界打通。R4.1b 把这 3 条 closure,`std::array<std::string,N>` 推 R4.1c(placement-new N strings + per-element dtor walk,非平凡)。
+
+**实现摘要**：
+
+1. **bridge 容器 arg-marshal 加四-way 分支** (`ayt_reflect_call_method_c`)：原本两-way (int/float) 拆成 int / float / struct / std::string 四-way。`isFixedSize` 决定 array vs vector 路径,element 类型决定 fill 路径:
+   - **array<primitive>**:raw-byte buffer + memcpy(原 R4.1 路径,保留)
+   - **array<MyStruct,N>** (R4.1b 新):`::operator new(cap * sizeof(MyStruct))` + memset 0 + 每元素 `storeFieldPrimitive` 递归填字段。Cleanup:`::operator delete` (struct trivial dtor 时无操作,memset 0 init 状态有效)
+   - **vector<primitive>**:heap-alloc `std::vector<int/float>` + `push_back`(原 R4.1 路径)
+   - **vector<std::string>** (R4.1b 新):`new std::vector<std::string>` + `emplace_back(lua_tostring)`。`~vector<std::string>` 销毁每个 string
+   - **vector<MyStruct>** (R4.1b 新):`new std::vector<uint8_t>` resized to `luaLen * sizeof(MyStruct)`,memset 0 + 每元素 `storeFieldPrimitive` 填字段。slot pointer reinterpret as `vector<MyStruct>*` 在 `MethodInfoImpl::readArg`(`ArgT(*vp)` 路径)。Cleanup:`delete vector<uint8_t>` — **仅限于 trivially-destructible + trivially-copyable T**(同 R3 struct-arg 限制)
+   - **array<std::string,N>**:warn + nullptr(推 R4.1c)
+
+2. **bridge 容器 return-marshal 同样扩四-way**：读路径只看 `getElementAt(k)`,不需要 fill,所以 type-safe:
+   - **primitive**:memcpy + lua_pushinteger/number
+   - **std::string**:`lua_pushlstring(sp->data(), sp->size())`
+   - **struct**:`lua_newtable` + 每个 field 走 `pushFieldPrimitive` 递归(R4.0 已支持 nested struct field,这里 free reuse) + sub-table 由外层 `lua_rawseti` 设到 outer table
+   - 1-indexed Lua table(同 R4.1 — 与 Logia positional TableExpr emit shape 对齐)
+
+3. **`MethodInfoImpl` / `MethodInfoImplConst` 不动**:`is_std_vector_v` / `is_std_array_v` traits (R4.2 已 strip ref/const) 和 `readArg` slot convention `*vp` copy-construct 任意 T — 对 MyStruct / std::string 元素 T 自动 work,无需 MethodInfoImpl 改一行。
+
+4. **kLogiaPipelineVersion 11 → 12**:bridge runtime marshal 路径新增(不影响 codegen emit shape,但 compile cache 强制失效)。
+
+5. **vector<MyStruct> 实现细节 — 为什么用 `vector<uint8_t>` reinterpret**:bridge 编译时只见 `ITypeInfo*`,不知道 T。要 typed `new std::vector<MyStruct>()` 需 typed trampoline(走 `IMethodInfo` virtual 扩展,ABI 变化)。`vector<uint8_t>` reinterpret 路径虽然技术上是 UB(对 non-trivial dtor),但对 trivially-destructible T 现实安全,与 R3 struct-arg 限制一致。Future Path A(typed trampoline)可消除此限制,需另开 slice。
+
+**测试覆盖（6 cases,`Test_LogiaReflectRuntime.cpp` R4_1bPlayer fixture + LG-12 R4.1b 套件）**：
+
+| # | 名称 | 验证点 |
+|---|---|---|
+| 1 | `lg12_r41b_vector_struct_arg` | `self.sumPoints({{x=1,y=2},{x=3,y=4}})` → 2*1000+(1+2+3+4) = 2010 |
+| 2 | `lg12_r41b_vector_struct_return` | `self.getPoints()` 写 lastFirstX/Y/lastSecondX/Y 到 self,* Logia 读 → first_x(10) + second_y(40)*100 = 4010 |
+| 3 | `lg12_r41b_vector_string_arg` | `self.joinStrings({"hello","world"})` → 2*100+(5+5) = 210 |
+| 4 | `lg12_r41b_vector_string_return` | `self.getStrings()` 写 first/second string lengths 到 self.lastFirstX/lastSecondX,Logia 读 → 3 + 3*10 = 33 |
+| 5 | `lg12_r41b_array_struct_arg` | `self.sumArray({{x=1,y=2},{x=3,y=4}})` → 1+2+3+4 = 10 + self.lastPoint == (4,6) |
+| 6 | `lg12_r41b_vector_struct_single_element` | `self.onePoint({{x=42,y=0}})` → lastSum=42, lastLen=1, witness = 42+100 = 142 |
+
+**结果**：`AYScript_Test` **824/824 全绿**(baseline 778 + R4.1b 6 tests + 已有 40 个 dump/reflect/adapter/tool 集成用例)。
+
+**范围**：
+
+| ✅ R4.1b ships | ❌ Deferred |
+|---|---|
+| `std::vector<MyStruct>` arg + return(trivially-destructible T) | `std::array<std::string, N>` arg/return (R4.1c,placement-new) |
+| `std::vector<std::string>` arg + return | `std::vector<non-trivial struct>`(typed trampoline ABI 变化,推 Path A slice) |
+| `std::array<MyStruct, N>` arg (N=2 in fixture;一般 N 工作) | `std::vector<bool>` (R4.1c,bit-packed) |
+| 容器 return sub-table 走 pushFieldPrimitive 递归(R4.0 reuse) | `std::vector<std::vector<T>>` nested container (R4.1d) |
+
+**Lessons learned (R4.1b specific)**：
+
+26. **vector<struct> 用 `vector<uint8_t>` byte buffer 是 pragmatic UB 妥协**：bridge 见 `ITypeInfo*` 无法 typed `new std::vector<MyStruct>()`,Path A 需 `IMethodInfo` vtable 扩 typed trampoline。R4.1b 选 Path B(`vector<uint8_t>` resize + reinterpret at readArg)以避免 ABI 变化,document 限制(trivially-destructible T only)—— 与 R3 struct-arg 已存在的限制对齐。Lesson:**ITypeInfo-driven bridge 在 typed instantiation 是隐藏 bottleneck,每个非-trivial element kind 都要决定走 ABI 变化 vs runtime UB**。
+27. **容器 return 走 side-effect pattern + self.* readback**:与 R4.2 out-param 同样的 Lua 限制(`var pts = self.getPoints(); pts[1].x`)是 codegen 跨 method-call-chain 的限制,不是 bridge 限制。Fixture 用 `self.lastFirstX/Y` 等显式 side-effect field,Logia 读 self.*。这与 R3+ 的 `__test_witness = tostring(self.foo)` 模式一致。
+28. **registerVectorType<std::string>() 需先注册 std::string**:bridge 的 `ensureBuiltinTypesRegistered` 只注册 int/float/bool/double/Int64,**不注册 std::string**。`registerVectorType<T>` 内部 `findType<T>()`,对 `T = std::string` 必须先 `registerType("std::string", ...)`。R3 fixture 的 DamageInfo 路径有 std::string field 同款限制,R4.1b 走独立的 std::string-as-element 路径需要在 fixture 里多加一行注册。Lesson:**测试 fixture 检查 `findType<T>()` 不是 native bool/int/float 时显式注册**,不要假设 bridge 帮你做了。
+29. **struct as byte buffer 的 memset 0 + leave-alone-on-destroy 模式**:`std::array<MyStruct, N>` 的 `::operator new(cap * typeSize) + memset 0 + per-element storeFieldPrimitive + ::operator delete` 不需要 explicit `~MyStruct()` 调用,因为 trivial dtor 不做操作。这与 R3 struct-arg 的 `memset(mem, 0, typeSize)` 模式一致。
+
 **Lessons learned (R4.1 specific)**：
 
 17. **MethodInfoImpl 的 if-constexpr ladder 是 bridge 协议扩展点**:R3.0 加了 enum / std::string / lvalue-ref / pointer 分支,R4.1 加 std::vector / std::array。每个新分支只需要在 readArg 加一个 if constexpr,bridge arg-side 加一个 dynamic_cast 分支,无需修改 PMF 本身。MethodInfoImpl 作为"slot 派发器"的设计在 R4.1 完整闭环。
