@@ -77,6 +77,8 @@ private:
     // Statement emitters
     void emitVarDecl(const VarDeclStmt& var);
     void emitIfStmt(const IfStmt& stmt);
+    void emitWhileStmt(const WhileStmt& stmt);   // R5.0 (2026-07-13)
+    void emitForStmt(const ForStmt& stmt);       // R5.0 (2026-07-13)
     void emitReturnStmt(const ReturnStmt& stmt);
     void emitExprStmt(const ExprStmt& stmt);
 

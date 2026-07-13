@@ -98,6 +98,8 @@ private:
     void analyzeScript(ScriptDecl& s);
     void analyzeVarDecl(VarDeclStmt& v);
     void analyzeLifecycle(LifecycleFuncDecl& fn);
+    void analyzeWhileStmt(WhileStmt& w);   // R5.0 (2026-07-13)
+    void analyzeForStmt(ForStmt& f);       // R5.0 (2026-07-13)
     void analyzeStmt(Stmt& s);
     void analyzeExpr(Expr& e);
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);

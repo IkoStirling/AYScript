@@ -52,7 +52,13 @@ namespace ayt::script
 //       changes for script-block `function NAME(...)` helpers, and
 //       SemanticAnalyzer may emit a new `LuaKeywordLeak` warning.
 //       Both invalidate the compile cache.
-constexpr std::size_t kLogiaPipelineVersion = 6u;
+//       2026-07-13 R5.0: bump 6 → 7. Codegen output shape changes
+//       for `while (cond) { body }` and `for (var i : N) { body }`.
+//       Both lower to Lua control-flow forms that were previously
+//       unavailable from Logia source. No new diagnostic surface —
+//       the only cache-invalidation trigger is the codegen shape
+//       change.
+constexpr std::size_t kLogiaPipelineVersion = 7u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

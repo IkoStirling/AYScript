@@ -185,6 +185,18 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     if (match(TokenType::If)) {
         return parseIfStmt();
     }
+    // R5.0 (2026-07-13): while / for are valid as statements inside
+    // lifecycle bodies and inside script-block helper function bodies
+    // (parseBlockBody routes both here via parseStatement). They are
+    // NOT valid as script-block members — parseMember has no While /
+    // For dispatch, so a bare `while` at script-block scope falls
+    // through to the existing "Expected script member" error.
+    if (match(TokenType::While)) {
+        return parseWhileStmt();
+    }
+    if (match(TokenType::For)) {
+        return parseForStmt();
+    }
     if (check(TokenType::Var)) {
         return parseVarDecl();
     }
@@ -252,6 +264,69 @@ std::unique_ptr<Stmt> Parser::parseIfStmt()
     }
 
     return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+}
+
+// R5.0 (2026-07-13): `while (cond) { body }`.
+//
+// Brace-only form (parens required around the condition, matches the
+// existing `if (cond) { ... }` shape). Codegen emits
+// `while <cond> do ... end` — see LuaCodegen::emitWhileStmt.
+//
+// The condition is a full Logia expression (parseExpression), so any
+// comparison / logical / arithmetic that evaluates to a boolean is
+// accepted. Empty body is allowed (parses cleanly, emits a valid
+// empty Lua block).
+std::unique_ptr<Stmt> Parser::parseWhileStmt()
+{
+    consume(TokenType::LeftParen, "Expected '(' after 'while'");
+    auto condition = parseExpression();
+    consume(TokenType::RightParen, "Expected ')' after while condition");
+    consume(TokenType::LeftBrace, "Expected '{' before while body");
+    std::vector<StmtPtr> body = parseBlockBody();
+    consume(TokenType::RightBrace, "Expected '}' after while body");
+    return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+// R5.0 (2026-07-13): `for (var i : N) { body }`.
+//
+// CRITICAL: this path consumes `var Identifier Colon Expr` as a
+// dedicated counter-var pattern. It does NOT call parseVarDecl —
+// if it did, the bound `N` would be parsed as a `Type` (a single
+// identifier), and `for (var i : 10)` would fail with
+// `consumeIdentifier("Expected variable type")` because `10` is an
+// IntLiteral, not an Identifier.
+//
+// Outside `for(...)`, `var i : T` continues to be parsed by
+// parseVarDecl exactly as before — `T = 10` at statement scope
+// produces the same clean "unknown type" error a user would see
+// today for any unknown type name.
+//
+// Validation done here:
+//   - `(` is required (opens the for header).
+//   - `var` is required (the counter-var marker).
+//   - `Identifier` is required (no anonymous counter).
+//   - `:` is required (the bound separator).
+//   - `Expr` is the bound (full expression — could be `n`, `n*2`,
+//      `function_returning_int()`, etc.).
+//   - `)` terminates the header.
+//   - `{ body }` follows.
+//
+// Edge cases handled at runtime (not parse time):
+//   - `for (var i : 0)` or `for (var i : -1)` — parses cleanly; Lua
+//      skips the body when start > bound.
+std::unique_ptr<Stmt> Parser::parseForStmt()
+{
+    consume(TokenType::LeftParen, "Expected '(' after 'for'");
+    consume(TokenType::Var, "Expected 'var' inside for(...) header");
+    const Token counterTok = consumeIdentifier("Expected loop variable name");
+    consume(TokenType::Colon, "Expected ':' after loop variable name");
+    auto bound = parseExpression();
+    consume(TokenType::RightParen, "Expected ')' after for header");
+    consume(TokenType::LeftBrace, "Expected '{' before for body");
+    std::vector<StmtPtr> body = parseBlockBody();
+    consume(TokenType::RightBrace, "Expected '}' after for body");
+    return std::make_unique<ForStmt>(
+        counterTok.lexeme, std::move(bound), std::move(body));
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()
@@ -505,6 +580,8 @@ void Parser::synchronize()
         case TokenType::Run:
         case TokenType::Return:
         case TokenType::If:
+        case TokenType::While:   // R5.0 (2026-07-13): loop recovery.
+        case TokenType::For:     // R5.0 (2026-07-13): loop recovery.
         case TokenType::RightBrace:
             return;
         default:

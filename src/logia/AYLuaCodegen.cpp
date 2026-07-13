@@ -234,6 +234,12 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
 {
     if (auto* v = dynamic_cast<const VarDeclStmt*>(&stmt)) { emitVarDecl(*v); return; }
     if (auto* i = dynamic_cast<const IfStmt*>(&stmt))      { emitIfStmt(*i);   return; }
+    // R5.0 (2026-07-13): loop statements. WhileStmt and ForStmt
+    // dispatch BEFORE ReturnStmt so a `return` inside a loop body
+    // (R5.0.1) would be parsed/handled by parseWhileStmt / parseForStmt
+    // itself — no interference here.
+    if (auto* w = dynamic_cast<const WhileStmt*>(&stmt))   { emitWhileStmt(*w); return; }
+    if (auto* f = dynamic_cast<const ForStmt*>(&stmt))     { emitForStmt(*f);   return; }
     if (auto* r = dynamic_cast<const ReturnStmt*>(&stmt))  { emitReturnStmt(*r); return; }
     if (auto* e = dynamic_cast<const ExprStmt*>(&stmt))    { emitExprStmt(*e); return; }
     // 2026-07-11 audit fix: defensive — parser rejects `function`
@@ -279,6 +285,68 @@ void LuaCodegen::emitIfStmt(const IfStmt& stmt)
         emitBlock(stmt.elseBranch);
         --_indent;
     }
+
+    indent();
+    _out += "end\n";
+}
+
+// R5.0 (2026-07-13): `while (cond) { body }` → `while <cond> do ... end`.
+//
+// Mirrors emitIfStmt's shape: keyword on its own line with the
+// condition, body block indented one level, `end` de-dented. The
+// condition expression is emitted verbatim — emitExpr wraps BinaryExpr
+// in parens, so `while (count < 5) do` is the emitted shape (parens
+// are optional in Lua's `while cond do` form but always valid).
+//
+// Lua's `while cond do ... end` re-evaluates `cond` on each iteration;
+// no precomputation is done by codegen.
+void LuaCodegen::emitWhileStmt(const WhileStmt& stmt)
+{
+    indent();
+    _out += "while ";
+    _out += emitExpr(*stmt.condition);
+    _out += " do\n";
+
+    ++_indent;
+    emitBlock(stmt.body);
+    --_indent;
+
+    indent();
+    _out += "end\n";
+}
+
+// R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`.
+//
+// Critical emission rules:
+//   - The Logia `var` keyword and the colon are deliberately NOT
+//     emitted — Lua's `for` doesn't use `var`; the counter is
+//     implicitly declared by the `for` keyword itself.
+//   - The counter starts at 1 (hardcoded) and runs to `bound`
+//     inclusive (Lua's numeric-for default step is +1, which is
+//     what the user wants). No step argument is emitted.
+//   - `bound` is emitted via emitExpr, so any Logia expression
+//     reducing to a number is accepted (literal, identifier,
+//     function call, arithmetic).
+//   - Lua's `for i = 1, N do ... end` already provides the lexical
+//     scope for `i` (loop-local); no codegen-side scope marker is
+//     required.
+//
+// Edge cases handled at runtime (not codegen time):
+//   - `bound == 0` or `bound < 1` → Lua skips the body entirely.
+//   - Non-integer bound → Lua coerces per its numeric-for rules
+//     (truncation toward zero on Lua 5.5).
+void LuaCodegen::emitForStmt(const ForStmt& stmt)
+{
+    indent();
+    _out += "for ";
+    _out += stmt.counterName;
+    _out += " = 1, ";
+    _out += emitExpr(*stmt.bound);
+    _out += " do\n";
+
+    ++_indent;
+    emitBlock(stmt.body);
+    --_indent;
 
     indent();
     _out += "end\n";

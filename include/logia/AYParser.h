@@ -37,6 +37,8 @@ private:
 
     std::unique_ptr<Stmt> parseReturnStmt();
     std::unique_ptr<Stmt> parseIfStmt();
+    std::unique_ptr<Stmt> parseWhileStmt();   // R5.0 (2026-07-13): while (cond) { body }
+    std::unique_ptr<Stmt> parseForStmt();     // R5.0 (2026-07-13): for (var i : N) { body }
     std::vector<StmtPtr> parseBlockBody();
 
     const Token& current() const;

@@ -187,6 +187,45 @@ public:
     std::vector<StmtPtr> elseBranch;
 };
 
+// R5.0 (2026-07-13): loop statements. See design.md §5.7.6.x.
+//
+// WhileStmt: `while (cond) { body }` → Lua `while <cond> do ... end`.
+//   - `condition` is a Logia boolean expression. The parser consumes
+//     the surrounding parens; codegen emits the expression verbatim
+//     (parens around BinaryExpr are preserved by emitExpr).
+//   - `body` is a non-empty vector (empty body is allowed but unusual).
+//   - `condition` is re-evaluated each iteration at runtime (Lua
+//     semantics; no precomputation).
+class WhileStmt : public Stmt {
+public:
+    WhileStmt(ExprPtr condition, std::vector<StmtPtr> body)
+        : condition(std::move(condition)), body(std::move(body)) {}
+    ExprPtr condition;
+    std::vector<StmtPtr> body;
+};
+
+// ForStmt: `for (var i : N) { body }` → Lua `for i = 1, N do ... end`.
+//   - `counterName` is the user-written identifier (always `int`; the
+//     type is implicit — Logia for-loops are integer counters only).
+//   - `bound` is the upper-bound expression; emitted verbatim into
+//     the `N` slot. Any integer-valued expression is accepted
+//     (literal, identifier, function call, arithmetic).
+//   - The counter starts at 1 and runs to `bound` inclusive (Lua
+//     numeric-for default; matches user expectation per R5.0 spec).
+//   - The counter is implicitly loop-local at the Lua level; the
+//     analyzer does NOT push it into `_scope` (would cause a name
+//     leak in analyzer view vs. runtime behavior).
+class ForStmt : public Stmt {
+public:
+    ForStmt(std::string counterName, ExprPtr bound, std::vector<StmtPtr> body)
+        : counterName(std::move(counterName)),
+          bound(std::move(bound)),
+          body(std::move(body)) {}
+    std::string counterName;
+    ExprPtr bound;
+    std::vector<StmtPtr> body;
+};
+
 struct Param {
     std::string name;
     std::string typeName;

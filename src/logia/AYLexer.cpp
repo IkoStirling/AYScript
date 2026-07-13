@@ -149,6 +149,13 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         // soft warning `LuaKeywordLeak` to surface the leak.
         {"if", TokenType::If},
         {"else", TokenType::Else},
+        // R5.0 (2026-07-13): control-flow keywords. Reserved from this
+        // point on — any prior R3/R4 test that used `while` / `for`
+        // as identifiers must rename (none currently do; case 13 of
+        // Test_LogiaEmitDump surfaces LuaKeywordLeak for `local`,
+        // and the new keywords close the same gap for these two).
+        {"while", TokenType::While},
+        {"for", TokenType::For},
         {"return", TokenType::Return},
         {"true", TokenType::True},
         {"false", TokenType::False},

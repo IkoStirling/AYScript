@@ -22,6 +22,8 @@ enum class TokenType : uint8_t {
                     // script members").
     If,
     Else,
+    While,            // R5.0 (2026-07-13): `while (cond) { body }` → `while cond do ... end`
+    For,              // R5.0 (2026-07-13): `for (var i : N) { body }` → `for i = 1, N do ... end`
     Return,
     True,
     False,

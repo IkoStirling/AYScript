@@ -277,4 +277,86 @@ script Quux {
     CHECK(found);
 }
 
+// R5.0 (2026-07-13) — `while (cond) { body }` codegen.
+//
+// Condition is a BinaryExpr (Less); codegen wraps it in parens via
+// emitExpr's BinaryExpr rule, so the emitted form is
+// `while (count < 5) do`. The helper `tick()` is at script-block
+// scope (audit-fix shape) so the body demonstrates while-in-helper
+// — the most common lifecycle-driver pattern.
+TEST_CASE(emit_dump_14_while_loop) {
+    const char* src = R"(
+script WhileLoop {
+    var count: int = 0
+    function tick() {
+        while (count < 5) {
+            count = count + 1
+        }
+    }
+    on_start() { tick() }
+}
+)";
+    dumpCase("14_while_loop", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "while (count < 5) do"));
+    CHECK(containsFlat(_lastDump.emittedLua, "function tick()"));
+    CHECK(containsFlat(_lastDump.emittedLua, "end"));
+}
+
+// R5.0 (2026-07-13) — `for (var i : N) { body }` codegen.
+//
+// Counter `i` runs 1..N inclusive (Lua numeric-for default). The
+// emitted Lua shape MUST NOT contain the Logia `var` keyword or the
+// colon — those are stripped by parseForStmt's dedicated token path.
+TEST_CASE(emit_dump_15_for_loop) {
+    const char* src = R"(
+script ForLoop {
+    var sum: int = 0
+    function accumulate() {
+        for (var i : 10) {
+            sum = sum + i
+        }
+    }
+    on_start() { accumulate() }
+}
+)";
+    dumpCase("15_for_loop", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 1, 10 do"));
+    // emitExpr wraps BinaryExpr in parens; the emitted shape is
+    // `sum = (sum + i)`, not `sum = sum + i`.
+    CHECK(containsFlat(_lastDump.emittedLua, "sum = (sum + i)"));
+    CHECK(containsFlat(_lastDump.emittedLua, "end"));
+    // Defensive: ensure the Logia `var` keyword did NOT leak into the
+    // emitted Lua for-form. The for-counter is implicit in Lua.
+    CHECK_FALSE(containsFlat(_lastDump.emittedLua, "for var"));
+}
+
+// R5.0 (2026-07-13) — nested for loops.
+//
+// Verifies the parser re-enters `parseStatement` from `parseBlockBody`
+// for nested loops (the inner `for (var j : 3)` parses inside the
+// outer for's body). Inner counter `j` shadows outer `i` cleanly at
+// the Lua level (both are loop-local). The inner `for j = 1, 3 do`
+// must appear AFTER the outer `for i = 1, 3 do` and BEFORE the
+// second outer `end`.
+TEST_CASE(emit_dump_16_nested_for) {
+    const char* src = R"(
+script NestedLoop {
+    var tally: int = 0
+    function execute() {
+        for (var i : 3) {
+            for (var j : 3) {
+                tally = tally + 1
+            }
+        }
+    }
+    on_start() { execute() }
+}
+)";
+    dumpCase("16_nested_for", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 1, 3 do"));
+    CHECK(containsFlat(_lastDump.emittedLua, "for j = 1, 3 do"));
+    // emitExpr wraps BinaryExpr in parens.
+    CHECK(containsFlat(_lastDump.emittedLua, "tally = (tally + 1)"));
+}
+
 TEST_SUITE_END

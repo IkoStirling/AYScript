@@ -519,6 +519,54 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
     }
 }
 
+// R5.0 (2026-07-13): walk a while loop's condition and body.
+//
+// We do NOT push a new scope onto `_scope` — Lua's `while cond do ...
+// end` does not introduce a lexical scope, so the body is in the same
+// scope as the enclosing block. Variables declared in the body
+// (`var x: int = ...`) live for the iteration of the loop only at the
+// Logia-source level (the user's reading); each iteration sees the
+// same `local x` re-declaration in the emitted Lua, which Lua tolerates
+// as long as it's at the same block scope (which it is, since
+// `parseBlockBody` re-enters here).
+void SemanticAnalyzer::analyzeWhileStmt(WhileStmt& w)
+{
+    if (w.condition) analyzeExpr(*w.condition);
+    for (auto& s : w.body) {
+        if (s) analyzeStmt(*s);
+    }
+}
+
+// R5.0 (2026-07-13): walk a for loop's bound and body.
+//
+// The counter variable (e.g. `i` in `for (var i : 10)`) is deliberately
+// NOT added to `_scope` here. Lua's `for i = 1, N do ... end` already
+// makes `i` loop-local at the Lua level. If we added `i` to the
+// analyzer's `_scope`, then:
+//   1. Reads of `i` inside the body would resolve as if `i` were a
+//      Logia-script-level var (correct behavior, but only by accident).
+//   2. Reads/writes to `i` AFTER the loop body would also resolve to
+//      the analyzer's view of the counter, but at runtime the counter
+//      is gone (Lua's `for` is closed-over). This mismatch would
+//      produce silent type errors in future R5.0.1 diagnostic passes.
+//
+// Skipping the scope injection keeps the analyzer's view aligned with
+// runtime semantics: `i` is loop-local inside the body, and post-loop
+// references to `i` are implicit globals (same as any other
+// undeclared-identifier write in Logia S1).
+//
+// Bound type-check is deferred to R5.0.1: ideally we'd verify the
+// bound expression reduces to `int` and emit a soft warning otherwise.
+// S2.5 / LG-05 only stamps types on `self.<field>` leaf reads via
+// AYReflect; adding general expression-type inference is out of scope.
+void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
+{
+    if (f.bound) analyzeExpr(*f.bound);
+    for (auto& s : f.body) {
+        if (s) analyzeStmt(*s);
+    }
+}
+
 void SemanticAnalyzer::analyzeStmt(Stmt& s)
 {
     if (auto* es = dynamic_cast<ExprStmt*>(&s)) {
@@ -560,6 +608,10 @@ void SemanticAnalyzer::analyzeStmt(Stmt& s)
         if (is->condition) analyzeExpr(*is->condition);
         for (auto& t : is->thenBranch) if (t) analyzeStmt(*t);
         for (auto& e : is->elseBranch) if (e) analyzeStmt(*e);
+    } else if (auto* ws = dynamic_cast<WhileStmt*>(&s)) {     // R5.0 (2026-07-13)
+        analyzeWhileStmt(*ws);
+    } else if (auto* fs = dynamic_cast<ForStmt*>(&s)) {       // R5.0 (2026-07-13)
+        analyzeForStmt(*fs);
     } else if (auto* rs = dynamic_cast<ReturnStmt*>(&s)) {
         if (rs->value) analyzeExpr(*rs->value);
     } else if (auto* vd = dynamic_cast<VarDeclStmt*>(&s)) {
