@@ -24,7 +24,7 @@
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
-#include "IAYReflect.h"
+#include "ayreflect/IReflect.h"
 #include "AYReflect.h"
 #include "AYReflectMacros.h"
 
@@ -2204,6 +2204,11 @@ struct R4_1bPlayer {
     int lastFirstY = 0;
     int lastSecondX = 0;
     int lastSecondY = 0;
+    // R4.1c: array<std::string, 2> — first char of each slot stored for
+    // C++-side verification that the bridge delivered both slots intact
+    // (not just that the cap was right).
+    int lastStrA = 0;
+    int lastStrB = 0;
 
     struct Point {
         int x = 0;
@@ -2266,6 +2271,19 @@ struct R4_1bPlayer {
         return lastPoint.x + lastPoint.y;
     }
 
+    // R4.1c: array<std::string, 2> arg. PMF reads both slots, encodes
+    // (cap * 100 + total_chars) into the int return so the test asserts
+    // the array is fully delivered (cap = 2 means both slots filled).
+    // First chars of each slot go into lastStrA/lastStrB for independent
+    // C++-side verification of slot identity (not just slot count).
+    int joinArray(const std::array<std::string, 2>& a) {
+        lastStrA = a[0].empty() ? -1 : static_cast<int>(a[0][0]);
+        lastStrB = a[1].empty() ? -1 : static_cast<int>(a[1][0]);
+        int total = 0;
+        for (const auto& s : a) total += static_cast<int>(s.size());
+        return static_cast<int>(a.size()) * 100 + total;
+    }
+
     // 1-element vector — covers the trivially-small path (luaLen=1).
     int onePoint(const std::vector<Point>& v) {
         lastLen = static_cast<int>(v.size());
@@ -2320,6 +2338,8 @@ void ensureR4_1bPlayerRegistered()
     registerVectorType<R4_1bPlayer::Point>("R41bVecPoint");
     registerVectorType<std::string>("R41bVecString");
     registerArrayType<R4_1bPlayer::Point, 2>("R41bArrPoint2");
+    // R4.1c: array<std::string, 2> — placement-new path in bridge.
+    registerArrayType<std::string, 2>("R41bArrString2");
 
     // Register the host type with `lastSum` / `lastLen` / `lastPoint`.
     auto* info = new ayt::reflect::TypeInfoImpl<R4_1bPlayer>(
@@ -2348,6 +2368,13 @@ void ensureR4_1bPlayerRegistered()
     info->addField(new ayt::reflect::FieldInfoImpl(
         "lastSecondY", intInfo, offsetof(R4_1bPlayer, lastSecondY),
         ayt::reflect::FieldAttribute::Serialize));
+    // R4.1c fields
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastStrA", intInfo, offsetof(R4_1bPlayer, lastStrA),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastStrB", intInfo, offsetof(R4_1bPlayer, lastStrB),
+        ayt::reflect::FieldAttribute::Serialize));
 
     // Methods. Const-PMF for read-only methods; non-const for the ones
     // that mutate state via side effects (lastSum/lastLen/lastPoint/
@@ -2372,6 +2399,11 @@ void ensureR4_1bPlayerRegistered()
     info->addMethod(new MethodInfoImpl<R4_1bPlayer, int,
         const std::array<R4_1bPlayer::Point, 2>&>(
         "sumArray", &R4_1bPlayer::sumArray));
+    // R4.1c: array<std::string, 2> arg — placement-new path. Mutates
+    // lastStrA/lastStrB so non-const PMF.
+    info->addMethod(new MethodInfoImpl<R4_1bPlayer, int,
+        const std::array<std::string, 2>&>(
+        "joinArray", &R4_1bPlayer::joinArray));
     info->addMethod(new MethodInfoImpl<R4_1bPlayer, int,
         const std::vector<R4_1bPlayer::Point>&>(
         "onePoint", &R4_1bPlayer::onePoint));
@@ -2622,6 +2654,49 @@ script R4_1bPlayer {
     CHECK(bridge.getLuaGlobalString("__test_witness") == "142");
     CHECK(obj.lastSum == 42);
     CHECK(obj.lastLen == 1);
+}
+
+TEST_CASE(lg13_r41c_array_string_arg) {
+    // R4.1c: std::array<std::string, N> arg. Bridge placement-news
+    // N strings on a heap block, fills from Lua via lua_tostring,
+    // explicit per-element ~std::string() on cleanup. PMF reads
+    // both slots and encodes length + size into an int return;
+    // first chars go into lastStrA/lastStrB for C++-side
+    // verification of slot identity.
+    LogiaRuntimeBridge bridge;
+    ensureR4_1bPlayerRegistered();
+    R4_1bPlayer obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_1bPlayer");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_1bPlayer {
+    on_start() {
+        var s: int = self.joinArray({"hello", "world"})
+        __test_witness = tostring(s)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r41c_arr_string_arg", src, ctx, errors);
+    if (!loaded) {
+        for (const auto& e : errors) {
+            fprintf(stderr, "load error: %s\n", e.message.c_str());
+        }
+    }
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r41c_arr_string_arg",
+                               "on_start", &obj, nullptr));
+    // 2 slots * 100 + (5 + 5) = 210
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "210");
+    // C++ side: first chars of each slot.
+    CHECK(obj.lastStrA == static_cast<int>('h'));  // 'h' from "hello"
+    CHECK(obj.lastStrB == static_cast<int>('w'));  // 'w' from "world"
 }
 
 // ----------------------------------------------------------------------------

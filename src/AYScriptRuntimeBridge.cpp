@@ -16,14 +16,16 @@
 #define SOL_SAFE_NUMERICS   1
 #include <sol/sol.hpp>
 
-#include "AYChannel.h"
-#include "AYLogger.h"
+#include <functional>
+
+#include "aylog/Channel.h"
+#include "aylog/Logger.h"
 
 // LG-05 / S3.3: AYReflect introspection for `self.field` runtime
 // reads/writes. lua_State* comes from sol2 via its bundled
 // compat layer, so the lua_pushinteger/pop helpers below are
 // visible without an extra `<lua.h>` include.
-#include "IAYReflect.h"
+#include "ayreflect/IReflect.h"
 #include "AYReflect.h"  // full TypeRegistryImpl definition
 
 #include <unordered_map>
@@ -685,16 +687,18 @@ int ayt_reflect_call_method_c(lua_State* L)
 
     // Cleanup queue — every heap allocation registered here is freed
     // after invoke() returns, regardless of whether invoke succeeded.
-    // Uses a manual cleanup struct to avoid std::function heap alloc
-    // and to keep the type-erased destructor keyed on the heap
-    // pointer's actual type.
+    // R4.1c: deleter is std::function<void(void*)> (was: raw C function
+    // pointer) so per-call captures (e.g. the [cap] capture in
+    // std::array<std::string, N> placement-new cleanup) can travel with
+    // the slot. Stateless lambdas and raw function pointers convert
+    // implicitly — all existing callers stay source-compatible.
     struct HeapSlot {
         void* ptr = nullptr;
-        void (*deleter)(void*) = nullptr;
+        std::function<void(void*)> deleter;
     };
     std::vector<HeapSlot> cleanup;
-    auto registerCleanup = [&](void* p, void (*d)(void*)) {
-        cleanup.push_back({p, d});
+    auto registerCleanup = [&](void* p, std::function<void(void*)> d) {
+        cleanup.push_back({p, std::move(d)});
     };
 
     // Marshal each Lua arg into its slot. Dispatch is by ITypeInfo
@@ -949,13 +953,41 @@ int ayt_reflect_call_method_c(lua_State* L)
                         delete static_cast<std::vector<uint8_t>*>(p);
                     });
                 } else if (isFixedSize && elemIsString) {
-                    // std::array<std::string, N> — placement-new N strings
-                    // in a heap block + per-element dtor walk on cleanup.
-                    // Deferred to R4.1c (size-of-patch concern; the user
-                    // accepted vector<struct>/vector<string>/array<struct>
-                    // for this slice but punted the string-array case).
-                    ayt::log::warn("ayt_reflect_call_method: std::array<std::string, N> not yet supported in R4.1b (deferred to R4.1c)");
-                    argPtrs[i] = nullptr;
+                    // R4.1c: std::array<std::string, N> — placement-new N
+                    // strings on a heap block, fill from Lua via
+                    // lua_tostring, explicit per-element ~std::string()
+                    // walk on cleanup. (R4.1b deferred this branch — only
+                    // std::array<std::string,N> arg remained; return-side
+                    // is already covered by R4.1b's elemIsString return
+                    // path since ArrayTypeInfo::getElementAt hands back
+                    // std::string* for any in-bounds k.)
+                    size_t cap = containerType->getContainerSize(nullptr);
+                    if (cap == 0) cap = 1;  // defensive (ArrayTypeInfo asserts N>0)
+                    size_t N = (luaLen < cap) ? luaLen : cap;
+                    void* mem = ::operator new(cap * sizeof(std::string));
+                    // Default-construct ALL cap slots (unused slots get empty
+                    // strings — matches array<int,N>'s zero-fill convention
+                    // for slots [luaLen..cap)).
+                    for (size_t k = 0; k < cap; ++k) {
+                        new (static_cast<std::string*>(mem) + k) std::string();
+                    }
+                    for (size_t k = 0; k < N; ++k) {
+                        lua_rawgeti(L, stackIdx, static_cast<int>(k + 1));
+                        const char* s = lua_tostring(L, -1);
+                        *(static_cast<std::string*>(mem) + k) = std::string(s ? s : "");
+                        lua_pop(L, 1);
+                    }
+                    argPtrs[i] = mem;
+                    // HeapSlot stores a C-style function pointer, so the
+                    // deleter is stateless w.r.t. cap — capture cap by
+                    // value into the lambda body (mirrors R3 single-
+                    // std::string cleanup at line 740).
+                    registerCleanup(mem, [cap](void* p) {
+                        for (size_t k = 0; k < cap; ++k) {
+                            (static_cast<std::string*>(p) + k)->~basic_string();
+                        }
+                        ::operator delete(p);
+                    });
                 }
             }
         } else {
