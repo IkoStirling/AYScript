@@ -304,12 +304,29 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
         lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int64_t*>(fieldPtr)));
         return 1;
     }
+    // R4.2b (2026-07-13): std::string leaf field. Closes the
+    // R3.5-deferred gap at L310-312 (and the parallel gap in
+    // storeFieldPrimitive at L400-401 — storeFieldPrimitive is NOT
+    // fixed in R4.2b; struct sub-field writes still fail closed for
+    // std::string because placement-new on a heap buffer is a
+    // separate design). The read path is sufficient for R4.2b
+    // verification (the out-param write-back test needs
+    // `self.lastString` to round-trip cleanly) and small in scope.
+    // Mirrors the struct-return path at L1185-1187 (lua_pushlstring
+    // from a std::string*).
+    if (eq("std::string")) {
+        const std::string* sp = static_cast<const std::string*>(fieldPtr);
+        lua_pushlstring(L, sp->data(), sp->size());
+        return 1;
+    }
     // R4.0 — nested struct field: build a Lua sub-table with one
     // entry per primitive leaf (recursive for deeper nesting). The
     // same primitive dispatch above handles leaves at any depth.
     // Limitations carried over from R3.0: std::string sub-fields
-    // fail closed (nil) until R3.5+ lands; container
-    // (vector/array) sub-fields fail closed until R4.1+.
+    // (a string member of a struct field) still fail closed (nil)
+    // until R3.5+ — placement-new in storeFieldPrimitive is a
+    // separate design. Container (vector/array) sub-fields fail
+    // closed until R4.1+.
     if (type->getFieldCount() > 0) {
         lua_newtable(L);
         int subTableIdx = lua_gettop(L);
@@ -1024,8 +1041,9 @@ int ayt_reflect_call_method_c(lua_State* L)
             // pattern as R3.0's std::string input path).
             if (method->getParamIsOut(i) && paramType) {
                 const char* outTname = paramType->getName();
-                const bool outIsInt   = (outTname && (std::strcmp(outTname, "int") == 0 || std::strcmp(outTname, "Int32") == 0));
-                const bool outIsFloat = (outTname && (std::strcmp(outTname, "float") == 0 || std::strcmp(outTname, "Float32") == 0));
+                const bool outIsInt    = (outTname && (std::strcmp(outTname, "int") == 0 || std::strcmp(outTname, "Int32") == 0));
+                const bool outIsFloat  = (outTname && (std::strcmp(outTname, "float") == 0 || std::strcmp(outTname, "Float32") == 0));
+                const bool outIsString = (outTname && std::strcmp(outTname, "std::string") == 0);
                 const bool outIsStruct = paramType->getFieldCount() > 0;
                 if (outIsInt) {
                     void* mem = ::operator new(sizeof(int32_t));
@@ -1039,6 +1057,34 @@ int ayt_reflect_call_method_c(lua_State* L)
                     std::memcpy(mem, &seed, sizeof(float));
                     argPtrs[i] = mem;
                     registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                } else if (outIsString) {
+                    // R4.2b (2026-07-13): std::string& / std::string*
+                    // out-param. Heap-allocate a std::string (fixed
+                    // size regardless of SSO/heap state — same pattern
+                    // R3.0 uses for the input path at L737-744, no
+                    // placement-new needed). Seed from the Lua arg if
+                    // the user passed a string (input + output idiom,
+                    // mirroring the R4.2 struct out-param branch at
+                    // L1042-1066); default-init to "" otherwise.
+                    //
+                    // The PMF gets a writable reference/pointer via
+                    // readOutArg's std::string overloads (see
+                    // AYMethodInfoImpl.h:303-329 / 589-615); both
+                    // already work once the bridge stores a heap
+                    // std::string* in argPtrs[i]. After invoke, the
+                    // post-invoke write-back loop pushes the new
+                    // contents via lua_pushlstring + lua_replace on
+                    // the original arg slot (local Lua variable is
+                    // not C-rebindable per the R4.2 self.* idiom).
+                    auto* sp = new std::string();
+                    if (lua_type(L, stackIdx) == LUA_TSTRING) {
+                        const char* s = lua_tostring(L, stackIdx);
+                        if (s) sp->assign(s);
+                    }
+                    argPtrs[i] = sp;
+                    registerCleanup(sp, [](void* p) {
+                        delete static_cast<std::string*>(p);
+                    });
                 } else if (outIsStruct) {
                     // R4.2 struct out-param: heap-alloc T, fill from
                     // Lua table if user passed one (input + output),
@@ -1064,11 +1110,12 @@ int ayt_reflect_call_method_c(lua_State* L)
                     argPtrs[i] = mem;
                     registerCleanup(mem, [](void* p) { ::operator delete(p); });
                 } else {
-                    // Out-param but unsupported element type (std::string, double, etc.).
-                    // Fall through to int (no write-back) — caller's PMF
-                    // will see a default-initialised T*; user must not
-                    // depend on write-back for this type until R4.2b.
-                    ayt::log::warn("ayt_reflect_call_method: out-param type '%s' not yet supported in R4.2",
+                    // Truly unsupported out-param type (double, bool,
+                    // container, unknown). Fall through to int (no
+                    // write-back) — caller's PMF will see a default-
+                    // initialised T*; user must not depend on write-back
+                    // for these types until a future R4.x ships them.
+                    ayt::log::warn("ayt_reflect_call_method: out-param type '%s' not yet supported",
                                    outTname ? outTname : "(null)");
                     int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
                     std::memcpy(&argSlots[i], &v, sizeof(int32_t));
@@ -1120,28 +1167,49 @@ int ayt_reflect_call_method_c(lua_State* L)
         if (!method->getParamIsOut(i)) continue;
         auto* ptype = method->getParamType(i);
         if (!ptype) continue;
-        if (ptype->getFieldCount() <= 0) continue;  // primitive out-params: no Lua-side write-back needed
         const int stackIdx2 = static_cast<int>(i) + 4;
         const void* slotPtr = argPtrs[i];
         if (!slotPtr) continue;
-        lua_newtable(L);
-        const int newTblIdx = lua_gettop(L);
-        size_t fieldCount = ptype->getFieldCount();
-        for (size_t fi = 0; fi < fieldCount; ++fi) {
-            auto* field = ptype->getField(fi);
-            if (!field) continue;
-            void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(slotPtr))
-                             + field->getOffset();
-            lua_pushstring(L, field->getName());
-            pushFieldPrimitive(L, field, fieldPtr);
-            lua_settable(L, newTblIdx);
+        if (ptype->getFieldCount() > 0) {
+            // R4.2 struct out-param write-back. Build a Lua table
+            // with each field's new value via pushFieldPrimitive
+            // (which recurses into nested structs for free).
+            lua_newtable(L);
+            const int newTblIdx = lua_gettop(L);
+            size_t fieldCount = ptype->getFieldCount();
+            for (size_t fi = 0; fi < fieldCount; ++fi) {
+                auto* field = ptype->getField(fi);
+                if (!field) continue;
+                void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(slotPtr))
+                                 + field->getOffset();
+                lua_pushstring(L, field->getName());
+                pushFieldPrimitive(L, field, fieldPtr);
+                lua_settable(L, newTblIdx);
+            }
+            // Replace the original arg slot with the post-invoke table.
+            // Note: this only affects the *stack*; the user's local
+            // Lua variable still points to the pre-invoke table.
+            // The fixture uses self.* side effects to read back, so
+            // this write-back is documentation/intent only for R4.2.
+            lua_replace(L, stackIdx2);
+        } else if (std::strcmp(ptype->getName(), "std::string") == 0) {
+            // R4.2b (2026-07-13): std::string out-param write-back.
+            // Push the heap std::string's contents onto the Lua
+            // stack (lua_pushlstring copies, so the Lua string is
+            // independent of the heap T's lifetime — the cleanup
+            // queue frees the heap T after this loop). Then
+            // lua_replace swaps the original arg slot to point at
+            // the new Lua string. The user's local Lua variable
+            // cannot be C-rebound (R4.2 lesson 22 — Lua semantics),
+            // so the Logia source observes the new value via the
+            // self.* side-effect idiom, same as struct out-param.
+            const std::string* sp = static_cast<const std::string*>(slotPtr);
+            lua_pushlstring(L, sp->data(), sp->size());
+            lua_replace(L, stackIdx2);
         }
-        // Replace the original arg slot with the post-invoke table.
-        // Note: this only affects the *stack*; the user's local
-        // Lua variable still points to the pre-invoke table.
-        // The fixture uses self.* side effects to read back, so
-        // this write-back is documentation/intent only for R4.2.
-        lua_replace(L, stackIdx2);
+        // primitive out-params (int/float) intentionally fall through
+        // — no Lua-side write-back is needed; the C++ method writes
+        // the result to a self.* field that the script reads back.
     }
 
     auto* retType = method->getReturnType();

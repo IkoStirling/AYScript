@@ -85,6 +85,26 @@ namespace ayt::script
 //       unchanged — pattern is `self.fillInt(x)` where C++ writes
 //       to self.foo and the script reads back. Compile cache
 //       invalidated because bridge code path changed.
+//       2026-07-13 R4.2b: bump 14 → 15. Bridge runtime out-param
+//       marshal extended for `std::string` (T& / T* in PMF
+//       signature). Heap-allocates a fresh std::string per call
+//       (matches R3.0 std::string input pattern at runtime bridge
+//       L737-744 — fixed-size std::string, no placement-new needed).
+//       Seeds from lua_tostring if the user passed a string
+//       (input + output idiom, mirrors R4.2 struct out-param at
+//       L1042-1066); default-initialises to "" otherwise. The PMF
+//       writes through readOutArg's std::string& / std::string*
+//       overloads (AYMethodInfoImpl.h:303-329 / 589-615 — both
+//       already work with std::string once a heap std::string* is
+//       stored in the slot). After invoke, the bridge pushes the
+//       new std::string contents via lua_pushlstring + lua_replace
+//       on the original arg slot (local Lua variable still points
+//       to pre-invoke value per Lua semantics; Logia users read
+//       self.* via the R4.2 side-effect idiom). No AYReflect ABI
+//       change, no MethodInfoImpl change — readOutArg already
+//       supported std::string once a heap std::string* was
+//       supplied. Logia source unchanged. Compile cache invalidated
+//       because bridge code path changed.
 //       2026-07-13 R4.1d: bump 13 → 14. Bridge runtime container
 //       arg-marshal lifted from "trivially-destructible T only" to
 //       any struct T whose fields are reflect-supported primitives.
@@ -121,7 +141,7 @@ namespace ayt::script
 //       sub-table per struct element via pushFieldPrimitive or pushes
 //       each std::string via lua_pushlstring. Logia source unchanged.
 //       Compile cache invalidated because bridge code path changed.
-constexpr std::size_t kLogiaPipelineVersion = 14u;
+constexpr std::size_t kLogiaPipelineVersion = 15u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

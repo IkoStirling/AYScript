@@ -1871,6 +1871,7 @@ struct R4_2Player {
     float speed = 0.0f;
     int lastResult = 0;
     float lastFloat = 0.0f;
+    std::string lastString;
 
     struct Point {
         int x = 0;
@@ -1921,6 +1922,25 @@ struct R4_2Player {
         p.y = p.y + 20;
         lastPoint = p;
     }
+
+    // R4.2b (2026-07-13): std::string& / std::string* out-param.
+    // Bridge heap-allocates a std::string per call (R3.0 input path
+    // pattern at runtime bridge L737-744). The C++ method writes
+    // through; the post-invoke write-back loop pushes the contents
+    // via lua_pushlstring + lua_replace on the original arg slot.
+    // Read-back verified via self.lastString side effect — Lua
+    // locals cannot be C-rebound per the R4.2 lesson 22 footnote.
+    void fillString(std::string& out) {
+        out = "hello";
+        lastString = out;
+    }
+
+    void fillStringViaPtr(std::string* out) {
+        if (out) {
+            *out = "viaPtr";
+            lastString = *out;
+        }
+    }
 };
 
 void ensureR4_2PlayerRegistered()
@@ -1942,8 +1962,18 @@ void ensureR4_2PlayerRegistered()
             ayt::reflect::detail::defaultCopy<float>);
         reg.registerTypeInfo("float", p);
     }
+    // R4.2b (2026-07-13): std::string type registration — mirror of
+    // the R3 fixture's pattern at L914-917. Required so the bridge's
+    // method->getParamType(i)->getName() returns "std::string" and
+    // the new outIsString branch fires. (Same name as R3.0's input
+    // path runtime bridge L737-744.)
+    if (reg.findType("std::string") == nullptr) {
+        reg.registerType("std::string", typeid(std::string).hash_code(),
+                         sizeof(std::string));
+    }
     auto* intInfo   = reg.findType("int");
     auto* floatInfo = reg.findType("float");
+    auto* stringInfo = reg.findType("std::string");
 
     // Register Point (the struct out-param type). Use a unique name
     // ("R4_2Point") to avoid colliding with any other fixture.
@@ -1981,6 +2011,9 @@ void ensureR4_2PlayerRegistered()
     info->addField(new ayt::reflect::FieldInfoImpl(
         "lastPoint", pointInfo, offsetof(R4_2Player, lastPoint),
         ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "lastString", stringInfo, offsetof(R4_2Player, lastString),
+        ayt::reflect::FieldAttribute::Serialize));
 
     using ayt::script::logia::reflect::MethodInfoImpl;
     // out-param methods: int&, float&, int*, struct& — all non-const.
@@ -1994,6 +2027,13 @@ void ensureR4_2PlayerRegistered()
         "fillViaPtr", &R4_2Player::fillViaPtr));
     info->addMethod(new MethodInfoImpl<R4_2Player, void, R4_2Player::Point&>(
         "mutatePoint", &R4_2Player::mutatePoint));
+    // R4.2b (2026-07-13): std::string& / std::string* out-param
+    // methods. Bridge treats both shapes identically per the
+    // is_out_param_v trait at AYMethodInfoImpl.h:163-176.
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, std::string&>(
+        "fillString", &R4_2Player::fillString));
+    info->addMethod(new MethodInfoImpl<R4_2Player, void, std::string*>(
+        "fillStringViaPtr", &R4_2Player::fillStringViaPtr));
 
     reg.registerTypeInfo("R4_2Player", info);
 }
@@ -2161,6 +2201,96 @@ script R4_2Player {
     CHECK(bridge.getLuaGlobalString("__test_witness") == "1122");
     CHECK(obj.lastPoint.x == 11);
     CHECK(obj.lastPoint.y == 22);
+}
+
+// =============================================================================
+// R4.2b (2026-07-13) — std::string& / std::string* out-param
+//
+// R4.2 covered int / float / struct out-params; std::string fell through
+// to int with a warn (silently corrupting readback). R4.2b adds the
+// std::string branch: bridge heap-allocates a std::string per call
+// (matches R3.0's input path at runtime bridge L737-744), seeds from
+// Lua if user passed a string (input + output idiom), the PMF writes
+// through readOutArg's std::string& / std::string* overloads
+// (AYMethodInfoImpl.h:303-329 / 589-615 — already work). After invoke,
+// the bridge pushes the new contents via lua_pushlstring + lua_replace
+// on the original arg slot. Logia users read self.* to observe the new
+// value (Lua locals cannot be C-rebound per R4.2 lesson 22).
+//
+// Test cases:
+//   1. std::string& out-param: pure-out — C++ writes "hello"
+//   2. std::string* out-param: pure-out via pointer — C++ writes "viaPtr"
+// =============================================================================
+
+TEST_CASE(lg15_r42b_string_out_param) {
+    // R4.2b: std::string& out-param. C++ writes "hello" via *out;
+    // Logia observes via self.lastString (self.* side-effect idiom —
+    // the local Lua variable `s` cannot be C-rebound per Lua semantics,
+    // same caveat as the R4.2 struct out-param test above).
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var s: string = ""
+        self.fillString(s)
+        __test_witness = self.lastString
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42b_string_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42b_string_out", "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "hello");
+    CHECK(obj.lastString == "hello");
+    // Length check exercises the std::string path's storage — a 5-char
+    // string stays in SSO so the heap allocation has no overflow risk.
+    CHECK(obj.lastString.size() == 5);
+}
+
+TEST_CASE(lg15_r42b_string_ptr_out_param) {
+    // R4.2b: std::string* (non-const) out-param. Bridge treats
+    // std::string* identically to std::string& per the is_out_param_v
+    // trait at AYMethodInfoImpl.h:163-176 — C++ writes "viaPtr"
+    // through the pointer. Self.* side-effect verifies the heap
+    // std::string slot was written.
+    LogiaRuntimeBridge bridge;
+    ensureR4_2PlayerRegistered();
+    R4_2Player obj;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R4_2Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R4_2Player {
+    on_start() {
+        var s: string = ""
+        self.fillStringViaPtr(s)
+        __test_witness = self.lastString
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("r42b_string_ptr_out", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r42b_string_ptr_out", "on_start", &obj, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "viaPtr");
+    CHECK(obj.lastString == "viaPtr");
+    CHECK(obj.lastString.size() == 6);
 }
 
 // ----------------------------------------------------------------------------
