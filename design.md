@@ -2,7 +2,7 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-14）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H 已交付**；`AYScript_Test` **1035/1035** 全绿；`kLogiaPipelineVersion = 21`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列。
+> **文档状态（2026-07-14）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H + S5 ED-02 已交付**；`AYScript_Test` **1058/1058** 全绿；`kLogiaPipelineVersion = 22`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列 + §5.7.4.x+4 S5 ED-02 source-location stamping。
 > **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R5.2 待选：R5.2-F (negative step) / R5.2-G (var step + runtime defense) / R5.2-I (multi-hop chain 收紧)。
 > **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
@@ -1233,7 +1233,68 @@ R5.2-C/D/E/H 是同款 philosophy 的四个切片：
 4. **每个 step 配 bump pipeline version** — cache invalidation 不留 stale entry
 5. **R5.2-H.b carve-out 是 host-boundary trust，不是 type-system 放宽** — 区分 "Logia 类型系统放宽" vs "host shim contract trust" 是 orthogonal concerns
 
-**`kLogiaPipelineVersion` 演进**：R5.0 = 7 → R5.0.1 = 8 → R5.1 = 9 → R5.2-A = 16 → R5.2-B = 17 → R5.2-C = 18 → R5.2-D = 19 → R5.2-E = 20 → R5.2-H = 21。
+**`kLogiaPipelineVersion` 演进**：R5.0 = 7 → R5.0.1 = 8 → R5.1 = 9 → R5.2-A = 16 → R5.2-B = 17 → R5.2-C = 18 → R5.2-D = 19 → R5.2-E = 20 → R5.2-H = 21 → **S5 ED-02 = 22**。
+
+#### 5.7.4.x+4 S5 ED-02 — Source-location stamping for analyzer diagnostics（2026-07-14）
+
+**状态**：✅ 完成。`kLogiaPipelineVersion 21 → 22`。`AYScript_Test` **1058/1058 全绿**（1035 R5.2-H baseline + 11 S5 ED-02 新增 + 12 隐藏 slice 增长）。commit `4eae7f8`。
+
+**为什么必须有**：R5.2-C/D/H 闭环 control flow 静态校验后,**用户体验**的最大缺口是 diagnostic 不知道"哪一行"。`for (var i : "hello")` 在 200 行 script 里默默报 `for-loop bound must be int, got string literal` 但 `0:0` 让用户找不到错误。CLI 的 `formatDiagnostic` (cli/main.cpp:148) 早就准备好 `file:line:col:` 格式,**只缺数据**。Slice 之前每个 analyzer-side 错误都 emission `0:0`,这是 debug 体验的最后一公里。
+
+**用户决策 2026-07-14** (this conversation plan-mode Q&A):
+- `CallExpr` / `MemberExpr` / `IndexExpr` postfix stamp → **inner expression's loc** (不是 punctuation)
+- `VarDeclStmt` initializer 报错 → **var 关键字的 loc** (不是 initializer)
+- Scope → include **ScriptDecl-level 错误**
+
+**AST 改动** (include/logia/AYAst.h):
+- `Expr` base 加 `SourceLocation sourceLoc = {}`(8 个 Expr subclass 继承)
+- `Stmt` base 加 `SourceLocation sourceLoc = {}`(13 个 concrete subclass 继承 — 单一 base field vs 13 个 per-subclass field;1 declaration 覆盖全部 13,后续 R-n 无需重新声明)
+- `ScriptDecl` 加 `SourceLocation sourceLoc = {}`(per scope decision)
+- 拉入 `AYCompilerError.h` 头
+
+**Parser 改动** (src/logia/AYParser.cpp + include/logia/AYParser.h):
+- 8 个 helper 函数 thread keyword token through:`parseReturnStmt(ifTok)` / `parseIfStmt(ifTok)` / `parseWhileStmt(whileTok)` / `parseForStmt(forTok)` / `parseBreakStmt(breakTok)` / `parseContinueStmt(continueTok)` / `parseDoBlock(doTok)` / `parseLabelDecl(openColonColon)` / `parseLifecycleFunc(kind, keywordTok)`。Keyword 在 `parseStatement` / `parseMember` 的 `match()` 后 `previous()` 立即捕获。
+- ~30 个 construction site stamp sourceLoc,**关键决定** (user-decided):
+  - **`ExprStmt`** 取 **inner expr 的 loc**(不是 `previous()` — 那是 trailing `;`)
+  - **`VarDeclStmt`** 取 **var 关键字的 loc**
+  - **`ReturnStmt` / `IfStmt` / `WhileStmt` / `ForStmt` / `BreakStmt` / `ContinueStmt` / `BlockStmt(do)` / `LifecycleFuncDecl`** → keyword token 的 loc
+  - **`LabelDeclStmt`** → label-name 的 loc(不是 `::`)
+  - **`FunctionDeclStmt`** → function-name 的 loc
+  - **`ScriptDecl`** → `script` keyword 的 loc
+  - **`CallExpr`** → **callee 的 loc**(不是 `(`)
+  - **`MemberExpr`** → **field-name 的 loc**(不是 `.`)
+  - **`IndexExpr`** → **index expr 的 loc**(不是 `[`)
+  - **`LiteralExpr` / `IdentifierExpr` / `BinaryExpr` / `UnaryExpr`** → 各自 distinguishing token 的 loc
+
+**Analyzer 改动** (src/logia/AYSemanticAnalyzer.cpp):
+- `sourceLocFor(Expr*)` 不再返 `{}`,读 `e->sourceLoc`
+- 新 `sourceLocFor(Stmt*)` 返 `s->sourceLoc`(Stmt base field,单 field read 因为所有 13 concrete subclass 继承)
+- 新 `sourceLocFor(ScriptDecl*)` 返 `s->sourceLoc`
+- **7 个新 populated diagnostic sites**:
+  - `analyzeScript` (unknown-host warning + strictInheritance error)
+  - `analyzeVarDecl` (unknown-type error)
+  - `analyzeLifecycle` (3 个 soft warnings:legacy params, system on_destroy, tool-only host)
+  - `analyzeIdentifierExpr` (implicit-global warning)
+  - `analyzeMemberExpr` (unknown-field warning)
+  - `analyzeBreakStmt` (label-not-visible)
+  - `analyzeLabelDeclStmt` (label-outside-loop x2 + duplicate-label)
+- **6 个 pre-existing call sites** (R5.2-C/D/H validators:for-bound, for-start, for-step x2, while-condition, if-condition) 自动 pickup real line/col numbers 无需修改
+
+**MSVC 踩坑**:`SourceLocation{line, column}` brace-init 失败,因为 `SourceLocation` 有 3 fields + 非平凡 `std::string file` default ctor — aggregate-initialization 要求全 fields。改用 explicit `.line = a; .column = b;` 赋值,**不**用 factory helper(保持 diff per-site-local + 避免 variadic template 在 8 个 ctor 的复杂度)。
+
+**CLI 接线** (cli/main.cpp:148 `formatDiagnostic`):已有 `file:line:col: severity: message` 格式,**不需要任何改动** — 只需要 `d.location.line > 0` 就有输出。
+
+**测试** (unittest/Test_LogiaSemantic.cpp + unittest/Test_LogiaCli.cpp):
+- 新 helpers `hasErrorAt(r, line, code)` 和 `hasWarningAt(r, line, code)` — single-responsibility predicates walk `r.diagnostics` 匹配 severity + errorCode + location.line
+- 10 个新 semantic TEST_CASEs 覆盖每个 AST node kind(for-bound-string TypeMismatch / unknown-identifier warning / unknown-field-member warning / break-outside-loop + continue-outside-loop parser-side UnexpectedToken / label-outside-loop analyzer-side InvalidStatement / if-condition + while-condition TypeMismatch / script-unknown-host-type warning / var-decl-unknown-type TypeMismatch)
+- 1 个新 CLI smoke test:binary run planted bad source,assert stderr 含 `:3:` (planted for-bound line) 和 `error:`。证明端到端 chain `parser → analyzer → diagnostic → formatDiagnostic → CLI stderr` wired correctly
+
+**Lessons learned**:
+1. **Future-slice comment 是 contract 起点**:`sourceLocFor(Expr*) { return {}; }` 在 R5.2-C 时的注释 "Future slice can add Expr-level source locations" 直接成为 S5 ED-02 的 contract 起点,**0 调研成本**
+2. **Thread keyword token through 8 helper functions 是 ~18 行的机械改动**,代价远低于 "在每个 helper 里重新 capture previous()" — keyword 在 dispatcher 里 `match()` 完就 `previous()`,但 helper 里再读 `previous()` 是 helper 内最新 consumed 的 token(`(` / `{`),不是 keyword 本身
+3. **brace-init `{a, b}` 跟 aggregate-initialization 在有非-trivial default-ctor field 的 struct 上是 MSVC trap** — silent reject,加 `static_assert` 都 catch 不到。Lesson:helper 装 sourceLoc setter 时 explicit `.line = ; .column = ;` 比 `{a, b}` 安全
+
+**`kLogiaPipelineVersion 21 → 22`** — 纯 diagnostic-surface 改但 stale cached diagnostics 会 silently flip from `0:0` 到 real lines,bump 强重 compile。
 
 #### 5.7.5 消费方矩阵
 
