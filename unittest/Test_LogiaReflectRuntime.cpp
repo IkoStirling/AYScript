@@ -3312,5 +3312,68 @@ script T {
 }
 
 // ----------------------------------------------------------------------------
+// R5.2-E (2026-07-14): bound type-recursion through int-typed
+// identifier leaves. The validator's `boundIsStaticallyInt`
+// BinaryExpr branch already recurses into leaves via the
+// IdentifierExpr path (which R5.2-C fixed to stamp resolvedType
+// via resolvedDecl→VarDeclStmt.typeName). R5.2-E confirms via
+// E2E that `n + 1` / `damage - 10` actually iterates the expected
+// number of times.
+// ----------------------------------------------------------------------------
+
+TEST_CASE(lg15_r52e_bound_var_plus_literal_iterates) {
+    // R5.2-E: `for (var i : 0, n + 1)` with n=4 must emit
+    // `for i = 0, (n + 1) - 1 do` → `for i = 0, 4 do`
+    // (Lua evaluates `n + 1` at runtime). Iterations: 0..4
+    // → sum = 0+1+2+3+4 = 10.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var n: int = 4
+        var sum: int = 0
+        for (var i : 0, n + 1) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52e_bound_plus_lit", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52e_bound_plus_lit", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "10");
+}
+
+TEST_CASE(lg15_r52e_bound_var_minus_literal_iterates) {
+    // R5.2-E: `for (var i : lo, damage - 10)` with
+    // lo=90, damage=100. `damage - 10 = 90` → emit
+    // `for i = 90, 89 do` → Lua's `for i = 90, 89 do`
+    // iterates zero times (Lua numeric-for upper bound is
+    // inclusive; 89 < 90 means body skipped). sum stays 0.
+    // This case verifies that the body is correctly skipped
+    // when start >= end-bound (the half-open semantics):
+    // the upper bound the codegen emits is the inclusive Lua
+    // upper bound AFTER R5.0.1's `(end - 1)` transformation.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var damage: int = 100
+        var sum: int = 0
+        for (var i : 90, damage - 10) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52e_bound_minus_lit", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52e_bound_minus_lit", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "0");
+}
+
+// ----------------------------------------------------------------------------
 
 TEST_SUITE_END

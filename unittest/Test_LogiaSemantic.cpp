@@ -911,4 +911,97 @@ script T {
     CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
 }
 
+// R5.2-E (2026-07-14): bound validator accepts type-recursive
+// expressions like `n + 1` where `n: int`. The capability was
+// latent in R5.2-C (IdentifierExpr / MemberExpr / CallExpr already
+// stamped `resolvedType`); R5.2-E's job is to commit to it
+// explicitly via tests + documentation, NOT to change validator
+// code. Step validator remains strict R5.2-D const-folded.
+
+TEST_CASE(r52e_bound_var_plus_literal_is_ok) {
+    // R5.2-E: most common case — `n + 1` where n: int.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() { for (var i : 0, n + 1) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52e_bound_var_minus_literal_is_ok) {
+    // R5.2-E: `damage - 10` (common in damage / HP patterns).
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var damage: int = 100
+    on_start() { for (var i : 0, damage - 10) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52e_bound_var_var_arithmetic_is_ok) {
+    // R5.2-E: `n + m` (both int vars). Tests BinaryExpr with
+    // both leaves being identifier-int (no literal at all).
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 3
+    var m: int = 7
+    on_start() { for (var i : 0, n + m) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52e_bound_var_plus_float_is_hard_error) {
+    // R5.2-E: int + float is still rejected — Logia has no
+    // implicit int↔float promotion. The float leaf falls
+    // through to `return false` and the binary inherits.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() { for (var i : 0, n + 1.5) { } }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52e_step_var_plus_literal_still_hard_error) {
+    // R5.2-E regression: step stays strict R5.2-D const-folded.
+    // `n - 1` would need codegen runtime check to enforce
+    // non-zero, which violates R5.2-D's static-only principle.
+    // Step is intentionally NOT type-recursive in R5.2-E.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 3
+    on_start() { for (var i : 0, 10, n - 1) { } }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52e_regression_r52c_int_var_bound_still_works) {
+    // R5.2-E regression: the most basic R5.2-C case must
+    // still pass. (Verifies no analyzer regression.)
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() { for (var i : 0, n) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
 TEST_SUITE_END

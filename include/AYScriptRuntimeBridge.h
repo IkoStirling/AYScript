@@ -194,7 +194,26 @@ namespace ayt::script
 //       range-form expression. New file-local helper `evaluateAsInt`
 //       in SemanticAnalyzer.cpp walks LiteralExpr / BinaryExpr /
 //       UnaryExpr to constant-fold a candidate step expression.
-constexpr std::size_t kLogiaPipelineVersion = 19u;
+//       2026-07-14 R5.2-E: bump 19 → 20. The bound validator's
+//       `boundIsStaticallyInt` now accepts expressions like
+//       `n + 1` (where `n: int`) via type-recursion through
+//       IdentifierExpr / MemberExpr / CallExpr leaves (those
+//       already stamp `resolvedType` via the `analyzeExpr` walk
+//       inside `validateForBound` — see R5.2-C). This unlocks
+//       common patterns like `for (var i : 0, damage - 10)` that
+//       R5.2-C had rejected as "not statically reducible to int"
+//       even though the leaves were int. Step validator stays
+//       strict (R5.2-D const-folded rule preserved) — `for (var i :
+//       0, 10, n - 1)` still hard-errors because codegen would
+//       have to inject a runtime `if n == 0` check, violating
+//       the "static-only" pattern established in R5.2-C/D.
+//       Zero behavior-code diff: the type-recursion was already
+//       latent in R5.2-C (the IdentifierExpr / MemberExpr /
+//       CallExpr paths stamp resolvedType via `analyzeExpr` walked
+//       before the tree-shape check); R5.2-E is documentation +
+//       tests + bump. No new ErrorCode, no helper file, no
+//       behavior changes to step / codegen / parser / AST.
+constexpr std::size_t kLogiaPipelineVersion = 20u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

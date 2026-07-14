@@ -81,20 +81,39 @@ bool isIntegerTypeName(const std::string& name)
 // iff `e` is statically an int given current analyzer state
 // (resolvedType / literal value / constant-folded binary form).
 //
+// R5.2-E (2026-07-14): extends BinaryExpr / UnaryExpr recursion to
+// type-propagate through int-typed identifier / member / call leaves.
 // Cases handled (in priority order):
 //   - IntLiteralExpr                     → true
 //   - FloatLiteralExpr / StringLiteral   → false
 //   - BoolLiteralExpr                    → false
 //   - IdentifierExpr with resolvedType
-//     pointing at "int"/"Int32"/"Int64"  → true
+//     pointing at "int"/"Int32"/"Int64"  → true  (R5.2-C: builtin
+//                                          vars via resolvedDecl→
+//                                          VarDeclStmt.typeName)
 //   - MemberExpr leaf with resolvedType  → check ITypeInfo*'s name
 //   - CallExpr with resolvedMethod whose
-//     getReturnType() is int-shaped       → true
+//     getReturnType() is int-shaped       → true  (S3.12 path)
 //   - BinaryExpr where all leaves
-//     (recursive) are int                → true (constant-folded)
-//   - UnaryExpr where operand (recursive) is int → true
+//     (recursive) are int                → true  (R5.2-C literal-
+//                                          folded only; R5.2-E
+//                                          extends to type-recursion
+//                                          through int-typed leaves —
+//                                          `n + 1` where n: int
+//                                          now passes since R5.2-C
+//                                          already partially enabled
+//                                          this through IdentifierExpr
+//                                          path; R5.2-E commits to it)
+//   - UnaryExpr where operand (recursive) is int → true  (same extension)
 //   - anything else (no resolvedType, IndexExpr, TableExpr, etc.)
 //     → false (default-reject per R5.2-C policy)
+//
+// IMPORTANT: this is bound-validation only. The step validator
+// (evaluateAsInt, R5.2-D) still requires literal-folded expressions
+// because step's value-not-type contract enforces `step != 0`.
+// Relaxing step would require codegen-injected runtime checks
+// (R5.2-G future slice), which violates R5.2-C/D's static-only
+// principle.
 //
 // Free function (not a method): SemanticAnalyzer keeps
 // resolvedType stamped on each Expr, so we only need read access.
