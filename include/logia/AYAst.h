@@ -8,6 +8,7 @@
 // subclass via AY_PROPERTY and accessed through `self.field`.
 
 #include "AYToken.h"
+#include "AYCompilerError.h"   // S5 ED-02 (2026-07-14): SourceLocation for sourceLoc
 #include <memory>
 #include <string>
 #include <variant>
@@ -63,6 +64,17 @@ public:
     // stack arg. nullptr when unresolved.
     const char*                      resolvedMethodOwnerName = nullptr;
     const void*                      resolvedDecl  = nullptr;
+
+    // S5 ED-02 (2026-07-14): source location stamped by the parser
+    // at construction. Read by `SemanticAnalyzer::sourceLocFor(Expr*)`
+    // to populate `LogiaDiagnostic::location` for analyzer-side
+    // errors. Default-constructed means `{}` (0:0) — preserves the
+    // pre-ED-02 behavior for any AST node the parser didn't stamp
+    // (e.g. diagnostic emits on a half-built node during error
+    // recovery). The "Future slice can add Expr-level source
+    // locations" comment in `AYSemanticAnalyzer.cpp:564` is fulfilled
+    // by this slice.
+    SourceLocation sourceLoc;
 };
 
 class BinaryExpr : public Expr {
@@ -143,6 +155,19 @@ public:
 class Stmt {
 public:
     virtual ~Stmt() = default;
+
+    // S5 ED-02 (2026-07-14): source location stamped by the parser
+    // at construction. Read by `SemanticAnalyzer::sourceLocFor(Stmt*)`
+    // (a dynamic_cast-switch file-local helper in
+    // AYSemanticAnalyzer.cpp) to populate `LogiaDiagnostic::location`.
+    // Placed on the Stmt base (rather than per concrete subclass)
+    // because every concrete Stmt subclass inherits it for free —
+    // 1 field covers all 13 subclasses, eliminating 13 duplicate
+    // declarations. The dynamic_cast switch in sourceLocFor is
+    // the small price for centralizing on the base; future slices
+    // can convert it to a virtual `sourceLoc()` if/when the
+    // cast chain becomes a measured hotspot.
+    SourceLocation sourceLoc;
 };
 
 class ExprStmt : public Stmt {
@@ -364,6 +389,13 @@ public:
         : name(std::move(name)), members(std::move(members)) {}
     std::string name;
     std::vector<StmtPtr> members;
+
+    // S5 ED-02 (2026-07-14): source location of the `script` keyword
+    // (set by the parser). Used by analyzer-side diagnostics
+    // attached to the script-level declaration (e.g. "script 'Bogus'
+    // has no matching registered type" warning, or strictInheritance
+    // hard errors). Stamped by `parseScript` in AYParser.cpp.
+    SourceLocation sourceLoc;
 
     // LG-05 / S3.3: stamped by SemanticAnalyzer for codegen. The
     // AYReflect-registered type name matching `name` — used to

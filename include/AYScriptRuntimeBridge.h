@@ -264,7 +264,20 @@ namespace ayt::script
 //       to `var flag: bool = true; if flag { ... }` to keep the
 //       AST-shape test's intent intact while satisfying the
 //       validator.
-constexpr std::size_t kLogiaPipelineVersion = 21u;
+//       2026-07-14 S5 ED-02: bump 21 → 22. Analyzer-side
+//       diagnostics now carry real line/column numbers (was
+//       `0:0` for all analyzer errors). Pure diagnostic-surface
+//       change; codegen output byte-identical; no new ErrorCode;
+//       no AST shape change beyond adding `SourceLocation
+//       sourceLoc` fields to `Expr`, `Stmt` base, `ScriptDecl`,
+//       threaded through parser constructor sites (~30 sites).
+//       Stale cached diagnostics would otherwise silently flip
+//       from `0:0` to real line numbers on recompile — bump
+//       forces cache invalidation. See `AYAst.h` for the AST
+//       field declarations and `AYSemanticAnalyzer.cpp` for the
+//       `sourceLocFor(Expr|Stmt|ScriptDecl)` helpers + the 7
+//       newly-populated `d.location = sourceLocFor(...)` sites.
+constexpr std::size_t kLogiaPipelineVersion = 22u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

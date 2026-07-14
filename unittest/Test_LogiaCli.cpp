@@ -420,4 +420,39 @@ TEST_CASE(cli_binary_missing_subcommand_exits_with_usage) {
     CHECK(r.stderrText.find("Usage") != std::string::npos);
 }
 
+// S5 ED-02 (2026-07-14): CLI smoke test confirming that analyzer-
+// side diagnostic line/column numbers reach the user-facing output.
+//
+// Pre-ED-02 the CLI rendered `0:0` for every analyzer-side error.
+// Post-ED-02 the CLI prints the planted error's source location as
+// `file:line:col:` in stderr — the test asserts that substring.
+//
+// We use a planted bad source with the for-loop bound on line 4
+// (line 1 is empty after `R"(`): a string literal where an int
+// is expected. The expected stderr contains `file:4:38:` (col is
+// the position of `"five"`).
+TEST_CASE(cli_s5ed02_analyzer_error_includes_line_col) {
+    const std::string bin = locateBinary();
+    REQUIRE_CLI_BIN(bin);
+    const std::string srcPath = "_cli_s5ed02.logia";
+    {
+        std::ofstream f(srcPath, std::ios::binary | std::ios::trunc);
+        f << "\nscript T {\n"
+             "    on_start() { for (var i : \"five\") { } }\n"
+             "}\n";
+    }
+
+    ExecResult r = runCommand(bin + " compile " + srcPath);
+    CHECK(r.exitCode != 0);
+    // The analyzer-side error is on line 3 (where `for (var i : "five")`
+    // is planted; the leading `\n` in the source puts `script T {`
+    // on line 2 and the for-loop on line 3). The CLI's
+    // formatDiagnostic at cli/main.cpp renders `file:line:col:
+    // error:` — we assert line 3 is in there.
+    CHECK(r.stderrText.find(":3:") != std::string::npos);
+    CHECK(r.stderrText.find("error:") != std::string::npos);
+
+    std::remove(srcPath.c_str());
+}
+
 TEST_SUITE_END

@@ -37,7 +37,7 @@ std::unique_ptr<Program> Parser::parse()
 
 std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
 {
-    consume(TokenType::Script, "Expected 'script'");
+    const Token scriptTok = consume(TokenType::Script, "Expected 'script'");
     const Token name = consumeIdentifier("Expected script name");
     consume(TokenType::LeftBrace, "Expected '{' before script body");
 
@@ -55,7 +55,11 @@ std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
     }
 
     consume(TokenType::RightBrace, "Expected '}' after script body");
-    return std::make_unique<ScriptDecl>(name.lexeme, std::move(members));
+    // S5 ED-02 (2026-07-14): stamp at the `script` keyword position.
+    auto s = std::make_unique<ScriptDecl>(name.lexeme, std::move(members));
+    s->sourceLoc.line = scriptTok.line;
+    s->sourceLoc.column = scriptTok.column;
+    return s;
 }
 
 std::unique_ptr<Stmt> Parser::parseMember()
@@ -65,13 +69,13 @@ std::unique_ptr<Stmt> Parser::parseMember()
         return parseVarDecl();
     }
     if (match(TokenType::OnStart)) {
-        return parseLifecycleFunc(LifecycleKind::OnStart);
+        return parseLifecycleFunc(LifecycleKind::OnStart, previous());
     }
     if (match(TokenType::OnUpdate)) {
-        return parseLifecycleFunc(LifecycleKind::OnUpdate);
+        return parseLifecycleFunc(LifecycleKind::OnUpdate, previous());
     }
     if (match(TokenType::OnDestroy)) {
-        return parseLifecycleFunc(LifecycleKind::OnDestroy);
+        return parseLifecycleFunc(LifecycleKind::OnDestroy, previous());
     }
     // S3.8b: `run` is the Tool host's run-only entry point. The
     // parser accepts it unconditionally as a member; the semantic
@@ -79,7 +83,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
     // soft warn on Component / System so a refactor doesn't break
     // the source shape).
     if (match(TokenType::Run)) {
-        return parseLifecycleFunc(LifecycleKind::Run);
+        return parseLifecycleFunc(LifecycleKind::Run, previous());
     }
 
     // 2026-07-11 audit fix: script-block-scope helper `function`.
@@ -98,7 +102,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
 
 std::unique_ptr<Stmt> Parser::parseVarDecl()
 {
-    consume(TokenType::Var, "Expected 'var'");
+    const Token varTok = consume(TokenType::Var, "Expected 'var'");
     const Token name = consumeIdentifier("Expected variable name");
     consume(TokenType::Colon, "Expected ':' after variable name");
     const Token typeName = consumeIdentifier("Expected variable type");
@@ -109,10 +113,17 @@ std::unique_ptr<Stmt> Parser::parseVarDecl()
     }
     match(TokenType::Semicolon);
     // S2.5: no `exported` flag — `var` is always a pure Lua local.
-    return std::make_unique<VarDeclStmt>(name.lexeme, typeName.lexeme, std::move(initializer));
+    // S5 ED-02 (2026-07-14): stamp at the `var` keyword position
+    // (per user decision 2026-07-14: var-keyword loc, not initializer
+    // loc — statement-level position is more useful than drilling
+    // into the RHS).
+    auto v = std::make_unique<VarDeclStmt>(name.lexeme, typeName.lexeme, std::move(initializer));
+    v->sourceLoc.line = varTok.line;
+    v->sourceLoc.column = varTok.column;
+    return v;
 }
 
-std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind)
+std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind, const Token& keywordTok)
 {
     consume(TokenType::LeftParen, "Expected '(' after lifecycle function name");
 
@@ -135,7 +146,14 @@ std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind)
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after function body");
 
-    return std::make_unique<LifecycleFuncDecl>(kind, std::move(legacyParams), std::move(body));
+    // S5 ED-02 (2026-07-14): stamp at the lifecycle keyword
+    // (`on_start` / `on_update` / `on_destroy` / `run`) position.
+    // The keyword token is threaded in by `parseMember` because
+    // by the time we get here, `previous()` is the `(`.
+    auto fn = std::make_unique<LifecycleFuncDecl>(kind, std::move(legacyParams), std::move(body));
+    fn->sourceLoc.line = keywordTok.line;
+    fn->sourceLoc.column = keywordTok.column;
+    return fn;
 }
 
 std::vector<Param> Parser::parseParamList()
@@ -173,17 +191,23 @@ std::unique_ptr<Stmt> Parser::parseFunctionDeclStmt()
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after function body");
 
-    return std::make_unique<FunctionDeclStmt>(
+    // S5 ED-02 (2026-07-14): FunctionDeclStmt's sourceLoc stamps
+    // at the `name` identifier — the most useful position for
+    // "duplicate function" or "unknown function" diagnostics.
+    auto fn = std::make_unique<FunctionDeclStmt>(
         name.lexeme, std::move(params), std::move(body));
+    fn->sourceLoc.line = name.line;
+    fn->sourceLoc.column = name.column;
+    return fn;
 }
 
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
     if (match(TokenType::Return)) {
-        return parseReturnStmt();
+        return parseReturnStmt(previous());
     }
     if (match(TokenType::If)) {
-        return parseIfStmt();
+        return parseIfStmt(previous());
     }
     // R5.0 (2026-07-13): while / for are valid as statements inside
     // lifecycle bodies and inside script-block helper function bodies
@@ -192,19 +216,19 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     // For dispatch, so a bare `while` at script-block scope falls
     // through to the existing "Expected script member" error.
     if (match(TokenType::While)) {
-        return parseWhileStmt();
+        return parseWhileStmt(previous());
     }
     if (match(TokenType::For)) {
-        return parseForStmt();
+        return parseForStmt(previous());
     }
     // R5.1 (2026-07-13): break / continue are valid only inside a
     // loop body. The loopDepth gate inside parseBreakStmt /
     // parseContinueStmt raises a hard error when seen outside.
     if (match(TokenType::Break)) {
-        return parseBreakStmt();
+        return parseBreakStmt(previous());
     }
     if (match(TokenType::Continue)) {
-        return parseContinueStmt();
+        return parseContinueStmt(previous());
     }
     // R5.2-A (2026-07-13): `do { <stmts> } end` block-scope statement.
     // Matches `do` keyword; defers to parseDoBlock for the body. NOT a
@@ -212,14 +236,14 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     // Logia aligns with Lua here. The body is parsed with the same
     // parseBlockBody entry as every other braced body.
     if (match(TokenType::Do)) {
-        return parseDoBlock();
+        return parseDoBlock(previous());
     }
     // R5.2-B (2026-07-14): `::LABEL::` label declaration. The first
     // `::` has already been consumed by the match() here;
     // parseLabelDecl handles the IDENT and the closing `::`. The
     // label's name is recorded for codegen + downstream analyzer use.
     if (match(TokenType::ColonColon)) {
-        return parseLabelDecl();
+        return parseLabelDecl(previous());
     }
     if (check(TokenType::Var)) {
         return parseVarDecl();
@@ -236,7 +260,13 @@ std::unique_ptr<Stmt> Parser::parseStatement()
 
     auto expr = parseExpression();
     match(TokenType::Semicolon);
-    return std::make_unique<ExprStmt>(std::move(expr));
+    // S5 ED-02 (2026-07-14): ExprStmt's sourceLoc inherits from
+    // the inner expression (NOT `previous()` — that's the trailing
+    // `;` after parseExpression consumes everything up to it,
+    // giving a misleading post-expression position).
+    auto s = std::make_unique<ExprStmt>(std::move(expr));
+    if (s->expr) s->sourceLoc = s->expr->sourceLoc;
+    return s;
 }
 
 std::vector<StmtPtr> Parser::parseBlockBody()
@@ -262,17 +292,24 @@ std::vector<StmtPtr> Parser::parseBlockBody()
     return body;
 }
 
-std::unique_ptr<Stmt> Parser::parseReturnStmt()
+std::unique_ptr<Stmt> Parser::parseReturnStmt(const Token& returnTok)
 {
     ExprPtr value;
     if (!check(TokenType::Semicolon) && !check(TokenType::RightBrace)) {
         value = parseExpression();
     }
     match(TokenType::Semicolon);
-    return std::make_unique<ReturnStmt>(std::move(value));
+    // S5 ED-02 (2026-07-14): stamp at the `return` keyword
+    // position. Threaded in by `parseStatement` because by the
+    // time we get here, `previous()` is the `;` or the
+    // expression's last token.
+    auto r = std::make_unique<ReturnStmt>(std::move(value));
+    r->sourceLoc.line = returnTok.line;
+    r->sourceLoc.column = returnTok.column;
+    return r;
 }
 
-std::unique_ptr<Stmt> Parser::parseIfStmt()
+std::unique_ptr<Stmt> Parser::parseIfStmt(const Token& ifTok)
 {
     // R5.0.1: both `if cond { ... }` and `if (cond) { ... }` are
     // accepted. Parens are optional but balanced when present —
@@ -300,22 +337,30 @@ std::unique_ptr<Stmt> Parser::parseIfStmt()
             // brace-init (MSVC std::vector<unique_ptr> initializer_list
             // is fragile when the element is itself a function call).
             std::vector<StmtPtr> chained;
-            chained.push_back(parseIfStmt());
-            return std::make_unique<IfStmt>(std::move(condition),
-                                            std::move(thenBranch),
-                                            std::move(chained));
+            chained.push_back(parseIfStmt(ifTok));
+            auto chainedIf = std::make_unique<IfStmt>(std::move(condition),
+                                                     std::move(thenBranch),
+                                                     std::move(chained));
+            chainedIf->sourceLoc.line = ifTok.line;
+            chainedIf->sourceLoc.column = ifTok.column;
+            return chainedIf;
         }
         consume(TokenType::LeftBrace, "Expected '{' after else");
         elseBranch = parseBlockBody();
         consume(TokenType::RightBrace, "Expected '}' after else branch");
     }
 
-    return std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+    // S5 ED-02 (2026-07-14): IfStmt's sourceLoc stamps at the
+    // `if` keyword position (threaded in by `parseStatement`).
+    auto ifStmt = std::make_unique<IfStmt>(std::move(condition), std::move(thenBranch), std::move(elseBranch));
+    ifStmt->sourceLoc.line = ifTok.line;
+    ifStmt->sourceLoc.column = ifTok.column;
+    return ifStmt;
 }
 
 // R5.0 (2026-07-13): `while (cond) { body }` → `while <cond> do ... end`.
 // R5.0.1: `while cond { body }` (no parens) also accepted — peek `(`.
-std::unique_ptr<Stmt> Parser::parseWhileStmt()
+std::unique_ptr<Stmt> Parser::parseWhileStmt(const Token& whileTok)
 {
     ExprPtr condition;
     if (match(TokenType::LeftParen)) {
@@ -332,12 +377,16 @@ std::unique_ptr<Stmt> Parser::parseWhileStmt()
     std::vector<StmtPtr> body = parseBlockBody();
     --_loopDepth;
     consume(TokenType::RightBrace, "Expected '}' after while body");
-    return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    // S5 ED-02 (2026-07-14): stamp at the `while` keyword position.
+    auto w = std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+    w->sourceLoc.line = whileTok.line;
+    w->sourceLoc.column = whileTok.column;
+    return w;
 }
 
 // R5.0 (2026-07-13): `for (var i : N) { body }` → 1..N inclusive.
 // R5.0.1: optional parens + `for (var i : start, end) { body }` half-open range.
-std::unique_ptr<Stmt> Parser::parseForStmt()
+std::unique_ptr<Stmt> Parser::parseForStmt(const Token& forTok)
 {
     // R5.0.1: optional `(` after `for`. When absent, the header is
     // `var i : N {` or `var i : 0, 10 {` — distinguishable from the
@@ -386,15 +435,22 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
     // branch — the parser never sets it without first having seen
     // the range-form `,`).
     if (startExpr) {
-        return std::make_unique<ForStmt>(
+        auto f = std::make_unique<ForStmt>(
             counterTok.lexeme,
             std::move(startExpr),
             std::move(endExpr),
             std::move(body),
             std::move(stepExpr));
+        // S5 ED-02 (2026-07-14): ForStmt stamps at the `for` keyword.
+        f->sourceLoc.line = forTok.line;
+        f->sourceLoc.column = forTok.column;
+        return f;
     }
-    return std::make_unique<ForStmt>(
+    auto f = std::make_unique<ForStmt>(
         counterTok.lexeme, std::move(endExpr), std::move(body));
+    f->sourceLoc.line = forTok.line;
+    f->sourceLoc.column = forTok.column;
+    return f;
 }
 
 // R5.1 (2026-07-13): `break;` (or `break` + stmt-end) inside a loop body.
@@ -403,7 +459,7 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
 // has already consumed the keyword token by the time we get here.
 // We enforce the loop-depth gate, then optionally consume `:IDENT`,
 // then the trailing semicolon.
-std::unique_ptr<Stmt> Parser::parseBreakStmt()
+std::unique_ptr<Stmt> Parser::parseBreakStmt(const Token& breakTok)
 {
     if (_loopDepth == 0) {
         error("'break' outside loop");
@@ -416,7 +472,11 @@ std::unique_ptr<Stmt> Parser::parseBreakStmt()
         label = nameTok.lexeme;
     }
     match(TokenType::Semicolon);
-    return std::make_unique<BreakStmt>(std::move(label));
+    // S5 ED-02 (2026-07-14): stamp at the `break` keyword position.
+    auto b = std::make_unique<BreakStmt>(std::move(label));
+    b->sourceLoc.line = breakTok.line;
+    b->sourceLoc.column = breakTok.column;
+    return b;
 }
 
 // R5.1 (2026-07-13): `continue;` inside a loop body. Same gate
@@ -429,7 +489,7 @@ std::unique_ptr<Stmt> Parser::parseBreakStmt()
 // faithfully does — same loop counter, dead loop). Until a
 // future slice picks that up, `continue` is bare-only and
 // `continue :L` is a hard error.
-std::unique_ptr<Stmt> Parser::parseContinueStmt()
+std::unique_ptr<Stmt> Parser::parseContinueStmt(const Token& continueTok)
 {
     if (_loopDepth == 0) {
         error("'continue' outside loop");
@@ -443,7 +503,11 @@ std::unique_ptr<Stmt> Parser::parseContinueStmt()
         return nullptr;
     }
     match(TokenType::Semicolon);
-    return std::make_unique<ContinueStmt>();
+    // S5 ED-02 (2026-07-14): stamp at the `continue` keyword position.
+    auto c = std::make_unique<ContinueStmt>();
+    c->sourceLoc.line = continueTok.line;
+    c->sourceLoc.column = continueTok.column;
+    return c;
 }
 
 // R5.2-A (2026-07-13): `do { <stmts> } end` — explicit block scope.
@@ -453,13 +517,17 @@ std::unique_ptr<Stmt> Parser::parseContinueStmt()
 // consume `{`, parseBlockBody, consume `}`, then consume `end`. The
 // `end` literal in the source is Logia-side only — codegen emits
 // Lua's `do ... end` from the BlockStmt AST node.
-std::unique_ptr<Stmt> Parser::parseDoBlock()
+std::unique_ptr<Stmt> Parser::parseDoBlock(const Token& doTok)
 {
     consume(TokenType::LeftBrace, "Expected '{' after 'do'");
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after do-block body");
     consume(TokenType::End, "Expected 'end' to close do-block");
-    return std::make_unique<BlockStmt>(std::move(body));
+    // S5 ED-02 (2026-07-14): stamp at the `do` keyword position.
+    auto b = std::make_unique<BlockStmt>(std::move(body));
+    b->sourceLoc.line = doTok.line;
+    b->sourceLoc.column = doTok.column;
+    return b;
 }
 
 // R5.2-B (2026-07-14): `::LABEL::` — label declaration. The
@@ -467,13 +535,19 @@ std::unique_ptr<Stmt> Parser::parseDoBlock()
 // match dispatch. We expect: IDENT, then `::`. The label's name
 // is the only payload (codegen emits `::NAME::`; analyzer
 // tracks it for break/continue visibility checks).
-std::unique_ptr<Stmt> Parser::parseLabelDecl()
+std::unique_ptr<Stmt> Parser::parseLabelDecl(const Token& openColonColon)
 {
     const Token nameTok = consumeIdentifier(
         "Expected label name after '::'");
     consume(TokenType::ColonColon,
             "Expected '::' to close label declaration");
-    return std::make_unique<LabelDeclStmt>(nameTok.lexeme);
+    // S5 ED-02 (2026-07-14): stamp at the LABEL NAME position
+    // (not the opening `::` — the user looks at the label name
+    // when reading diagnostics).
+    auto l = std::make_unique<LabelDeclStmt>(nameTok.lexeme);
+    l->sourceLoc.line = nameTok.line;
+    l->sourceLoc.column = nameTok.column;
+    return l;
 }
 
 std::unique_ptr<Expr> Parser::parseExpression()
@@ -498,7 +572,13 @@ std::unique_ptr<Expr> Parser::parseBinary(int precedence)
         const Token opTok = current();
         advance();
         auto right = parseBinary(nextPrecedence);
-        left = std::make_unique<BinaryExpr>(std::move(left), opTok, std::move(right));
+        // S5 ED-02 (2026-07-14): BinaryExpr's sourceLoc stamps at
+        // the operator's position (the user's visual center for
+        // "operator X on this type" errors).
+        auto binExpr = std::make_unique<BinaryExpr>(std::move(left), opTok, std::move(right));
+        binExpr->sourceLoc.line = opTok.line;
+        binExpr->sourceLoc.column = opTok.column;
+        left = std::move(binExpr);
     }
 
     return left;
@@ -509,7 +589,12 @@ std::unique_ptr<Expr> Parser::parseUnary()
     if (match(TokenType::Minus) || match(TokenType::Bang)) {
         const Token op = previous();
         auto operand = parseUnary();
-        return std::make_unique<UnaryExpr>(op, std::move(operand));
+        // S5 ED-02 (2026-07-14): UnaryExpr's sourceLoc stamps at
+        // the operator's position.
+        auto u = std::make_unique<UnaryExpr>(op, std::move(operand));
+        u->sourceLoc.line = op.line;
+        u->sourceLoc.column = op.column;
+        return u;
     }
     return parseCall();
 }
@@ -527,14 +612,32 @@ std::unique_ptr<Expr> Parser::parseCall()
                 } while (match(TokenType::Comma));
             }
             consume(TokenType::RightParen, "Expected ')' after arguments");
-            expr = std::make_unique<CallExpr>(std::move(expr), std::move(args));
+            // S5 ED-02 (2026-07-14): user-decided CallExpr stamps at
+            // the callee's loc (function-name position), not the
+            // `(` — diagnostics about a call should point at the
+            // function name being called, not the open paren.
+            auto call = std::make_unique<CallExpr>(std::move(expr), std::move(args));
+            call->sourceLoc = call->callee ? call->callee->sourceLoc : SourceLocation{};
+            expr = std::move(call);
         } else if (match(TokenType::Dot)) {
             const Token name = consumeIdentifier("Expected property name after '.'");
-            expr = std::make_unique<MemberExpr>(std::move(expr), name.lexeme);
+            // S5 ED-02 (2026-07-14): user-decided MemberExpr stamps at
+            // the field-name loc — "unknown field X" diagnostics
+            // should point at the X, not the `.`.
+            auto mem = std::make_unique<MemberExpr>(std::move(expr), name.lexeme);
+            mem->sourceLoc.line = name.line;
+            mem->sourceLoc.column = name.column;
+            expr = std::move(mem);
         } else if (match(TokenType::LeftBracket)) {
             auto index = parseExpression();
             consume(TokenType::RightBracket, "Expected ']' after index");
-            expr = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            // S5 ED-02 (2026-07-14): user-decided IndexExpr stamps at
+            // the index expression's loc — bracket is a punctuation
+            // token that almost never carries the user's diagnostic
+            // intent.
+            auto idx = std::make_unique<IndexExpr>(std::move(expr), std::move(index));
+            idx->sourceLoc = idx->index ? idx->index->sourceLoc : SourceLocation{};
+            expr = std::move(idx);
         } else {
             break;
         }
@@ -548,30 +651,58 @@ std::unique_ptr<Expr> Parser::parsePrimary()
     if (match(TokenType::FloatLiteral)) {
         const Token token = previous();
         try {
-            return std::make_unique<LiteralExpr>(std::stof(token.lexeme));
+            auto e = std::make_unique<LiteralExpr>(std::stof(token.lexeme));
+            e->sourceLoc.line = token.line;
+            e->sourceLoc.column = token.column;
+            return e;
         } catch (const std::exception&) {
-            return std::make_unique<LiteralExpr>(0.0f);
+            auto e = std::make_unique<LiteralExpr>(0.0f);
+            e->sourceLoc.line = token.line;
+            e->sourceLoc.column = token.column;
+            return e;
         }
     }
     if (match(TokenType::IntLiteral)) {
         const Token token = previous();
         try {
-            return std::make_unique<LiteralExpr>(static_cast<int>(std::stol(token.lexeme)));
+            auto e = std::make_unique<LiteralExpr>(static_cast<int>(std::stol(token.lexeme)));
+            e->sourceLoc.line = token.line;
+            e->sourceLoc.column = token.column;
+            return e;
         } catch (const std::exception&) {
-            return std::make_unique<LiteralExpr>(0);
+            auto e = std::make_unique<LiteralExpr>(0);
+            e->sourceLoc.line = token.line;
+            e->sourceLoc.column = token.column;
+            return e;
         }
     }
     if (match(TokenType::StringLiteral)) {
-        return std::make_unique<LiteralExpr>(previous().lexeme);
+        const Token token = previous();
+        auto e = std::make_unique<LiteralExpr>(token.lexeme);
+        e->sourceLoc.line = token.line;
+        e->sourceLoc.column = token.column;
+        return e;
     }
     if (match(TokenType::True)) {
-        return std::make_unique<LiteralExpr>(true);
+        const Token token = previous();
+        auto e = std::make_unique<LiteralExpr>(true);
+        e->sourceLoc.line = token.line;
+        e->sourceLoc.column = token.column;
+        return e;
     }
     if (match(TokenType::False)) {
-        return std::make_unique<LiteralExpr>(false);
+        const Token token = previous();
+        auto e = std::make_unique<LiteralExpr>(false);
+        e->sourceLoc.line = token.line;
+        e->sourceLoc.column = token.column;
+        return e;
     }
     if (match(TokenType::Identifier)) {
-        return std::make_unique<IdentifierExpr>(previous().lexeme);
+        const Token token = previous();
+        auto e = std::make_unique<IdentifierExpr>(token.lexeme);
+        e->sourceLoc.line = token.line;
+        e->sourceLoc.column = token.column;
+        return e;
     }
     if (match(TokenType::LeftParen)) {
         auto expr = parseExpression();
@@ -618,7 +749,15 @@ std::unique_ptr<Expr> Parser::parsePrimary()
                         return nullptr;
                     }
                     std::string key = previous().lexeme;
-                    entry.key = std::make_unique<IdentifierExpr>(key);
+                    // S5 ED-02 (2026-07-14): stamp the table-key
+                    // identifier's loc (used by `analyzeMemberExpr`-
+                    // style "unknown identifier" diagnostics that
+                    // walk through table literals).
+                    const Token keyTok = previous();
+                    auto keyExpr = std::make_unique<IdentifierExpr>(key);
+                    keyExpr->sourceLoc.line = keyTok.line;
+                    keyExpr->sourceLoc.column = keyTok.column;
+                    entry.key = std::move(keyExpr);
                     consume(TokenType::Equal, "Expected '=' after table key");
                     entry.value = parseExpression();
                     if (!entry.value) return nullptr;

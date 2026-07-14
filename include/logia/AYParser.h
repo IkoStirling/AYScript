@@ -24,7 +24,7 @@ private:
     std::unique_ptr<ScriptDecl> parseScriptDecl();
     std::unique_ptr<Stmt> parseMember();
     std::unique_ptr<Stmt> parseVarDecl();
-    std::unique_ptr<Stmt> parseLifecycleFunc(LifecycleKind kind);
+    std::unique_ptr<Stmt> parseLifecycleFunc(LifecycleKind kind, const Token& keywordTok);   // S5 ED-02: keywordTok for sourceLoc
     std::unique_ptr<Stmt> parseFunctionDeclStmt();   // 2026-07-11 audit fix
     std::unique_ptr<Stmt> parseStatement();
     std::vector<Param> parseParamList();
@@ -35,14 +35,14 @@ private:
     std::unique_ptr<Expr> parseCall();
     std::unique_ptr<Expr> parsePrimary();
 
-    std::unique_ptr<Stmt> parseReturnStmt();
-    std::unique_ptr<Stmt> parseIfStmt();
-    std::unique_ptr<Stmt> parseWhileStmt();   // R5.0 (2026-07-13): while (cond) { body }
-    std::unique_ptr<Stmt> parseForStmt();     // R5.0 (2026-07-13): for (var i : N) { body }
-    std::unique_ptr<Stmt> parseBreakStmt();   // R5.1 (2026-07-13): break; (only inside loop)
-    std::unique_ptr<Stmt> parseContinueStmt();// R5.1 (2026-07-13): continue; (only inside loop)
-    std::unique_ptr<Stmt> parseDoBlock();    // R5.2-A (2026-07-13): do { <stmts> } end
-    std::unique_ptr<Stmt> parseLabelDecl();  // R5.2-B (2026-07-14): ::LABEL::
+    std::unique_ptr<Stmt> parseReturnStmt(const Token& returnTok);   // S5 ED-02: returnTok for sourceLoc
+    std::unique_ptr<Stmt> parseIfStmt(const Token& ifTok);   // S5 ED-02: ifTok for sourceLoc
+    std::unique_ptr<Stmt> parseWhileStmt(const Token& whileTok);   // R5.0 (2026-07-13): while (cond) { body }; S5 ED-02: whileTok for sourceLoc
+    std::unique_ptr<Stmt> parseForStmt(const Token& forTok);     // R5.0 (2026-07-13): for (var i : N) { body }; S5 ED-02: forTok for sourceLoc
+    std::unique_ptr<Stmt> parseBreakStmt(const Token& breakTok);   // R5.1 (2026-07-13): break; (only inside loop); S5 ED-02: breakTok for sourceLoc
+    std::unique_ptr<Stmt> parseContinueStmt(const Token& continueTok);// R5.1 (2026-07-13): continue; (only inside loop); S5 ED-02: continueTok for sourceLoc
+    std::unique_ptr<Stmt> parseDoBlock(const Token& doTok);    // R5.2-A (2026-07-13): do { <stmts> } end; S5 ED-02: doTok for sourceLoc
+    std::unique_ptr<Stmt> parseLabelDecl(const Token& openColonColon);  // R5.2-B (2026-07-14): ::LABEL::; S5 ED-02: openColonColon (currently unused, kept for symmetry)
     std::vector<StmtPtr> parseBlockBody();
 
     // R5.1: track loop nesting depth. parseWhileStmt / parseForStmt

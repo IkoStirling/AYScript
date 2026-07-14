@@ -561,7 +561,46 @@ std::optional<int> evaluateAsInt(const Expr* e)
 // `LogiaDiagnostic::toHumanString` already handles missing
 // line/column gracefully. Future slice can add Expr-level source
 // locations if finer-grained diagnostics are ever needed.
-SourceLocation sourceLocFor(Expr* /*bound*/) { return {}; }
+// S5 ED-02 (2026-07-14): `sourceLocFor(Expr*)` now reads the
+// AST-stamped `sourceLoc` field set by the parser at construction.
+// Pre-ED-02 this returned `{}` as a placeholder; the comment
+// above explicitly noted "Future slice can add Expr-level source
+// locations" — this slice fulfils that contract.
+//
+// 6 existing call sites (R5.2-C / R5.2-D / R5.2-H validators for
+// for-bound / for-start / for-step / while-condition / if-condition)
+// automatically pick up real line/column numbers without further
+// edits; the 7 newly-populated diagnostic sites are listed in the
+// "d.location = sourceLocFor(...)" call sites further down.
+SourceLocation sourceLocFor(const Expr* e)
+{
+    if (!e) return {};
+    return e->sourceLoc;
+}
+
+// S5 ED-02 (2026-07-14): `sourceLocFor(Stmt*)` reads the
+// `sourceLoc` field set on the base `Stmt` class by the parser.
+// All 13 concrete Stmt subclasses (IfStmt, WhileStmt, ForStmt,
+// BlockStmt, VarDeclStmt, BreakStmt, ContinueStmt, LabelDeclStmt,
+// ReturnStmt, ExprStmt, FunctionDeclStmt, LifecycleFuncDecl)
+// inherit the field from `Stmt` and get it stamped by their
+// respective `parseXxx` parser methods. See `Stmt::sourceLoc`
+// in AYAst.h for the design rationale.
+SourceLocation sourceLocFor(const Stmt* s)
+{
+    if (!s) return {};
+    return s->sourceLoc;
+}
+
+// S5 ED-02 (2026-07-14): `sourceLocFor(ScriptDecl*)` for
+// script-level diagnostics (unknown host type, strictInheritance
+// failure). ScriptDecl has no `Stmt` base, so it gets its own
+// helper.
+SourceLocation sourceLocFor(const ScriptDecl* s)
+{
+    if (!s) return {};
+    return s->sourceLoc;
+}
 
 const std::unordered_set<std::string>& ambientIdentifiers()
 {
@@ -833,6 +872,7 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::UnknownIdentifier;
+        d.location = sourceLocFor(&s);   // S5 ED-02: `script` keyword loc
         d.message = "script '" + s.name + "' has no matching registered type";
         std::string hint;
         if (_ctx.kind == LogiaHostKind::System) {
@@ -865,6 +905,7 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
             LogiaDiagnostic d;
             d.severity = DiagnosticSeverity::Error;
             d.errorCode = ErrorCode::TypeMismatch;
+            d.location = sourceLocFor(&s);   // S5 ED-02
             d.message = "script '" + s.name + "' must derive from '" +
                         std::string(_ctx.hostType->getName()) +
                         "' (strict Component host binding)";
@@ -942,6 +983,7 @@ void SemanticAnalyzer::analyzeVarDecl(VarDeclStmt& v)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&v);   // S5 ED-02: var-keyword loc
         d.message = "unknown type '" + v.typeName + "'";
         d.hint = "register the type with AYReflect or use a built-in (int, float, bool, string, Entity)";
         report(d);
@@ -964,6 +1006,7 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&fn);   // S5 ED-02: lifecycle-keyword loc
         d.message = "lifecycle functions take no parameters in S2.5";
         d.hint = "use 'self' for the receiver; read entity context via World::instance()";
         report(d);
@@ -980,6 +1023,7 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&fn);   // S5 ED-02
         d.message = "on_destroy is not invoked on System host scripts";
         d.hint = "ISystem instances are owned by World for the whole "
                  "process lifetime; use on_start (one-shot) or on_update "
@@ -1006,6 +1050,7 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
             LogiaDiagnostic d;
             d.severity = DiagnosticSeverity::Warning;
             d.errorCode = ErrorCode::InvalidStatement;
+            d.location = sourceLocFor(&fn);   // S5 ED-02
             d.message = std::string(name) +
                         " is not invoked on Tool host scripts";
             d.hint = "Tool host runs once via the run() entry point; "
@@ -1284,6 +1329,7 @@ void SemanticAnalyzer::analyzeBreakStmt(BreakStmt& b)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&b);   // S5 ED-02: `break` keyword loc
         d.message = "label '" + b.label +
                     "' not found in any enclosing loop";
         d.hint = "declare with `::" + b.label + "::` inside an "
@@ -1393,6 +1439,7 @@ void SemanticAnalyzer::analyzeLabelDeclStmt(LabelDeclStmt& l)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&l);   // S5 ED-02: label-name loc
         d.message = "label '" + l.name + "' declared outside loop";
         d.hint = "labels may only be declared inside a while or for body";
         report(d);
@@ -1407,6 +1454,7 @@ void SemanticAnalyzer::analyzeLabelDeclStmt(LabelDeclStmt& l)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&l);   // S5 ED-02
         d.message = "label '" + l.name + "' declared outside loop";
         d.hint = "labels may only be declared inside a while or for body";
         report(d);
@@ -1416,6 +1464,7 @@ void SemanticAnalyzer::analyzeLabelDeclStmt(LabelDeclStmt& l)
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Error;
         d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&l);   // S5 ED-02
         d.message = "duplicate label '" + l.name + "' in this loop";
         d.hint = "each label name must be unique within its enclosing loop";
         report(d);
@@ -1577,6 +1626,7 @@ void SemanticAnalyzer::analyzeIdentifierExpr(IdentifierExpr& id)
     LogiaDiagnostic d;
     d.severity = DiagnosticSeverity::Warning;
     d.errorCode = ErrorCode::UnknownIdentifier;
+    d.location = sourceLocFor(&id);   // S5 ED-02: identifier loc
     d.message = "implicit global '" + id.name + "' (not declared in script)";
     d.hint = "declare it with `var " + id.name + ": <Type>`, or pass it as a parameter";
     report(d);
@@ -1596,6 +1646,7 @@ void SemanticAnalyzer::analyzeMemberExpr(MemberExpr& m,
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::UnknownIdentifier;
+        d.location = sourceLocFor(&m);   // S5 ED-02: field-name loc
         d.message = "type '" + std::string(parent->getName()) +
                     "' has no field '" + m.member + "'";
         report(d);
