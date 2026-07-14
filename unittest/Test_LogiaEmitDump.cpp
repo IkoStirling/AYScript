@@ -746,4 +746,43 @@ script T { on_start() { for (var i : 3.14) { } } }
           || _lastDump.errorsContain("float literal"));
 }
 
+// R5.2-D — range form with step emits Lua 3-arg `for`:
+// `for i = 0, (10) - 1, 2 do`.
+TEST_CASE(emit_dump_37_r52d_range_with_step_emits_three_arg_for) {
+    const char* src = R"(
+script T { on_start() { for (var i : 0, 10, 2) { } } }
+)";
+    dumpCase("37_r52d_range_with_step_emits_three_arg_for", src,
+             /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1, 2 do"));
+}
+
+// R5.2-D — range form without step stays at the R5.0.1 two-arg
+// form. No `, step` segment appended after the half-open bound.
+TEST_CASE(emit_dump_38_r52d_range_without_step_unchanged) {
+    const char* src = R"(
+script T { on_start() { for (var i : 0, 10) { } } }
+)";
+    dumpCase("38_r52d_range_without_step_unchanged", src,
+             /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1 do"));
+    // Defensive: no extra `, <something>` after the bound. The check
+    // is "no trailing comma" so we don't accidentally match a longer
+    // emitted line.
+    CHECK(!containsFlat(_lastDump.emittedLua, "for i = 0, (10) - 1,"));
+}
+
+// R5.2-D — step == 0 hard-errors at the analyzer; codegen never
+// sees the malformed input. compileToLua fails so the dump is empty.
+TEST_CASE(emit_dump_39_r52d_step_zero_does_not_reach_codegen) {
+    const char* src = R"(
+script T { on_start() { for (var i : 0, 10, 0) { } } }
+)";
+    dumpCase("39_r52d_step_zero_does_not_reach_codegen", src,
+             /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("TypeMismatch")
+          || _lastDump.errorsContain("must be positive")
+          || _lastDump.errorsContain("step"));
+}
+
 TEST_SUITE_END

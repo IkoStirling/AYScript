@@ -356,9 +356,17 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
     // single bound for the legacy 1..N short form.
     ExprPtr startExpr;
     ExprPtr endExpr;
+    ExprPtr stepExpr;                                 // R5.2-D
     if (match(TokenType::Comma)) {
         startExpr = std::move(firstExpr);
         endExpr = parseExpression();
+        // R5.2-D (2026-07-14): optional `step` after the second `,`.
+        // Only valid in the range form (short form has no comma at all
+        // — `for (var i : N, S)` is interpreted as `start = N, end = S`
+        // not `bound = N, step = S`, by R5.0.1 precedence).
+        if (match(TokenType::Comma)) {
+            stepExpr = parseExpression();
+        }
     } else {
         endExpr = std::move(firstExpr);
     }
@@ -373,9 +381,17 @@ std::unique_ptr<Stmt> Parser::parseForStmt()
     --_loopDepth;
     consume(TokenType::RightBrace, "Expected '}' after for body");
 
+    // R5.2-D (2026-07-14): range form with step uses the 5-arg ctor;
+    // short form stays at the 2-arg ctor (stepExpr is null in that
+    // branch — the parser never sets it without first having seen
+    // the range-form `,`).
     if (startExpr) {
         return std::make_unique<ForStmt>(
-            counterTok.lexeme, std::move(startExpr), std::move(endExpr), std::move(body));
+            counterTok.lexeme,
+            std::move(startExpr),
+            std::move(endExpr),
+            std::move(body),
+            std::move(stepExpr));
     }
     return std::make_unique<ForStmt>(
         counterTok.lexeme, std::move(endExpr), std::move(body));

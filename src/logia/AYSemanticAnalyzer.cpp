@@ -36,6 +36,7 @@ bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
@@ -149,6 +150,76 @@ bool boundIsStaticallyInt(const Expr* e)
     }
 
     return false;
+}
+
+// R5.2-D (2026-07-14): constant-fold an Expr to an int value, or
+// return std::nullopt if the expression is not a constant int
+// expression. Distinct from `boundIsStaticallyInt` (which only
+// checks *shape*, not *value*) because step validation needs
+// both shape (must be int) and value (> 0).
+//
+// Handled (in priority order):
+//   - IntLiteralExpr              → value
+//   - BinaryExpr {+,-,*,/,%} of
+//     two recursive int leaves    → value (with divide-by-zero → nullopt)
+//   - UnaryExpr (-, not) over
+//     int-shaped subtree          → value (negation only)
+//   - Anything else (float/string/bool literals,
+//     IdentifierExpr w/ resolvedType, MemberExpr, CallExpr,
+//     IndexExpr, TableExpr, BinaryExpr with non-int leaf) → nullopt
+//
+// `op` is a Token (TokenType-tagged). Only TokenType::Plus / Minus
+// / Star / Slash / Percent are valid int binary ops in Logia;
+// no `^`/pow, no shift, no bitwise — see AYToken.h:46-50.
+// Modulo/division-by-zero returns nullopt (no value to attribute;
+// in practice step wouldn't have a zero divisor anyway).
+std::optional<int> evaluateAsInt(const Expr* e)
+{
+    if (!e) return std::nullopt;
+
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(e)) {
+        if (auto* p = std::get_if<int>(&lit->value)) {
+            return *p;
+        }
+        return std::nullopt;
+    }
+
+    if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
+        auto l = evaluateAsInt(b->left.get());
+        auto r = evaluateAsInt(b->right.get());
+        if (!l || !r) return std::nullopt;
+        switch (b->op.type) {
+            case TokenType::Plus:    return *l + *r;
+            case TokenType::Minus:   return *l - *r;
+            case TokenType::Star:    return *l * *r;
+            case TokenType::Slash:
+                if (*r == 0) return std::nullopt;
+                return *l / *r;
+            case TokenType::Percent:
+                if (*r == 0) return std::nullopt;
+                return *l % *r;
+            default:
+                return std::nullopt;
+        }
+    }
+
+    if (auto* u = dynamic_cast<const UnaryExpr*>(e)) {
+        auto v = evaluateAsInt(u->operand.get());
+        if (!v) return std::nullopt;
+        switch (u->op.type) {
+            case TokenType::Minus:   return -*v;
+            default:                 return std::nullopt;
+        }
+    }
+
+    // IdentifierExpr / MemberExpr / CallExpr / IndexExpr /
+    // TableExpr → all rejected as non-constant. Deliberately
+    // rejected even when their resolvedType is int — step-by-
+    // variable is NOT supported (design decision 2026-07-14).
+    // Identifiers / member reads / method returns have type but
+    // no value at compile time; the "step must be a positive int
+    // constant" error is the user-visible signal.
+    return std::nullopt;
 }
 
 // R5.2-C (2026-07-14): best-effort source location lookup for
@@ -705,6 +776,44 @@ void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
     if (f.start) {
         validateForBound(f.start.get(), sourceLocFor(f.start.get()),
                          "start");
+    }
+
+    // R5.2-D (2026-07-14): optional step validation. Distinct from
+    // validateForBound — step must (a) statically reduce to int
+    // AND (b) be a positive constant. Non-constant int (var /
+    // self.field / self.method()) is rejected here, even though
+    // bound accepts int-typed identifiers.
+    if (f.step) {
+        analyzeExpr(*f.step);             // stamp resolvedType on
+                                          //   identifier-shaped leaves
+                                          //   (defensive — error path
+                                          //   may inspect it)
+        auto v = evaluateAsInt(f.step.get());
+        if (!v) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Error;
+            d.errorCode = ErrorCode::TypeMismatch;
+            d.location = sourceLocFor(f.step.get());
+            d.message = "for-loop step must be a positive int "
+                        "constant (literal or constant-folded "
+                        "expression of int literals)";
+            d.hint = "use a literal like 1, 2, 3 ... or a "
+                     "constant-folded expression like 3 + 5. "
+                     "Identifiers and self.<field> are not "
+                     "supported as step values (must be static).";
+            report(d);
+        } else if (*v <= 0) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Error;
+            d.errorCode = ErrorCode::TypeMismatch;
+            d.location = sourceLocFor(f.step.get());
+            d.message = "for-loop step must be positive, got "
+                        + std::to_string(*v);
+            d.hint = "step < 0 is rejected by Logia (only "
+                     "positive step is supported). step == 0 "
+                     "would loop infinitely at runtime.";
+            report(d);
+        }
     }
 
     // R5.2-B (2026-07-14): symmetric label-scope frame for the

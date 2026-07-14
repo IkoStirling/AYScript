@@ -282,25 +282,38 @@ public:
 class ForStmt : public Stmt {
 public:
     // R5.0 short form: `for (var i : N) { body }` → 1..N inclusive.
-    ForStmt(std::string counterName, ExprPtr bound, std::vector<StmtPtr> body)
+    // R5.2-D (2026-07-14): short form does NOT accept a step —
+    // users who want a step must use the range form below.
+    ForStmt(std::string counterName,
+            ExprPtr bound,
+            std::vector<StmtPtr> body)
         : counterName(std::move(counterName)),
           start(nullptr),
           bound(std::move(bound)),
+          step(nullptr),                              // R5.2-D
           body(std::move(body)) {}
     // R5.0.1 range form: `for (var i : start, end) { body }` → [start, end).
+    // R5.2-D (2026-07-14): optional `step` (`for (var i : start, end, step)`).
+    // `step` defaults to nullptr, meaning default Lua step = +1.
     ForStmt(std::string counterName,
             ExprPtr start,
             ExprPtr end,
-            std::vector<StmtPtr> body)
+            std::vector<StmtPtr> body,
+            ExprPtr step = nullptr)                   // R5.2-D
         : counterName(std::move(counterName)),
           start(std::move(start)),
           bound(std::move(end)),
+          step(std::move(step)),                     // R5.2-D
           body(std::move(body)) {}
     std::string counterName;
     // R5.0.1: non-null for `for (var i : start, end)` range form.
     // Null for the legacy R5.0 `for (var i : N)` short form.
     ExprPtr start;
     ExprPtr bound;
+    // R5.2-D (2026-07-14): optional step (e.g. `for (var i : 0, 10, 2)`).
+    // Null → default +1. Only ever non-null when `start` is also
+    // non-null (parser ensures this); short form has no step.
+    ExprPtr step;
     std::vector<StmtPtr> body;
 };
 

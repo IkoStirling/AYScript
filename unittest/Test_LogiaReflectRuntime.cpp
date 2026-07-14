@@ -3241,5 +3241,76 @@ script X {
 }
 
 // ----------------------------------------------------------------------------
+// R5.2-D (2026-07-14): `for (var i : lo, hi, step)` end-to-end.
+// Lua's numeric-for upper bound is inclusive, while Logia's range
+// form is half-open [start, end). Codegen compensates by emitting
+// `(end) - 1` as the upper bound, so `for (var i : 0, 10, 3)`
+// becomes `for i = 0, 9, 3 do` and iterates 0, 3, 6, 9 (inclusive).
+// ----------------------------------------------------------------------------
+
+TEST_CASE(lg15_r52d_range_with_positive_step_iterates) {
+    // R5.2-D: range form with positive step iterates correctly.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var sum: int = 0
+        for (var i : 0, 10, 3) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    // i = 0, 3, 6, 9 → sum = 18 (half-open [0, 10) emits 9 inclusive).
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52d_step_3", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52d_step_3", "on_start", nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "18");
+}
+
+TEST_CASE(lg15_r52d_range_with_constant_folded_step_iterates) {
+    // R5.2-D: constant-folded step (e.g. `2 + 1 = 3`) must run.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var n: int = 0
+        for (var i : 0, 6, 2 + 1) { n = n + 1 }
+        __test_witness = tostring(n)
+    }
+}
+)";
+    // step = 3, range [0, 6) → emit `for i = 0, 5, 3 do` →
+    // iterations: 0, 3 → n = 2.
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52d_step_const_fold", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52d_step_const_fold", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "2");
+}
+
+TEST_CASE(lg15_r52d_regression_range_without_step_iterates) {
+    // R5.2-D regression: range form without step keeps R5.0.1
+    // half-open [3, 7) → i runs 3, 4, 5, 6 → sum = 18.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var sum: int = 0
+        for (var i : 3, 7) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52d_range_no_step", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52d_range_no_step", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "18");
+}
+
+// ----------------------------------------------------------------------------
 
 TEST_SUITE_END

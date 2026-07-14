@@ -433,10 +433,20 @@ void LuaCodegen::emitForStmt(const ForStmt& stmt)
     _out += " = ";
     if (stmt.start) {
         // R5.0.1 range form: emit `start, (end - 1)`.
+        // R5.2-D (2026-07-14): emit `, step` after the half-open
+        // bound when step is present. Analyzer guarantees step is
+        // a positive int constant by this point (see
+        // SemanticAnalyzer.cpp::analyzeForStmt), so Lua never sees
+        // a non-positive or non-int step. Static-only — no runtime
+        // `if step <= 0` defensive check is injected.
         _out += emitExpr(*stmt.start);
         _out += ", (";
         _out += emitExpr(*stmt.bound);
         _out += ") - 1";
+        if (stmt.step) {
+            _out += ", ";
+            _out += emitExpr(*stmt.step);
+        }
     } else {
         // R5.0 short form: emit `1, bound`.
         _out += "1, ";

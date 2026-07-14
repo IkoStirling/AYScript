@@ -178,7 +178,23 @@ namespace ayt::script
 //       because the analyzer now hard-errors on previously-silent
 //       bad-bound cases (e.g. `for (var i : 3.14)` would have
 //       cached OK at v17 and now refuses to compile).
-constexpr std::size_t kLogiaPipelineVersion = 18u;
+//       2026-07-14 R5.2-D: bump 18 → 19. New Logia syntax:
+//       `for (var i : start, end, step)` accepts an optional third
+//       expression as the step. Step must be a positive int constant
+//       (literal / constant-folded expression of int literals only)
+//       — non-literal int (var / self.field / self.method()) and
+//       step <= 0 (incl. step == 0) emit ErrorCode::TypeMismatch as
+//       hard errors. Short form `for (var i : N)` is unchanged (no
+//       step accepted). Range form without step is unchanged (Lua
+//       default +1). Codegen emits `for i = start, (end) - 1, step
+//       do` when step is present; the analyzer's static guarantee
+//       means Lua never sees a non-positive or non-int step. No
+//       runtime defense added. AST: ForStmt gains `ExprPtr step`
+//       field + 5-arg ctor; parser consumes second `,` after the
+//       range-form expression. New file-local helper `evaluateAsInt`
+//       in SemanticAnalyzer.cpp walks LiteralExpr / BinaryExpr /
+//       UnaryExpr to constant-fold a candidate step expression.
+constexpr std::size_t kLogiaPipelineVersion = 19u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

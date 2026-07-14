@@ -790,4 +790,125 @@ script T {
     CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
 }
 
+// R5.2-D (2026-07-14): optional `step` parameter — must be a
+// positive int constant. Non-literal int (var / self.field) and
+// step <= 0 (incl. step == 0) are hard errors. Static-only.
+
+TEST_CASE(r52d_step_int_literal_is_ok) {
+    // R5.2-D: simplest positive step case.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, 2) { } } }
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_constant_folded_positive_is_ok) {
+    // R5.2-D: `3 + 5` constant-folds to 8, which is > 0.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, 3 + 5) { } } }
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_zero_is_hard_error) {
+    // R5.2-D: step == 0 is rejected (would infinite-loop at runtime).
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, 0) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_negative_literal_is_hard_error) {
+    // R5.2-D: step < 0 is rejected.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, -1) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_unary_negation_of_positive_is_hard_error) {
+    // R5.2-D: `-5` folds to -5 which is < 0.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, -5) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_constant_folded_negative_is_hard_error) {
+    // R5.2-D: `3 - 5` folds to -2, which is < 0.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, 3 - 5) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_identifier_is_hard_error) {
+    // R5.2-D: step-by-variable is rejected, even when the
+    // variable is int-typed. Stricter than bound semantics.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var s: int = 2
+    on_start() { for (var i : 0, 10, s) { } }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_step_float_literal_is_hard_error) {
+    // R5.2-D: float literal can't be a step either (inherits
+    // R5.2-C TypeMismatch before getting to the value check).
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 0, 10, 1.5) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_regression_short_form_unchanged) {
+    // R5.2-D regression: short form must keep R5.0 behavior,
+    // no step accepted, no codegen change.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        var sum: int = 0
+        for (var i : 5) { sum = sum + i }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52d_regression_range_form_without_step_unchanged) {
+    // R5.2-D regression: range form without step keeps
+    // R5.0.1 half-open behavior, no codegen change.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        var sum: int = 0
+        for (var i : 3, 7) { sum = sum + i }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
 TEST_SUITE_END
