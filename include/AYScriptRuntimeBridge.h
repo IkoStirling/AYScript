@@ -213,7 +213,58 @@ namespace ayt::script
 //       before the tree-shape check); R5.2-E is documentation +
 //       tests + bump. No new ErrorCode, no helper file, no
 //       behavior changes to step / codegen / parser / AST.
-constexpr std::size_t kLogiaPipelineVersion = 20u;
+//       2026-07-14 R5.2-H: bump 20 → 21. `if (cond)` / `while (cond)`
+//       conditions must now statically reduce to bool — Logia has
+//       no implicit truthiness. New helper `isStaticallyBool`
+//       (parallel to R5.2-C's `boundIsStaticallyInt`) accepts:
+//       bool literals, bool-typed identifiers / self.field /
+//       self.method() returning bool, `!` (Bang) on a bool leaf,
+//       comparison ops {==, !=, <, <=, >, >=} over two primitive
+//       leaves (int/float/bool/string — comparison returns bool
+//       regardless of operand types per Lua semantics), and
+//       logical ops {&&, ||} over two bool leaves. New
+//       `validateCondition` method on SemanticAnalyzer; new
+//       file-local helper `leafIsStaticallyPrimitive` (used by
+//       the comparison branch). AST / parser / codegen untouched —
+//       Lua's truthiness would have accepted `while (n)` at
+//       runtime, so existing pre-R5.2-H code with int-as-condition
+//       now needs to be rewritten (`n` → `n != 0`, `count` →
+//       `count > 0`, etc.) before it compiles. This is
+//       intentional: silent truthiness is the bug class R5.2-H
+//       exists to eliminate. ErrorCode unchanged (TypeMismatch).
+//       2026-07-14 R5.2-H.b: same version (no bump). Two
+//       carve-outs to isStaticallyBool / leafIsStaticallyPrimitive,
+//       required to keep canonical examples compiling after the
+//       strict bool enforcement:
+//         (a) Ambient-receiver CallExpr (e.g. `input.is_pressed(...)`,
+//             `log.info(...)`, `time.delta()`) is treated as
+//             bool-yielding when used as a condition. The host
+//             runtime injects ambient names and contracts their
+//             methods; without this carve-out, every Logia example
+//             hard-errors because analyzeCallExpr only stamps
+//             `resolvedMethod` for `self.<method>(...)` calls.
+//             This is NOT a truthiness carve-out — we're saying
+//             "ambient shim contract yields bool", not "any
+//             non-bool is bool".
+//         (b) For-loop counter identifiers are recognized as int
+//             leaves via a new `_loopCounters` stack pushed/popped
+//             in analyzeForStmt. The counter is deliberately NOT
+//             in `_scope` (R5.0 / R5.2-C's design choice — keeps
+//             post-loop references implicit-globals), but without
+//             this carve-out, `if (j == 1)` inside a `for (var j
+//             : 3)` body rejects because `j` has no resolvedType
+//             or resolvedDecl. Now recognized via the loop-counter
+//             frame stack.
+//       The two predicates now take a `const SemanticAnalyzer*`
+//       parameter so they can consult these new state fields.
+//       `parse_if_without_parens` test rewritten — its original
+//       `if flag { ... }` (bare undeclared identifier as
+//       condition) was relying on Lua's truthiness and is exactly
+//       the bug class R5.2-H is designed to eliminate; rewritten
+//       to `var flag: bool = true; if flag { ... }` to keep the
+//       AST-shape test's intent intact while satisfying the
+//       validator.
+constexpr std::size_t kLogiaPipelineVersion = 21u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

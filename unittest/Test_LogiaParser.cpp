@@ -91,9 +91,22 @@ TEST_CASE(parse_player_controller) {
 }
 
 TEST_CASE(parse_if_without_parens) {
+    // R5.2-H (2026-07-14): the original `if flag { x = 1 }`
+    // used a bare undeclared identifier as the condition —
+    // pre-R5.2-H Lua's truthiness made this compile and run
+    // (with implicit-global warning). R5.2-H now requires
+    // conditions to statically reduce to bool, so an
+    // undeclared `flag` is a hard error. The test's intent
+    // is to validate the **AST shape** of an `if` statement
+    // without parentheses — the parens-less form is a
+    // R5.0.1 / R5.2-A parser feature, not a sema feature.
+    // We rewrite the source to use a bool-typed local so
+    // R5.2-H accepts it; the AST-shape checks (condition
+    // populated, thenBranch non-empty) remain unchanged.
     const char* source = R"(
 script T {
     on_update(dt: float) {
+        var flag: bool = true
         if flag {
             x = 1
         }
@@ -107,9 +120,9 @@ script T {
     const LifecycleFuncDecl* onUpdate =
         findLifecycle(*result.program->scripts[0], LifecycleKind::OnUpdate);
     CHECK(onUpdate != nullptr);
-    CHECK(onUpdate->body.size() == 1u);
+    CHECK(onUpdate->body.size() == 2u);
 
-    const auto* ifStmt = dynamic_cast<const IfStmt*>(onUpdate->body[0].get());
+    const auto* ifStmt = dynamic_cast<const IfStmt*>(onUpdate->body[1].get());
     CHECK(ifStmt != nullptr);
     CHECK(ifStmt->condition != nullptr);
     CHECK_FALSE(ifStmt->thenBranch.empty());

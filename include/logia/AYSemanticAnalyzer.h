@@ -95,6 +95,18 @@ public:
     // constructed with. Used by unit tests to assert plumbing.
     const LogiaHostContext& hostContext() const { return _ctx; }
 
+    // R5.2-H.b (2026-07-14): public type-name helpers and
+    // for-loop-counter accessor. These are exposed because
+    // file-local condition-validator predicates (in
+    // AYSemanticAnalyzer.cpp) need to consult them but cannot
+    // be friend-declared without polluting the header with
+    // unordered_set. Public boolean accessors are simpler
+    // than friend declarations. The underlying implementations
+    // are unchanged from where they lived as private statics.
+    static bool isBuiltInType(const std::string& name);
+    static bool isAmbientIdentifier(const std::string& name);
+    bool isLoopCounter(const std::string& name) const;
+
 private:
     void analyzeScript(ScriptDecl& s);
     void analyzeVarDecl(VarDeclStmt& v);
@@ -123,6 +135,20 @@ private:
                           const SourceLocation& loc,
                           const std::string& role);
 
+    // R5.2-H (2026-07-14): condition validator for `if (cond)` /
+    // `while (cond)`. The condition must statically reduce to bool
+    // (see isStaticallyBool for the decision matrix). Anything not
+    // statically provable as bool emits a TypeMismatch hard error
+    // with a hint pointing at the bool type contract. Logia has
+    // no C-style truthiness — `while (n)` where `n: int` is a
+    // hard error, not a silent truthy-coerce.
+    //
+    // `role` is `"if"` or `"while"` — used in the diagnostic so the
+    // user knows which slot failed.
+    void validateCondition(Expr* cond,
+                           const SourceLocation& loc,
+                           const std::string& role);
+
     // R5.2-B (2026-07-14): label visibility helper. Walks
     // `_labelStack` from innermost frame outward and returns true
     // on first match. Returns false when the stack is empty.
@@ -144,9 +170,6 @@ private:
                                                      int line, int column);
 
     void report(LogiaDiagnostic d);
-
-    static bool isBuiltInType(const std::string& name);
-    static bool isAmbientIdentifier(const std::string& name);
 
     SemanticOptions _options;
 
@@ -170,6 +193,23 @@ private:
     // so the stack is non-empty when descending into a loop body).
     // Popped on exit. The vector is empty outside a function body.
     std::vector<std::unordered_set<std::string>> _labelStack;
+
+    // R5.2-H (2026-07-14): stack of for-loop counter names, one
+    // frame per enclosing ForStmt body. R5.2-C/D/E deliberately
+    // omitted the counter from `_scope` (so post-loop references
+    // stay implicit-globals and Lua's `for i = 1, N do ... end`
+    // loop-locality is preserved), but R5.2-H's
+    // `leafIsStaticallyPrimitive` predicate needs to know that
+    // `j` in `for (var j : 3) { if (j == 1) { ... } }` is an
+    // int-shaped leaf — otherwise `j == 1` (which IS provably
+    // bool, returning bool from any sane comparison) is rejected
+    // because `j.resolvedType` and `j.resolvedDecl` are both
+    // null (counter is deliberately not in `_scope`). Pushed
+    // in analyzeForStmt, popped on exit. Empty outside a for
+    // body. The vector-of-unordered_set shape mirrors
+    // `_labelStack` for symmetry (each loop body frame is its
+    // own set of named locals).
+    std::vector<std::unordered_set<std::string>> _loopCounters;
 
     // Type of the currently-analyzed `self` (the host type matching
     // the script's name). nullptr if no current script (shouldn't

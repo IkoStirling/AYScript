@@ -123,10 +123,21 @@ script Foo {
 }
 
 TEST_CASE(emit_dump_05_if_brace) {
+    // R5.2-H (2026-07-14): the original `if x == nil { ... }`
+    // used undeclared `x` and `nil` (relying on Lua truthiness
+    // + implicit globals). R5.2-H's strict bool validator now
+    // rejects `x == nil` because neither leaf is a typed
+    // primitive. The test's intent is to verify Logia's brace
+    // form for `if` — i.e., the brace-vs-then/end distinction
+    // (case 06 rejects `if … then … end`). The condition shape
+    // is incidental. Rewritten to use a bool-typed local so
+    // the brace form is what's being verified, not the
+    // condition's type-correctness.
     const char* src = R"(
 script Foo {
     on_update() {
-        if x == nil {
+        var ready: bool = true
+        if ready {
             y = 1
         }
     }

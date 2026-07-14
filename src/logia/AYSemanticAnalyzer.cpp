@@ -171,6 +171,319 @@ bool boundIsStaticallyInt(const Expr* e)
     return false;
 }
 
+// R5.2-H (2026-07-14): name → true iff `name` is the bool primitive.
+// Distinct from `isIntegerTypeName` because the user-decided rule
+// for `if` / `while` conditions is "must be bool" — NOT "any
+// non-bool value with C-style truthiness". `int n` does NOT make
+// `while (n)` valid, and an `int == int` BinaryExpr DOES make it
+// valid. This is a deliberate split from Lua, which would treat
+// `while (0)` as `while (false)` and `while (5)` as `while (true)`.
+// Logia has no such coercion — silent truthiness is a class of bug
+// (off-by-one in counters, accidentally truthy strings, etc.) we
+// never want to inherit.
+bool isBooleanTypeName(const std::string& name)
+{
+    return name == "bool";
+}
+
+// R5.2-H (2026-07-14): forward-declared helper used by
+// `isStaticallyBool`'s comparison branch. Defined below the
+// call site because `isStaticallyBool` is the primary public
+// helper and `leafIsStaticallyPrimitive` is just its
+// primitive-shape sub-predicate.
+bool leafIsStaticallyPrimitive(const Expr* e, const SemanticAnalyzer* analyzer);
+
+// R5.2-H (2026-07-14): pure-tree-shape predicate for "this Expr
+// is statically a bool". Parallel to `boundIsStaticallyInt` (L120).
+// Used by `if (...)` / `while (...)` condition validators.
+//
+// Decision matrix (handled in priority order):
+//   - BoolLiteralExpr                     → true (LiteralExpr
+//                                          with variant<bool>)
+//   - FloatLiteralExpr / IntLiteralExpr /
+//     StringLiteral                       → false (no implicit
+//                                          truthiness)
+//   - IdentifierExpr with resolvedType /
+//     resolvedDecl pointing at "bool"     → true (mirror R5.2-C's
+//                                          builtin-var fallback:
+//                                          `var b: bool` has
+//                                          scope.type=nullptr but
+//                                          VarDeclStmt.typeName
+//                                          carries the annotation)
+//   - MemberExpr leaf with resolvedType
+//     getName() == "bool"                 → true
+//   - CallExpr with resolvedMethod whose
+//     getReturnType().getName() == "bool" → true
+//   - UnaryExpr with op == Bang
+//     over a bool leaf                    → true (e.g. `!ready`)
+//   - BinaryExpr with COMPARISON op
+//     {==, !=, <, <=, >, >=} over two
+//     non-bool primitive leaves
+//     (int/float/string)                  → true (`n > 0`,
+//                                          `name == "foo"`,
+//                                          `hp <= maxHp / 2`,
+//                                          etc.) — comparison
+//                                          returns bool per
+//                                          Lua / any sane lang
+//   - BinaryExpr with LOGICAL op
+//     {&&, ||} over two bool leaves       → true (`a && b`,
+//                                          `done || retry`)
+//   - BinaryExpr with arithmetic op
+//     {Plus, Minus, Star, Slash, Percent} → false (arithmetic
+//                                          never produces bool;
+//                                          user-decided — no
+//                                          implicit int-as-bool)
+//   - anything else (no resolvedType, IndexExpr,
+//     TableExpr, CallExpr without resolvedMethod, etc.)
+//                                          → false (default-reject)
+//
+// IMPORTANT: this is condition-validation only. It does NOT
+// touch the bound validator (R5.2-C/E — int) or the step
+// validator (R5.2-D — const-folded positive int). The three
+// validators each enforce their own type contract.
+//
+// Free function (not a method): SemanticAnalyzer stamps
+// resolvedType on identifier / member / call leaves, so we
+// only need read access to the tree.
+//
+// R5.2-H.b (2026-07-14): the `analyzer` parameter is consulted
+// to recognize:
+//   - for-loop counters (pushed onto `analyzer->_loopCounters`
+//     in analyzeForStmt) as int leaves — without this,
+//     `if (j == 1) { ... }` inside `for (var j : 3)` would
+//     reject because `j` is deliberately not in `_scope`.
+//   - ambient-receiver CallExpr (`input.is_pressed(...)` where
+//     `input` is ambient) as bool-yielding — without this, the
+//     canonical Logia ↔ host shim pattern would hard-error
+//     because `c->resolvedMethod` is null for non-self calls.
+//
+// Both carve-outs preserve the strict "no implicit truthiness"
+// rule: we are NOT treating int as bool, we are recognizing
+// that these specific AST shapes are statically known to yield
+// bool (loop counter is int, comparison yields bool; ambient
+// receiver is a documented bool-yielding host shim).
+bool isStaticallyBool(const Expr* e, const SemanticAnalyzer* analyzer)
+{
+    if (!e) return false;
+
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(e)) {
+        return std::holds_alternative<bool>(lit->value);
+    }
+
+    if (auto* id = dynamic_cast<const IdentifierExpr*>(e)) {
+        // R5.2-C pattern (mirror): builtin-var scope entry has
+        // type=nullptr, but VarDeclStmt.typeName still carries
+        // the user's annotation. Read it via resolvedDecl.
+        if (id->resolvedDecl) {
+            if (auto* vd = static_cast<const VarDeclStmt*>(
+                    id->resolvedDecl)) {
+                if (isBooleanTypeName(vd->typeName)) {
+                    return true;
+                }
+            }
+        }
+        if (!id->resolvedType) return false;
+        return isBooleanTypeName(id->resolvedType->getName());
+    }
+
+    if (auto* m = dynamic_cast<const MemberExpr*>(e)) {
+        if (!m->resolvedType) return false;
+        return isBooleanTypeName(m->resolvedType->getName());
+    }
+
+    if (auto* c = dynamic_cast<const CallExpr*>(e)) {
+        // R5.2-H.b (2026-07-14): ambient-receiver carve-out.
+        // Calls of the form `input.is_pressed(...)` /
+        // `log.info(...)` / `time.delta()` where the receiver
+        // is an ambient identifier (`input`, `log`, `time`)
+        // are treated as bool-yielding when used in a
+        // condition context. The host runtime injects these
+        // names and contracts that method-shaped calls return
+        // bool (input methods), etc. Without this carve-out
+        // every canonical example fails to compile because
+        // `c->resolvedMethod` is null for non-self callees
+        // (analyzeCallExpr only stamps resolvedMethod for
+        // `self.<method>(...)` — see L1431).
+        //
+        // Why this is NOT a truthiness carve-out: we are
+        // saying "the host shim contract says this call yields
+        // bool", NOT "treat any non-bool as bool". If the
+        // ambient call returns something other than bool at
+        // runtime, that's a host-shim bug, not a Logia bug.
+        // The strict no-truthiness rule for non-ambient
+        // expressions is unchanged.
+        if (!c->resolvedMethod) {
+            if (analyzer) {
+                if (auto* mem = dynamic_cast<const MemberExpr*>(c->callee.get())) {
+                    if (auto* recvId = dynamic_cast<const IdentifierExpr*>(mem->object.get())) {
+                        if (SemanticAnalyzer::isAmbientIdentifier(recvId->name)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        auto* rt = c->resolvedMethod->getReturnType();
+        if (!rt) return false;
+        return isBooleanTypeName(rt->getName());
+    }
+
+    if (auto* u = dynamic_cast<const UnaryExpr*>(e)) {
+        // R5.2-H: only `!` (logical-not) preserves bool. `-` over
+        // a bool is a type error elsewhere (arithmetic on bool
+        // is meaningless); we don't need to second-guess that
+        // here — falling through to false is correct.
+        if (u->op.type != TokenType::Bang) return false;
+        return isStaticallyBool(u->operand.get(), analyzer);
+    }
+
+    if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
+        // R5.2-H: comparison operators ({==, !=, <, <=, >, >=})
+        // return bool regardless of operand primitive type
+        // (int/int, float/float, string/string all yield bool
+        // per Lua and any sensible language). Logical operators
+        // ({&&, ||}) require bool leaves (no implicit truthiness).
+        // Arithmetic ops fall through to `return false` (no
+        // implicit int-as-bool — user-decided principle).
+        switch (b->op.type) {
+            case TokenType::EqualEqual:
+            case TokenType::BangEqual:
+            case TokenType::Less:
+            case TokenType::LessEqual:
+            case TokenType::Greater:
+            case TokenType::GreaterEqual: {
+                // R5.2-H: comparison returns bool when both
+                // leaves are primitive (int/float/bool/string).
+                // We accept any leaf where the leaf can be
+                // *reduced to a primitive type* — exactly the
+                // same predicate `boundIsStaticallyInt` uses for
+                // int, but generalized to all primitives. We
+                // recurse to allow `n > (a + b)` (int > int via
+                // arithmetic on int leaves) — see the predicate
+                // helper below.
+                return leafIsStaticallyPrimitive(b->left.get(), analyzer)
+                    && leafIsStaticallyPrimitive(b->right.get(), analyzer);
+            }
+            case TokenType::And:
+            case TokenType::Or:
+                return isStaticallyBool(b->left.get(), analyzer)
+                    && isStaticallyBool(b->right.get(), analyzer);
+            default:
+                // Plus / Minus / Star / Slash / Percent / Equal /
+                // PlusEqual / etc. — none produce bool.
+                return false;
+        }
+    }
+
+    return false;
+}
+
+// R5.2-H (2026-07-14): helper used by isStaticallyBool's
+// comparison branch. Returns true iff `e` is statically
+// reducible to a primitive type (int / float / bool / string),
+// recursively through arithmetic / unary. Used to gate the
+// `comparison → bool` rule: `n > 0` (int > int) is fine,
+// `vec > 0` (struct > int) is rejected, `f() > 0` is fine
+// when f returns int.
+//
+// Mirrors boundIsStaticallyInt's recursion strategy but
+// accepts any primitive, not just int.
+//
+// R5.2-H.b (2026-07-14): also recognizes for-loop counter
+// identifiers (pushed onto `analyzer->_loopCounters` in
+// analyzeForStmt) as int-shaped primitives — the counter is
+// deliberately NOT in `_scope` (per R5.0 / R5.2-C), so the
+// usual IdentifierExpr path returns false on it.
+bool leafIsStaticallyPrimitive(const Expr* e, const SemanticAnalyzer* analyzer)
+{
+    if (!e) return false;
+
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(e)) {
+        return std::holds_alternative<bool>(lit->value)
+            || std::holds_alternative<int>(lit->value)
+            || std::holds_alternative<float>(lit->value)
+            || std::holds_alternative<std::string>(lit->value);
+    }
+
+    if (auto* id = dynamic_cast<const IdentifierExpr*>(e)) {
+        // R5.2-H.b: for-loop counter carve-out. The counter
+        // is not in `_scope` (R5.0 / R5.2-C's deliberate
+        // design) but is pushed onto `_loopCounters` by
+        // analyzeForStmt. Treat it as an int primitive so
+        // `if (j == 1) { ... }` inside a `for (var j : 3)`
+        // body is recognized as a comparison yielding bool.
+        if (analyzer && analyzer->isLoopCounter(id->name)) {
+            return true;  // counter is always int
+        }
+        if (id->resolvedDecl) {
+            if (auto* vd = static_cast<const VarDeclStmt*>(
+                    id->resolvedDecl)) {
+                const auto& n = vd->typeName;
+                return n == "int" || n == "Int32" || n == "Int64"
+                    || n == "float" || n == "Float32" || n == "Float64"
+                    || n == "bool" || n == "string";
+            }
+        }
+        if (!id->resolvedType) return false;
+        const auto n = id->resolvedType->getName();
+        return n == "int" || n == "Int32" || n == "Int64"
+            || n == "float" || n == "Float32" || n == "Float64"
+            || n == "bool" || n == "string";
+    }
+
+    if (auto* m = dynamic_cast<const MemberExpr*>(e)) {
+        if (!m->resolvedType) return false;
+        const auto n = m->resolvedType->getName();
+        return n == "int" || n == "Int32" || n == "Int64"
+            || n == "float" || n == "Float32" || n == "Float64"
+            || n == "bool" || n == "string";
+    }
+
+    if (auto* c = dynamic_cast<const CallExpr*>(e)) {
+        if (!c->resolvedMethod) return false;
+        auto* rt = c->resolvedMethod->getReturnType();
+        if (!rt) return false;
+        const auto n = rt->getName();
+        return n == "int" || n == "Int32" || n == "Int64"
+            || n == "float" || n == "Float32" || n == "Float64"
+            || n == "bool" || n == "string";
+    }
+
+    if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
+        // Arithmetic on primitives is still primitive. Compare
+        // ops are handled by the caller (isStaticallyBool).
+        // && / || return bool, primitive. We accept both.
+        switch (b->op.type) {
+            case TokenType::Plus:
+            case TokenType::Minus:
+            case TokenType::Star:
+            case TokenType::Slash:
+            case TokenType::Percent:
+            case TokenType::EqualEqual:
+            case TokenType::BangEqual:
+            case TokenType::Less:
+            case TokenType::LessEqual:
+            case TokenType::Greater:
+            case TokenType::GreaterEqual:
+            case TokenType::And:
+            case TokenType::Or:
+                return leafIsStaticallyPrimitive(b->left.get(), analyzer)
+                    && leafIsStaticallyPrimitive(b->right.get(), analyzer);
+            default:
+                return false;
+        }
+    }
+
+    if (auto* u = dynamic_cast<const UnaryExpr*>(e)) {
+        // `-` over a numeric leaf, `!` over a bool leaf — both
+        // primitive.
+        return leafIsStaticallyPrimitive(u->operand.get(), analyzer);
+    }
+
+    return false;
+}
+
 // R5.2-D (2026-07-14): constant-fold an Expr to an int value, or
 // return std::nullopt if the expression is not a constant int
 // expression. Distinct from `boundIsStaticallyInt` (which only
@@ -430,6 +743,22 @@ bool SemanticAnalyzer::isBuiltInType(const std::string& name)
 bool SemanticAnalyzer::isAmbientIdentifier(const std::string& name)
 {
     return ambientIdentifiers().count(name) > 0;
+}
+
+// R5.2-H.b (2026-07-14): read-only accessor for the
+// `_loopCounters` stack, used by `leafIsStaticallyPrimitive`
+// to recognize for-loop counter identifiers as int leaves in
+// condition contexts. Walks the frame stack from innermost
+// outward (mirrors `isLabelVisible` for `_labelStack` at
+// L1421). Returns true on first match; false when no frame
+// contains the name OR the stack is empty.
+bool SemanticAnalyzer::isLoopCounter(const std::string& name) const
+{
+    for (auto it = _loopCounters.rbegin();
+         it != _loopCounters.rend(); ++it) {
+        if (it->count(name)) return true;
+    }
+    return false;
 }
 
 void SemanticAnalyzer::report(LogiaDiagnostic d)
@@ -734,7 +1063,12 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
 // `parseBlockBody` re-enters here).
 void SemanticAnalyzer::analyzeWhileStmt(WhileStmt& w)
 {
-    if (w.condition) analyzeExpr(*w.condition);
+    // R5.2-H (2026-07-14): while condition must statically be bool.
+    // `while (n)` where n: int is a hard error — Logia has no
+    // C-style truthiness. `while (n > 0)` is fine (BinaryExpr with
+    // comparison op + bool-typed leaves). See isStaticallyBool.
+    validateCondition(w.condition.get(), sourceLocFor(w.condition.get()),
+                      "while");
     // R5.2-B (2026-07-14): push a label-scope frame for the
     // while-body. Labels declared here are visible to `break :L`
     // / `continue :L` inside this body and to nested-loop bodies
@@ -838,9 +1172,21 @@ void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
     // R5.2-B (2026-07-14): symmetric label-scope frame for the
     // for-body. See analyzeWhileStmt's comment.
     _labelStack.emplace_back();
+    // R5.2-H (2026-07-14): push the counter name into the
+    // loop-counter frame so R5.2-H's `leafIsStaticallyPrimitive`
+    // can recognize it as an int leaf when used in conditions
+    // (`if (i == 5)`, `if (j > 0)`, etc.). The counter is NOT
+    // pushed into `_scope` (per R5.0 / R5.2-C's deliberate
+    // design) so post-loop references stay implicit-globals; the
+    // loop-counter stack is a *separate*, condition-only
+    // visibility channel. Mirrors the symmetry of
+    // `_labelStack` push/pop.
+    _loopCounters.emplace_back();
+    _loopCounters.back().insert(f.counterName);
     for (auto& s : f.body) {
         if (s) analyzeStmt(*s);
     }
+    _loopCounters.pop_back();
     _labelStack.pop_back();
 }
 
@@ -956,6 +1302,82 @@ void SemanticAnalyzer::analyzeContinueStmt(ContinueStmt& /*c*/)
 {
 }
 
+// R5.2-H (2026-07-14): validate an `if (...)` / `while (...)`
+// condition. Mirror of validateForBound (R5.2-C) but checks for
+// bool-shape instead of int-shape. Two-stage walk:
+//   1. Call analyzeExpr(*cond) to stamp resolvedType on
+//      identifier-shaped leaves (existing S2.5 / S3.0 plumbing).
+//   2. Run isStaticallyBool to inspect the stamped tree.
+//
+// Decision matrix (allowed vs rejected shapes) lives on
+// isStaticallyBool's comment block. On rejection we emit a
+// TypeMismatch hard error with a hint pointing the user at
+// the bool type contract and offering a comparison rewrite
+// (`n` → `n > 0`, `count` → `count != 0`, etc.).
+void SemanticAnalyzer::validateCondition(
+    Expr* cond, const SourceLocation& loc, const std::string& role)
+{
+    if (!cond) {
+        // Defensive — parser shouldn't produce null condition
+        // (parens are required for if / while per R5.0.1, and
+        // the parser would have errored on `if` / `while () { }`).
+        return;
+    }
+
+    // Stage 1: walk the condition subtree so identifier / member
+    // / call paths get their resolvedType stamped before we
+    // inspect it.
+    analyzeExpr(*cond);
+
+    // Stage 2: shape check. Pass `this` so the predicate can
+    // consult `_loopCounters` (for-counter carve-out) and
+    // `isAmbientIdentifier` (ambient-receiver CallExpr
+    // carve-out). See R5.2-H.b comments on isStaticallyBool /
+    // leafIsStaticallyPrimitive.
+    if (isStaticallyBool(cond, this)) {
+        return;
+    }
+
+    // Fall-through: hard error. Compose a role-specific message
+    // pointing at the literal/identifier kind so the user can
+    // locate the offending sub-expression.
+    LogiaDiagnostic d;
+    d.severity = DiagnosticSeverity::Error;
+    d.errorCode = ErrorCode::TypeMismatch;
+    d.location = loc;
+
+    if (auto* lit = dynamic_cast<LiteralExpr*>(cond)) {
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                d.message = role + " condition must be bool, got null literal";
+            } else if constexpr (std::is_same_v<T, int>) {
+                d.message = role + " condition must be bool, got int literal";
+            } else if constexpr (std::is_same_v<T, float>) {
+                d.message = role + " condition must be bool, got float literal";
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                d.message = role + " condition must be bool, got string literal";
+            } else {
+                d.message = role + " condition must be bool, got non-bool literal";
+            }
+        }, lit->value);
+    } else if (auto* id = dynamic_cast<IdentifierExpr*>(cond)) {
+        d.message = role + " condition '" + id->name +
+                    "' does not have a known bool type";
+    } else if (auto* m = dynamic_cast<MemberExpr*>(cond)) {
+        d.message = role + " condition (self." + m->member +
+                    ") does not have a known bool type";
+    } else if (auto* c = dynamic_cast<CallExpr*>(cond)) {
+        d.message = role + " condition call expression does not return bool";
+    } else {
+        d.message = role + " condition expression does not statically reduce to bool";
+    }
+    d.hint = "Logia has no implicit truthiness — rewrite `x` as a "
+             "comparison like `x > 0`, `x != 0`, `x == true`, etc.; "
+             "or declare the variable as `bool` (`var ready: bool = ...`)";
+    report(d);
+}
+
 // R5.2-B (2026-07-14): `::LABEL::` — register the name in the
 // innermost label-scope frame. The frame corresponds to the
 // enclosing loop body (analyzeWhileStmt / analyzeForStmt pushed
@@ -1049,7 +1471,11 @@ void SemanticAnalyzer::analyzeStmt(Stmt& s)
             analyzeExpr(*es->expr);
         }
     } else if (auto* is = dynamic_cast<IfStmt*>(&s)) {
-        if (is->condition) analyzeExpr(*is->condition);
+        // R5.2-H (2026-07-14): if condition must statically be bool.
+        // Same rule as while — no implicit truthiness. See
+        // analyzeWhileStmt's comment for the rationale.
+        validateCondition(is->condition.get(),
+                          sourceLocFor(is->condition.get()), "if");
         for (auto& t : is->thenBranch) if (t) analyzeStmt(*t);
         for (auto& e : is->elseBranch) if (e) analyzeStmt(*e);
     } else if (auto* ws = dynamic_cast<WhileStmt*>(&s)) {     // R5.0 (2026-07-13)

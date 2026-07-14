@@ -1004,4 +1004,227 @@ script T {
     CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
 }
 
+// R5.2-H (2026-07-14): if / while conditions must statically
+// reduce to bool. Logia has no implicit truthiness — `while (n)`
+// where `n: int` is a hard TypeMismatch error. The new helper
+// `isStaticallyBool` accepts:
+//   - bool literals
+//   - bool-typed identifiers (incl. builtin-var fallback)
+//   - bool-typed self.field / self.method() returning bool
+//   - `!` (Bang) on a bool leaf
+//   - comparison ops {==, !=, <, <=, >, >=} over two primitive
+//     leaves (int/float/bool/string)
+//   - logical ops {&&, ||} over two bool leaves
+// Arithmetic (`n + 1`) as condition is rejected — no implicit
+// int-as-bool.
+
+TEST_CASE(r52h_if_bool_var_is_ok) {
+    // R5.2-H: the most common case — `if (ready)` where
+    // `ready: bool`. Pre-R5.2-H: silently truthy. R5.2-H:
+    // statically bool, accepted.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var ready: bool = true
+    on_start() {
+        if (ready) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_while_bool_var_is_ok) {
+    // R5.2-H: `while (running)` where `running: bool`.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var running: bool = true
+    on_start() {
+        while (running) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_int_comparison_is_ok) {
+    // R5.2-H: comparison `n > 0` (int > int) returns bool per
+    // Lua. The most natural rewrite from pre-R5.2-H `if (n)`.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() {
+        if (n > 0) { }
+        if (n == 5) { }
+        if (n != 0) { }
+        if (n <= 10) { }
+        if (n >= 1) { }
+        if (n < 100) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_while_int_comparison_is_ok) {
+    // R5.2-H: `while (n > 0)` is the canonical loop pattern.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 3
+    on_start() {
+        while (n > 0) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_logical_ops_on_bool_are_ok) {
+    // R5.2-H: `&&` / `||` over two bool leaves return bool.
+    // `!bool` returns bool.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var ready: bool = true
+    var armed: bool = false
+    on_start() {
+        if (ready && armed) { }
+        if (ready || armed) { }
+        if (!ready) { }
+        if (!ready && armed) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_int_var_alone_is_hard_error) {
+    // R5.2-H: the headline rule — `if (n)` where `n: int` is
+    // rejected. Logia has no implicit truthiness; Lua would
+    // have treated 0 as false and any non-zero as true, which
+    // is the silent-bug class R5.2-H exists to eliminate.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() {
+        if (n) { }
+    }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_while_int_var_alone_is_hard_error) {
+    // R5.2-H: `while (count)` where `count: int` is rejected.
+    // This is the canonical R5.2-H scenario — silent truthy
+    // counters are exactly the bug class we're eliminating.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var count: int = 10
+    on_start() {
+        while (count) { }
+    }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_arithmetic_expression_is_hard_error) {
+    // R5.2-H: arithmetic does NOT produce bool. `n + 1` is an
+    // int expression even when `n: int`, so it can't be a
+    // condition. This enforces the "no int-as-bool" rule —
+    // users must write `n + 1 != 0` if they mean "did the
+    // counter increment to nonzero?".
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() {
+        if (n + 1) { }
+    }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_int_literal_is_hard_error) {
+    // R5.2-H: int literal as condition is rejected. Even
+    // `if (1)` (which Lua would treat as truthy) is a hard
+    // error. Forces users to write `if (true)` if they
+    // actually want a constant-true branch.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        if (1) { }
+    }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_string_literal_is_hard_error) {
+    // R5.2-H: string literal is not bool. Lua would treat
+    // any non-empty string as truthy, but Logia rejects it.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        if ("hello") { }
+    }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_if_string_comparison_is_ok) {
+    // R5.2-H: string comparison returns bool. `name == "foo"`
+    // is the natural string-equality check.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var name: string = "foo"
+    on_start() {
+        if (name == "foo") { }
+        if (name != "bar") { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52h_while_bool_literal_is_ok) {
+    // R5.2-H: `while (true)` is the only legal constant loop.
+    // Note: this would actually loop forever at runtime — but
+    // R5.2-H doesn't gate against infinite loops (that's a
+    // separate concern; static-analysis would need a CFG
+    // depth-bounded check).
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        while (true) { }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
 TEST_SUITE_END

@@ -3375,5 +3375,100 @@ script T {
 }
 
 // ----------------------------------------------------------------------------
+// R5.2-H (2026-07-14): if / while conditions must statically
+// reduce to bool. End-to-end runtime checks below verify that the
+// new validator accepts natural comparison-style conditions and
+// emits correct Lua. The hard-error rejection cases are covered
+// by the semantic tests in Test_LogiaSemantic.cpp.
+
+TEST_CASE(lg15_r52h_while_int_comparison_iterates) {
+    // R5.2-H: `while (n > 0)` is the canonical loop pattern.
+    // E2E proves the validator accepts it and Lua's normal
+    // comparison-based while runs correctly. n starts at 3,
+    // decrements each iteration; sum = 3+2+1 = 6.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var n: int = 3
+        var sum: int = 0
+        while (n > 0) {
+            sum = sum + n
+            n = n - 1
+        }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52h_while_int_cmp", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52h_while_int_cmp", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "6");
+}
+
+TEST_CASE(lg15_r52h_if_int_comparison_branches) {
+    // R5.2-H: `if (n == 5)` is the canonical equality check.
+    // E2E proves branching works with comparison conditions.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var n: int = 5
+        var branch: int = 0
+        if (n == 5) {
+            branch = 1
+        }
+        if (n != 5) {
+            branch = 2
+        }
+        if (n > 0 && n < 10) {
+            branch = 3
+        }
+        __test_witness = tostring(branch)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52h_if_int_cmp", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52h_if_int_cmp", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "3");
+}
+
+TEST_CASE(lg15_r52h_if_logical_ops_compose) {
+    // R5.2-H: logical ops `&&` / `||` / `!` over bool vars
+    // produce bool. E2E verifies the composite branch.
+    LogiaRuntimeBridge bridge;
+    const char* src = R"(
+script T {
+    on_start() {
+        var ready: bool = true
+        var armed: bool = false
+        var path: int = 0
+        if (ready && armed) {
+            path = 1
+        }
+        if (ready || armed) {
+            path = 2
+        }
+        if (!armed) {
+            path = 3
+        }
+        __test_witness = tostring(path)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52h_if_logical", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52h_if_logical", "on_start",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "3");
+}
+
+// ----------------------------------------------------------------------------
 
 TEST_SUITE_END
