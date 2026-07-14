@@ -413,11 +413,15 @@ void LuaCodegen::emitWhileStmt(const WhileStmt& stmt)
 //     scope for `i` (loop-local); no codegen-side scope marker is
 //     required.
 //
-// Edge cases handled at runtime (not codegen time):
-//   - `bound == 0` or `bound < 1` → Lua skips the body entirely.
-//   - `start > end - 1` (i.e. `start >= end`) → Lua skips the body.
-//   - Non-integer bounds → Lua coerces per its numeric-for rules
-//     (truncation toward zero on Lua 5.5).
+// Edge cases:
+//   - By R5.2-C (2026-07-14) the analyzer guarantees the bound
+//     statically reduces to int, so all numeric-for coercion is
+//     now impossible at runtime.
+//   - `bound == 0` / `bound < 1` is still legal (Lua skips the body).
+//   - `start >= end` (i.e. `start > end - 1`) is still legal (Lua
+//     skips the body).
+//   - Non-integer bounds are now rejected at compile time by
+//     SemanticAnalyzer::validateForBound (ErrorCode::TypeMismatch).
 void LuaCodegen::emitForStmt(const ForStmt& stmt)
 {
     // R5.2-B (2026-07-14): hoist top-level LabelDeclStmts out of

@@ -3181,4 +3181,65 @@ script X {
 
 // ----------------------------------------------------------------------------
 
+// ============================================================
+// R5.2-C (2026-07-14): for-loop bound type validation
+// ============================================================
+// R5.2-C forces the bound expression to statically reduce to
+// int. These E2E tests cover the two new "valid identifier
+// bound" paths: a script `var n: int` (resolvedType stamped
+// via scope lookup) and the half-open range form. Codegen is
+// unchanged — both shapes already exist in R5.0 / R5.0.1; R5.2-C
+// only adds the static gate, so the runtime behavior is exactly
+// what R5.0 / R5.0.1 already produced.
+
+TEST_CASE(lg15_r52c_int_identifier_bound_runs) {
+    // E2E: `for (var i : n)` where n is an int-typed script var
+    // must run and produce the expected loop count.
+    LogiaRuntimeBridge bridge;
+
+    const char* src = R"(
+script X {
+    on_start() {
+        var n: int = 4
+        var sum: int = 0
+        for (var i : n) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    // i runs 1,2,3,4 → sum = 10.
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52c_int_var_bound", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52c_int_var_bound", "on_start", nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "10");
+}
+
+TEST_CASE(lg15_r52c_range_form_with_int_vars_runs) {
+    // E2E: `for (var i : lo, hi)` with both as int script
+    // vars — R5.0.1 half-open range form, validated by R5.2-C.
+    // (Logia R5.2-A reserved `end` as a do-block closer keyword.)
+    LogiaRuntimeBridge bridge;
+
+    const char* src = R"(
+script X {
+    on_start() {
+        var lo: int = 3
+        var hi: int = 6
+        var sum: int = 0
+        for (var i : lo, hi) { sum = sum + i }
+        __test_witness = tostring(sum)
+    }
+}
+)";
+    // i runs 3,4,5 (half-open [3,6)) → sum = 12.
+    std::vector<CompilerError> errors;
+    CHECK(loadSource(bridge, "r52c_range_form_int", src, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("r52c_range_form_int", "on_start", nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "12");
+}
+
+// ----------------------------------------------------------------------------
+
 TEST_SUITE_END

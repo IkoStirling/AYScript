@@ -36,8 +36,10 @@ bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
 
 #include <algorithm>
 #include <cstring>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 
 namespace ayt::script::logia
 {
@@ -52,6 +54,111 @@ const std::unordered_set<std::string>& builtinTypeNames()
     };
     return s;
 }
+
+// R5.2-C (2026-07-14): name → true if `name` is an integer-shape
+// primitive. Distinct from `isBuiltInType()` (which only answers
+// "is the name recognized as ambient"), because some builtins
+// (`float`, `bool`, `string`) are not integer-shape. `int` /
+// `Int32` / `Int64` are. Logia-script semantics: only
+// integer-shape types are valid `for (...)` bounds.
+//
+// We deliberately exclude PascalCase float aliases (`Float32` /
+// `Float64`) — those are real types and a `for (var i : x)`
+// where x is `Float32` is a type error.
+//
+// Used by both the bound validator and (optionally) future
+// expression-shape inference. Pure name match — does not touch
+// AYReflect.
+bool isIntegerTypeName(const std::string& name)
+{
+    return name == "int"
+        || name == "Int32"
+        || name == "Int64";
+}
+
+// R5.2-C (2026-07-14): pure-tree-shape predicate. Returns true
+// iff `e` is statically an int given current analyzer state
+// (resolvedType / literal value / constant-folded binary form).
+//
+// Cases handled (in priority order):
+//   - IntLiteralExpr                     → true
+//   - FloatLiteralExpr / StringLiteral   → false
+//   - BoolLiteralExpr                    → false
+//   - IdentifierExpr with resolvedType
+//     pointing at "int"/"Int32"/"Int64"  → true
+//   - MemberExpr leaf with resolvedType  → check ITypeInfo*'s name
+//   - CallExpr with resolvedMethod whose
+//     getReturnType() is int-shaped       → true
+//   - BinaryExpr where all leaves
+//     (recursive) are int                → true (constant-folded)
+//   - UnaryExpr where operand (recursive) is int → true
+//   - anything else (no resolvedType, IndexExpr, TableExpr, etc.)
+//     → false (default-reject per R5.2-C policy)
+//
+// Free function (not a method): SemanticAnalyzer keeps
+// resolvedType stamped on each Expr, so we only need read access.
+bool boundIsStaticallyInt(const Expr* e)
+{
+    if (!e) return false;
+
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(e)) {
+        return std::holds_alternative<int>(lit->value);
+    }
+
+    if (auto* id = dynamic_cast<const IdentifierExpr*>(e)) {
+        // R5.2-C (2026-07-14): for script-declared `var n: int`
+        // the scope entry stores type=nullptr (built-in types
+        // never have an ITypeInfo*) — but the VarDeclStmt's
+        // `typeName` field still carries the user's annotation.
+        // resolveDecl points at the VarDeclStmt; reading typeName
+        // there is the cleanest way to recover the int shape
+        // without disturbing the analyzer's scope semantics.
+        if (id->resolvedDecl) {
+            if (auto* vd = static_cast<const VarDeclStmt*>(
+                    id->resolvedDecl)) {
+                if (isIntegerTypeName(vd->typeName)) {
+                    return true;
+                }
+            }
+        }
+        if (!id->resolvedType) return false;
+        return isIntegerTypeName(id->resolvedType->getName());
+    }
+
+    if (auto* m = dynamic_cast<const MemberExpr*>(e)) {
+        if (!m->resolvedType) return false;
+        return isIntegerTypeName(m->resolvedType->getName());
+    }
+
+    if (auto* c = dynamic_cast<const CallExpr*>(e)) {
+        if (!c->resolvedMethod) return false;
+        auto* rt = c->resolvedMethod->getReturnType();
+        if (!rt) return false;
+        return isIntegerTypeName(rt->getName());
+    }
+
+    if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
+        // Constant-folded shape check. Operator-agnostic — `+ - * / % ^`
+        // all produce int when both operands are int literals.
+        return boundIsStaticallyInt(b->left.get())
+            && boundIsStaticallyInt(b->right.get());
+    }
+
+    if (auto* u = dynamic_cast<const UnaryExpr*>(e)) {
+        return boundIsStaticallyInt(u->operand.get());
+    }
+
+    return false;
+}
+
+// R5.2-C (2026-07-14): best-effort source location lookup for
+// expressions. The Expr base class does not currently carry a
+// source location (S2.5 parser doesn't stamp it). For R5.2-C
+// diagnostics we report at empty location — the
+// `LogiaDiagnostic::toHumanString` already handles missing
+// line/column gracefully. Future slice can add Expr-level source
+// locations if finer-grained diagnostics are ever needed.
+SourceLocation sourceLocFor(Expr* /*bound*/) { return {}; }
 
 const std::unordered_set<std::string>& ambientIdentifiers()
 {
@@ -577,10 +684,29 @@ void SemanticAnalyzer::analyzeWhileStmt(WhileStmt& w)
 // the half-open range form `for (var i : start, end)` — analyzer
 // needs to validate the start expression the same way it validates
 // the bound.
+//
+// R5.2-C (2026-07-14): the bound type-check is no longer deferred.
+// validateForBound() emits `ErrorCode::TypeMismatch` hard error when
+// the bound cannot be statically reduced to int. Decision matrix
+// (allowed vs rejected shapes) lives on validateForBound's comment
+// block. `validateForBound` also internally walks the bound subtree
+// (calling analyzeExpr-like logic on each leaf) so we no longer
+// need the prior `analyzeExpr(*f.bound)` call.
 void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
 {
-    if (f.start) analyzeExpr(*f.start);
-    if (f.bound) analyzeExpr(*f.bound);
+    // R5.2-C (2026-07-14): validate the upper bound expression.
+    // validateForBound internally calls analyzeExpr to stamp
+    // resolvedType on identifier-shaped leaves before checking.
+    validateForBound(f.bound.get(), sourceLocFor(f.bound.get()),
+                     "bound");
+
+    // R5.0.1 (2026-07-13): range form `for (var i : start, end)`.
+    // R5.2-C (2026-07-14): validate `start` the same way.
+    if (f.start) {
+        validateForBound(f.start.get(), sourceLocFor(f.start.get()),
+                         "start");
+    }
+
     // R5.2-B (2026-07-14): symmetric label-scope frame for the
     // for-body. See analyzeWhileStmt's comment.
     _labelStack.emplace_back();
@@ -588,6 +714,87 @@ void SemanticAnalyzer::analyzeForStmt(ForStmt& f)
         if (s) analyzeStmt(*s);
     }
     _labelStack.pop_back();
+}
+
+// R5.2-C (2026-07-14): verify a `for (...)` bound statically
+// reduces to int. Hard error otherwise.
+//
+// We use a small visitor instead of overloading the existing
+// `analyzeExpr` dispatch because (a) we want different error
+// wording (point at the bound role, not "implicit global"), and
+// (b) we must short-circuit (no further diagnostic on subtree)
+// once we know the answer.
+//
+// Two-stage walk:
+//   1. Call analyzeExpr(*bound) first to stamp resolvedType on
+//      identifier-shaped leaves (existing S2.5 / S3.0 plumbing).
+//   2. Then run boundIsStaticallyInt to inspect the stamped tree.
+//
+// Decision matrix:
+//   IntLiteral / BinaryExpr of int literals / UnaryExpr of int /
+//   IdentifierExpr whose resolvedType is int / MemberExpr whose
+//   resolvedType is int / CallExpr whose resolvedMethod returns int
+//     → OK
+//   FloatLiteral / StringLiteral / BoolLiteral / IdentifierExpr
+//   with non-int resolvedType / IndexExpr / TableExpr / etc.
+//     → hard error TypeMismatch
+void SemanticAnalyzer::validateForBound(
+    Expr* bound, const SourceLocation& loc, const std::string& role)
+{
+    if (!bound) {
+        // Defensive — parser shouldn't produce null bound.
+        return;
+    }
+
+    // Stage 1: walk the bound subtree so identifier / member / call
+    // paths get their resolvedType stamped before we inspect it.
+    analyzeExpr(*bound);
+
+    // Stage 2: shape check.
+    if (boundIsStaticallyInt(bound)) {
+        return;
+    }
+
+    // Fall-through: hard error. The bound is not provably int.
+    LogiaDiagnostic d;
+    d.severity = DiagnosticSeverity::Error;
+    d.errorCode = ErrorCode::TypeMismatch;
+    d.location = loc;
+    if (auto* lit = dynamic_cast<LiteralExpr*>(bound)) {
+        // Literal but wrong-shape (float/string/bool).
+        std::visit([&](auto&& v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, float>) {
+                d.message = "for-loop " + role +
+                            " must be int, got float literal";
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                d.message = "for-loop " + role +
+                            " must be int, got string literal";
+            } else if constexpr (std::is_same_v<T, bool>) {
+                d.message = "for-loop " + role +
+                            " must be int, got bool literal";
+            } else {
+                d.message = "for-loop " + role +
+                            " must be int, got non-int literal";
+            }
+        }, lit->value);
+    } else if (auto* id = dynamic_cast<IdentifierExpr*>(bound)) {
+        d.message = "for-loop " + role + " '" + id->name +
+                    "' does not have a known int type";
+    } else if (auto* m = dynamic_cast<MemberExpr*>(bound)) {
+        d.message = "for-loop " + role + " (" + m->member +
+                    ") does not have a known int type";
+    } else if (auto* c = dynamic_cast<CallExpr*>(bound)) {
+        d.message = "for-loop " + role +
+                    " call expression does not return int";
+    } else {
+        d.message = "for-loop " + role +
+                    " expression does not statically reduce to int";
+    }
+    d.hint = "use an int literal, an int-typed variable, "
+             "an int-typed self.<field>, or a self.<method>() "
+             "returning int";
+    report(d);
 }
 
 // R5.1 (2026-07-13): no-op for `break;` inside a loop.

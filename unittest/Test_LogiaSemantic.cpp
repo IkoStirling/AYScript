@@ -640,4 +640,154 @@ script StrictUnrelated {
     CHECK(r.success);  // strict check skipped for System host
 }
 
+// ============================================================================
+// R5.2-C (2026-07-14) — `for`-loop bound type validation
+// ----------------------------------------------------------------------------
+// R5.2-C closes the long-deferred bound type-check (the R5.0.1 followup
+// note at AYSemanticAnalyzer.cpp:571-574). Any bound that cannot be
+// statically reduced to int is a hard `ErrorCode::TypeMismatch` — the
+// compile fails. Decision matrix lives on validateForBound's comment.
+// ============================================================================
+
+TEST_CASE(r52c_bound_int_literal_is_ok) {
+    // R5.2-C: an int-literal bound is the canonical OK case.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 10) { } } }
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_float_literal_is_hard_error) {
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 3.14) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_string_literal_is_hard_error) {
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : "hello") { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_bool_literal_is_hard_error) {
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : true) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_undeclared_identifier_is_hard_error) {
+    // `n` is not declared anywhere → resolvedType=nullptr → reject.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : n) { } } }
+)");
+    CHECK_FALSE(r.success);
+    // R5.2-C takes precedence over the prior UnknownIdentifier warning
+    // because the TypeMismatch check fires on null resolvedType.
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_self_var_int_is_ok) {
+    // Declare an `int` script var and use it as bound.
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var n: int = 5
+    on_start() { for (var i : n) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_self_var_float_is_hard_error) {
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var f: float = 1.5
+    on_start() { for (var i : f) { } }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_binary_int_literals_is_ok) {
+    // Constant-folded shape: `3 + 5` reduces to 8 statically.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 3 + 5) { } } }
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_bound_binary_with_non_int_leaf_is_hard_error) {
+    // `n` is undeclared → resolvedType=nullptr → BinaryExpr check
+    // fails because the right leaf is not statically int.
+    Compiler c;
+    auto r = c.compile(R"(
+script T { on_start() { for (var i : 3 + n) { } } }
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_range_form_both_bounds_validated) {
+    // `for (var i : lo, hi)` — both must be int.
+    // (Logia R5.2-A reserved `end` as a do-block closer keyword, so
+    // use `lo` / `hi` for the range-form fixture.)
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var lo: int = 0
+    var hi: int = 10
+    on_start() { for (var i : lo, hi) { } }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_range_form_non_int_end_is_hard_error) {
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    var lo: int = 0
+    var f: float = 1.5
+    on_start() { for (var i : lo, f) { } }
+}
+)");
+    CHECK_FALSE(r.success);
+    CHECK(hasError(r, ErrorCode::TypeMismatch));
+}
+
+TEST_CASE(r52c_regression_r50_short_form_int_literal_still_works) {
+    // Regression: the R5.0 short form with int literal must still
+    // compile clean (the most common existing pattern, asserted by
+    // all prior for-loop tests).
+    Compiler c;
+    auto r = c.compile(R"(
+script T {
+    on_start() {
+        var sum: int = 0
+        for (var i : 10) { sum = sum + 1 }
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(hasError(r, ErrorCode::TypeMismatch));
+}
+
 TEST_SUITE_END

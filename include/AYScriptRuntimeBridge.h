@@ -163,7 +163,22 @@ namespace ayt::script
 //       LabelDeclStmt; BreakStmt/ContinueStmt gain `std::string label`
 //       field. R5.2-C (bound type validation) is a separate commit.
 //       Compile cache invalidated because codegen output shape changed.
-constexpr std::size_t kLogiaPipelineVersion = 17u;
+//       2026-07-14 R5.2-C: bump 17 → 18. New Logia validation:
+//       `for (var i : N)` / `for (var i : start, end)` bound
+//       expressions must statically reduce to int. Anything else
+//       (float/string/bool literals; non-int-typed identifiers,
+//       self.<field>, or self.<method>() returns; BinaryExpr with
+//       any non-int-literal operand) emits ErrorCode::TypeMismatch
+//       as a hard error and the compile fails. Static-only — no
+//       runtime defense added. Step argument (`for (var i :
+//       start, end, step)`) remains out of scope; parser still
+//       only accepts two expressions in the for-header. Codegen
+//       unchanged — by the time emitForStmt runs, every bound
+//       has been statically validated. Compile cache invalidated
+//       because the analyzer now hard-errors on previously-silent
+//       bad-bound cases (e.g. `for (var i : 3.14)` would have
+//       cached OK at v17 and now refuses to compile).
+constexpr std::size_t kLogiaPipelineVersion = 18u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

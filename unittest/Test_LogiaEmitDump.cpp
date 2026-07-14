@@ -722,4 +722,28 @@ script Dup {
     CHECK(_lastDump.errorsContain("duplicate"));
 }
 
+// R5.2-C — `for (var i : 10)` short form emits normally
+// (regression on R5.0 short form with the new bound validator
+// in place — must still produce `for i = 1, 10 do`).
+TEST_CASE(emit_dump_35_r52c_int_bound_emits_clean) {
+    const char* src = R"(
+script T { on_start() { for (var i : 10) { } } }
+)";
+    dumpCase("35_r52c_int_bound_emits_clean", src, /*expectSuccess=*/true);
+    CHECK(containsFlat(_lastDump.emittedLua, "for i = 1, 10 do"));
+}
+
+// R5.2-C — float-literal bound is a hard error from the
+// analyzer and must NOT reach codegen. compileToLua's compile
+// fails so the dump file is empty.
+TEST_CASE(emit_dump_36_r52c_non_int_bound_is_error) {
+    const char* src = R"(
+script T { on_start() { for (var i : 3.14) { } } }
+)";
+    dumpCase("36_r52c_non_int_bound_is_error", src, /*expectSuccess=*/false);
+    CHECK(_lastDump.errorsContain("TypeMismatch")
+          || _lastDump.errorsContain("must be int")
+          || _lastDump.errorsContain("float literal"));
+}
+
 TEST_SUITE_END

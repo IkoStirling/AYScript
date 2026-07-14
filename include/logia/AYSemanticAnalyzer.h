@@ -109,6 +109,20 @@ private:
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);
     void analyzeIdentifierExpr(IdentifierExpr& id);
 
+    // R5.2-C (2026-07-14): verify a `for (var i : <bound>)` bound
+    // expression statically reduces to int. Recurses into
+    // BinaryExpr / UnaryExpr; otherwise checks LiteralExpr /
+    // IdentifierExpr / MemberExpr / CallExpr resolvedType. Anything
+    // not statically provable as int emits a TypeMismatch hard error.
+    //
+    // `role` is `"bound"` or `"start"` (R5.0.1 half-open range form)
+    // — used in the diagnostic message so the user knows which slot
+    // failed. `loc` is currently always empty (Expr / ForStmt don't
+    // carry source locations yet); future slice can stamp them.
+    void validateForBound(Expr* bound,
+                          const SourceLocation& loc,
+                          const std::string& role);
+
     // R5.2-B (2026-07-14): label visibility helper. Walks
     // `_labelStack` from innermost frame outward and returns true
     // on first match. Returns false when the stack is empty.
