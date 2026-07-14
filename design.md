@@ -2,8 +2,8 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-13）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R5.0 + R5.0.1 + R5.1 + R4.1 已交付**；`AYScript_Test` **752/752** 全绿；`kLogiaPipelineVersion = 10`。  
-> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R4.x 接续：R4.2 T&/T* out-param → R4.1b struct/std::string element containers。
+> **文档状态（2026-07-14）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H 已交付**；`AYScript_Test` **1035/1035** 全绿；`kLogiaPipelineVersion = 21`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列。
+> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R5.2 待选：R5.2-F (negative step) / R5.2-G (var step + runtime defense) / R5.2-I (multi-hop chain 收紧)。
 > **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
 ## 1. 概述
@@ -237,17 +237,64 @@ script PlayerController {
 
 <statement>    ::= <var_decl>
                  | <expr_stmt>
-                 | "if" ["("] <expression> [")"] <block> ["else" <block>]                                  (* R5.0.1: parens optional *)
+                 | "if" ["("] <bool_expr> [")"] <block> ["else" <block>]                                  (* R5.0.1: parens optional; R5.2-H: cond must be bool *)
                  | "return" <expression>? ";"
-                 | "while" ["("] <expression> [")"] <block>                                              (* R5.0.1: parens optional *)
-                 | "for" ["("] "var" <identifier> ":" <expression> ("," <expression>)? [")"] <block>     (* R5.0.1: parens optional, range form *)
+                 | "while" ["("] <bool_expr> [")"] <block>                                              (* R5.0.1: parens optional; R5.2-H: cond must be bool *)
+                 | "for" ["("] "var" <identifier> ":" <int_expr>
+                                  ("," <int_expr>)?              (* R5.0.1: range form start,end *)
+                                  ("," <int_const_expr>)?        (* R5.2-D: optional positive-int-literal step (range form only) *)
+                                  [")"] <block>                 (* R5.0.1: parens optional *)
                  | "break"                                                                          (* R5.1: must be inside a loop *)
                  | "continue"                                                                       (* R5.1: must be inside a loop *)
+                 | "::" <identifier> "::"                                                            (* R5.2-B: loop-scoped label; body-visible to break :L *)
 
 <expression>   ::= <assignment> | <logic_or>
 
 (* 标准表达式层级：or → and → equality → comparison → add → mul → unary → postfix → primary *)
 (* postfix 包含 member access：`self.position`、`tick_counter` *)
+
+(* R5.2-H (2026-07-14): if / while conditions MUST reduce to bool.
+   Logia has no implicit truthiness — `if (n)` where `n: int` is a
+   hard error. Accepted bool_expr shapes (see R5.2-H for full matrix):
+     - bool literal, bool-typed identifier / self.field / self.method()
+     - comparison ops {==, !=, <, <=, >, >=} over two primitive leaves
+     - logical ops {&&, ||} over two bool leaves
+     - `!` (Bang) on a bool leaf
+   Carve-outs (R5.2-H.b): for-loop counter identifiers count as int leaves;
+   ambient-receiver CallExpr (`input.is_pressed(...)`) counts as bool. *)
+<bool_expr>     ::= <literal_bool>
+                  | <identifier_bool>
+                  | <self_field_bool>
+                  | <self_method_bool>
+                  | "!" <bool_expr>
+                  | <bool_expr> ("&&" | "||") <bool_expr>
+                  | <int_expr> ("==" | "!=" | "<" | "<=" | ">" | ">=") <int_expr>
+                  | <float_expr> ("==" | "!=" | "<" | "<=" | ">" | ">=") <float_expr>
+                  | <string_expr> ("==" | "!=") <string_expr>
+                  | <ambient_call>                                       (* R5.2-H.b: input.is_pressed(...) etc. *)
+
+(* R5.2-C / R5.2-E: for-loop bound must statically reduce to int.
+   Accepted: int literal, int-typed identifier, int-typed self.field /
+   self.method(), arithmetic ops {+, -, *, /, %} over int-typed leaves.
+   Rejected: int + float (no implicit promotion), string / bool leaves.
+   Short form `for (var i : N)` accepts the same set minus arithmetic. *)
+<int_expr>      ::= <int_literal>
+                  | <identifier_int>
+                  | <self_field_int>
+                  | <self_method_int>
+                  | <int_expr> ("+" | "-" | "*" | "/" | "%") <int_expr>
+                  | "(" <int_expr> ")"                                   (* R5.2-E: (n + 1) - 1 *)
+
+(* R5.2-D: for-loop step is STRICTER than bound — must be a literal
+   int OR a constant-folded expression of int literals. Variables
+   (e.g. `n - 1` where `n: int`) are REJECTED. Rationale: codegen
+   cannot enforce `step != 0` without injecting a runtime check,
+   which violates the "static-only" principle. See R5.2-G for
+   future "non-const step" slice. *)
+<int_const_expr> ::= <int_literal>
+                   | <int_const_expr> ("+" | "-" | "*" | "/" | "%") <int_const_expr>
+                   | "(" <int_const_expr> ")"
+                   | "-" <int_const_expr>                               (* R5.2-D: unary negation *)
 ```
 
 完整文法随实现迭代补充至本文档 §附录。
@@ -1006,6 +1053,187 @@ while n < 10 {
 25. **parser 拒绝 vs codegen 拒绝的取舍**：R5.1 选择在 parser 拒绝 `'break' outside loop`（hard error，compile failure），而不是让 codegen 继续 emit 出 bare `break` 让 Lua runtime 报。理由是 Logia 用户是脚本层开发者，看到 `'break' outside loop` 这种 source-level error 比 Lua 自己的 `'<name>' expected near 'break'` 错误信息更直接。这是 Logia 整体"用户友好错误信息优先"原则的延续。
 
 26. **Lua 5.2+ 的 `continue` 让 R5.1 实现极简**：如果 Lua 没有原生 `continue`（Lua 5.0/5.1），R5.1 需要做更复杂的 emit（如用 `goto` + 标签模拟 continue，或在 loop 末尾加一个 `if should_continue then continue_marker = true` 的状态机）。Lua 5.5 是 AYScript 跑的 runtime（per LogiaRuntimeBridge setup），所以 R5.1 享受了这个 Lua 演进的成果——这是"ship on a modern runtime"的隐性收益。
+
+#### 5.7.4.x+3 R5.2-A → R5.2-H — Loop/condition 静态类型校验系列（2026-07-14）
+
+**状态**：✅ 完成（R5.2-A do-block + R5.2-B label/break-label + R5.2-C bound type-check + R5.2-D optional step + R5.2-E bound expression-shape + R5.2-H if/while condition bool-check）。`kLogiaPipelineVersion` 9 → 21。`AYScript_Test` **1035/1035 全绿**。
+
+##### 5.7.4.x+3.1 R5.2-A — `do { ... } end` block scope（2026-07-14）
+
+**语法**：
+
+```logia
+do {
+    var temp: int = compute()
+    result = temp * 2
+} end                       // temp 在此不可见
+```
+
+- `do` / `end` 关键字（`TokenType::Do` / `End`），跟 Lua 5.2+ 的 `do … end` 对齐
+- AST 新增 `BlockStmt { body }`，这是**首个** block-shaped AST 节点（其他控制流都内嵌 `std::vector<StmtPtr>`，只有 `do` 因为 `do`/`end` 关键字配对需要独立 AST 节点）
+- codegen 用 Lua 5.2+ 原生 `do … end`，纯 additive，无语义跳跃
+
+##### 5.7.4.x+3.2 R5.2-B — 循环作用域的 `::L::` label + `break :L`（2026-07-14）
+
+**语法**：
+
+```logia
+for (var i : 0, 10) {
+    ::OUTER::
+    for (var j : 0, 10) {
+        if (j == 5) { break :OUTER }    // 跳出外层 for i
+    }
+}
+```
+
+- `::L::` 必须在 while / for body **直接**声明（loop-scoped），重复同名硬错
+- `break :L` 必须能引用某个外层循环的 label
+- **`continue :L` 不支持**（用户决策 2026-07-14 — `break label` 实际就是 `goto`，没真正使用 `continue label` 的场景）
+- codegen 把 `::L::` **hoist 到 for/while 之后**（不前）— Lua 5.2+ `goto L` 是字面跳转，把 label 放 for 之前会让 for 头被重新执行 → 死循环
+- analyzer 用 `_labelStack`（vector<unordered_set<string>>），在 while/for body push/pop；`break :L` 验证 `isLabelVisible(label)`
+
+##### 5.7.4.x+3.3 R5.2-C — `for`-loop bound 类型校验（2026-07-14）
+
+**为什么必须有**：R5.0 / R5.0.1 的 bound 表达式没有静态类型校验，`for (var i : "hello")` 默默通过直到 Lua runtime 报 `'for' initial value must be a number` — 错误信息迟且不友好。
+
+**规则**：短形式 `for (var i : N)` 和半开区间 `for (var i : lo, hi)` 的 bound 表达式必须静态归约为 int，否则 `ErrorCode::TypeMismatch` 硬错，compile 失败。
+
+**接受的 shape**（详细决策矩阵见 source comment on `boundIsStaticallyInt`）：
+
+| leaf / node | 接受？ | 来源 |
+|---|---|---|
+| `IntLiteralExpr` | ✅ | 字面 |
+| `IdentifierExpr` w/ `resolvedType=int` 或 `resolvedDecl→VarDeclStmt.typeName="int"` | ✅ | R5.2-C 修了 builtin-var `var n: int` 的 fallback 路径 |
+| `MemberExpr` leaf w/ `resolvedType=int` | ✅ | `self.<int_field>` |
+| `CallExpr` w/ `resolvedMethod` 返回 int | ✅ | `self.<int_method>()` |
+| `FloatLiteralExpr` / `StringLiteralExpr` / `BoolLiteralExpr` | ❌ | 字面错 |
+| `IndexExpr` / `TableExpr` | ❌ | 无 type inference |
+| `n + 1`（`n: int`） | ❌（R5.2-C）→ ✅（R5.2-E 升级，见 §5.7.4.x+3.5） | — |
+
+**用户决策 2026-07-14**：hard error（不是 soft warning）— strictness 一致性，匹配 R5.2-B 已建立的「loop 相关违规走 hard error」原则。
+
+##### 5.7.4.x+3.4 R5.2-D — `for`-loop 可选第三参数 `step`（2026-07-14）
+
+**语法**：
+
+```logia
+for (var i : 0, 10, 3) { }    // 0, 3, 6, 9
+for (var i : 5, 1) { }        // 5, 4, 3, 2, 1 (默认 step=+1)
+```
+
+**step 接受规则**（用户决策 2026-07-14，三条一并）：
+
+1. **只**接受正数（`step <= 0` 硬错，包括 `step == 0`）
+2. **省略时默认 +1**（R5.0 / R5.0.1 兼容）
+3. **省略两个参数时保持 1..N 短形式不变**（`for (var i : N)` 仍是 R5.0 兼容形式）
+
+**step 必须 const-folded**（**不**接受 var / self.field）：
+
+| step 形态 | 接受？ | 原因 |
+|---|---|---|
+| `3` / `1 + 2` / `(2 * 4) - 5` | ✅ | const-foldable to int |
+| `n` where `n: int` | ❌ | var step |
+| `n - 1` where `n: int` | ❌ | arithmetic on var step |
+| `self.count` where `self.count: int` | ❌ | self.field step |
+
+**为什么 step 严格、bound 宽松**：codegen 不能静态保证 `step != 0` 而不注入 `if step == 0 then error(...)` runtime check — 这偏离 "static-only" 原则。R5.2-E 把 bound 推到 type-recursion（接受 `n + 1`），但 step 仍严格 const-folded。要开 step var → 见 R5.2-G (deferred)。
+
+**短形式不接受 step**：`for (var i : N, S)` 在 R5.0.1 已经 settle 为 `start=N, end=S`（range 形式），引入 short-form-with-step 会让 `for (var i : 10, 2)` 再次歧义。
+
+##### 5.7.4.x+3.5 R5.2-E — bound 表达式级类型推断（2026-07-14）
+
+**规则**：bound 接受 `n + 1` / `damage - 10` / `n + m` 等 int-typed var 参与的 arithmetic 表达式；step 仍 strict R5.2-D const-folded。
+
+**接受的 shape**（R5.2-C 基础 + R5.2-E 扩展）：
+
+| 表达式 | 接受？ | 来源 |
+|---|---|---|
+| `n + 1`（`n: int`） | ✅ | R5.2-E（latent in R5.2-C） |
+| `damage - 10` | ✅ | R5.2-E |
+| `n + m`（两 var） | ✅ | R5.2-E |
+| `n + 1.5` | ❌ | Logia 无 implicit int↔float promotion |
+| `n * 2 + 1` | ✅ | R5.2-E 递归 |
+
+**为什么 0 行代码**：R5.2-C 的 `boundIsStaticallyInt` 已经支持 BinaryExpr 递归 + IdentifierExpr 路径在 R5.2-C 已经修了 `var n: int` 的 fallback。R5.2-E 做的事是 **document** 这条路径能用、**add fixture** 验证、加 bump。真正的 capability 是 latent in R5.2-C。
+
+##### 5.7.4.x+3.6 R5.2-H — `if` / `while` 条件必须 bool（2026-07-14）
+
+**规则**（用户决策 2026-07-14）："for 的三个参数已经是 expression，while/if 直接显示要求 bool，不做语法糖适配"。**Logia 无 C-style truthiness** — `if (n)` where `n: int` 是 hard error，不静默 truthy-coerce。
+
+**接受的 shape**：
+
+| 表达式 | 接受？ | 原因 |
+|---|---|---|
+| `ready` where `ready: bool` | ✅ | bool var |
+| `n > 0` | ✅ | comparison op + 两个 primitive leaf |
+| `a == 5` | ✅ | comparison op |
+| `name == "foo"` | ✅ | string comparison |
+| `ready && armed` | ✅ | logical op over two bool |
+| `!ready` | ✅ | logical-not |
+| `n` where `n: int` | ❌ | **核心规则**：无 implicit int-as-bool |
+| `count + 1` | ❌ | arithmetic 不产 bool |
+| `5` / `1.5` / `"hello"` | ❌ | literal 非 bool |
+| `input.is_pressed("jump")` | ✅ | **R5.2-H.b carve-out**: ambient receiver → host shim contract yields bool |
+| `j == 1` 在 `for (var j : 3) { ... }` 里 | ✅ | **R5.2-H.b carve-out**: for-loop counter 算 int leaf |
+
+**两个 carve-out 是 host-boundary contract，不是 truthiness 放宽**：
+
+- **(a) ambient-receiver CallExpr**：host runtime 注入 `input` / `log` / `time` 名字，contract 它们的方法 yield bool（`input.is_pressed` 返回 bool）。没有这个 carve-out，每个 canonical Logia example 会 hard-error，因为 `analyzeCallExpr` 只为 `self.<method>(...)` stamp `resolvedMethod`（见 `AYSemanticAnalyzer.cpp:1431`）。这是 "ambient shim contract yields bool"，**不是** "any non-bool is bool"。non-ambient receiver 的 strict no-truthiness rule 不变。
+- **(b) for-loop counter**：R5.0 / R5.2-C 故意不让 counter 进 `_scope`（post-loop refs 仍 implicit-globals），但 R5.2-H 需要在 condition 验证里知道 `j` 是 int leaf。新增 `_loopCounters: vector<unordered_set<string>>` 跟 `_labelStack` 同款 push/pop pattern。
+
+**Pre-R5.2-H 写法的迁移指南**：
+
+| Lua-truthy 写法 | R5.2-H 正确写法 |
+|---|---|
+| `if (n) { ... }` | `if (n != 0) { ... }` |
+| `while (count) { ... }` | `while (count > 0) { ... }` |
+| `if (str) { ... }` | `if (str != "") { ... }` |
+
+##### 5.7.4.x+3.7 ⚠️ 重要 foot-gun：`for`-loop counter 的 scope 语义
+
+**R5.0 设计决策**：`for (var i : N) { body }` 的 counter `i` **不**进 analyzer 的 `_scope`，且 Lua `for i = 1, N do ... end` 本身让 `i` loop-local。具体行为：
+
+```logia
+for (var i : 0, 5) {
+    log.info(tostring(i))      // ✅ i 是 loop-local，runtime 0..4
+}
+log.info(tostring(i))           // ⚠️ analyzer 不报错（_scope 没 i），runtime 报 nil
+i = 99                          // ⚠️ analyzer 静默接受（隐式 implicit global），runtime 创建全局 i
+```
+
+**用户能观察到的两条规则**：
+
+1. **counter 在 loop body 内可见、loop 外不可见（runtime 视角）**。analyzer 视角下 post-loop `i` 看起来像 implicit global 写 — 这是 R5.0 / R5.2-C 的 deliberate 设计（避免 analyzer/runtime 视图失配），**不是 bug**。要复用 counter 的最终值，**必须在循环内显式赋值到 outer var**：
+
+   ```logia
+   var lastI: int = -1
+   for (var i : 0, 5) {
+       lastI = i              // ✅ 显式持久化
+   }
+   // lastI = 4
+   ```
+
+2. **post-loop 写同名 identifier 是 implicit global**（Lua 语义）：`for (var i : 0, 5) { } i = 99` 不会创建 Logia var，而是在 Lua 全局 namespace 创建一个 `i = 99`。这跟 Logia S1 的 undeclared-identifier-write 规则一致；**analyzer 不会报**，因为它跟 counter 同名但 _scope 里没这个名字。
+
+3. **嵌套 for-loop counter 自动 shadow**（Lua 保证）：`for (var i : 0, 3) { for (var i : 0, 3) { ... } }` — inner `i` shadow outer `i`，这是 Lua 语义，Logia 复用。analyzer 也按此处理（counter 没进 _scope，所以 shadow 在 analyzer 视角下不存在，但在 runtime 视角下存在 — 隐式一致）。
+
+**为什么不把 counter 进 `_scope`**：counter 进 _scope 会让 post-loop `i = 5` 在 analyzer 视角下"看似声明过"，但 runtime 是 implicit global — analyzer/runtime 视图失配 → 静默类型错误（注释见 `AYSemanticAnalyzer.cpp:854`）。统一原则：**Logia 生成的代码里 counter 走 Lua loop-local，analyzer 也不假装拥有这个 counter**。
+
+##### 5.7.4.x+3.8 静态类型校验的"小步快跑"哲学
+
+R5.2-C/D/E/H 是同款 philosophy 的四个切片：
+
+1. **每个新语法都先落地**（R5.0、R5.0.1、R5.1、R5.2-A、R5.2-B） — 让用户写出来能跑
+2. **静态类型校验分批上**（R5.2-C、D、E、H） — 不一次铺开 expression-type-inference 子系统
+3. **每批只覆盖一个静态不变量**：
+   - R5.2-C: bound shape (int literal / typed identifier)
+   - R5.2-D: step shape (positive-int constant) — **比 bound 更严**
+   - R5.2-E: bound expression-shape (`n + 1` accept)
+   - R5.2-H: condition shape (bool, no truthiness)
+4. **每个 step 配 bump pipeline version** — cache invalidation 不留 stale entry
+5. **R5.2-H.b carve-out 是 host-boundary trust，不是 type-system 放宽** — 区分 "Logia 类型系统放宽" vs "host shim contract trust" 是 orthogonal concerns
+
+**`kLogiaPipelineVersion` 演进**：R5.0 = 7 → R5.0.1 = 8 → R5.1 = 9 → R5.2-A = 16 → R5.2-B = 17 → R5.2-C = 18 → R5.2-D = 19 → R5.2-E = 20 → R5.2-H = 21。
 
 #### 5.7.5 消费方矩阵
 
