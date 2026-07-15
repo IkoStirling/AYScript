@@ -18,6 +18,15 @@
 // `ayt_reflect_set_field_chain(...)`. The C++ side's
 // `PlayerController::position.{x,y}` actually mutates at runtime —
 // no more "runtime no-op" caveat.
+//
+// M1 (2026-07-15): `input.vec2("move")` returns a fresh Lua table
+// {x=, y=} on each call, delegating to DeviceInputProvider ->
+// InputMapping::getAxis2D(name). The convention is that the
+// C++ side has pre-bound `bindAxis2D("move", "move_x", "move_y")`
+// and the underlying 1-D axes via bindAxis(KeyPair{...}). The
+// `var move: FVector2` annotation is purely Logia-side — analyzer
+// treats it as a builtin (resolvedType=nullptr), so no C++
+// object is allocated; `var` is still a Lua local.
 
 script PlayerController {
     var tick_counter: int = 0
@@ -31,7 +40,13 @@ script PlayerController {
         if input.is_pressed("jump") {
             self.position.y = self.position.y + self.jump_force * dt
         }
-        self.position.x = self.position.x + self.speed * dt
+        var move: FVector2 = input.vec2("move")
+        if vec2.length(move) > 0.1 {
+            // Vec2 helpers mutate the input table in place to save
+            // an allocation; for one-shot per-frame use this is fine.
+            // (Future slice can flip to fresh-table semantics.)
+            self.apply_move(vec2.normalized(move), dt)
+        }
     }
 
     on_destroy() {

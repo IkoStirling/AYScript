@@ -30,6 +30,7 @@
 
 #include <unordered_map>
 #include <cstring>
+#include <cmath>
 
 namespace ayt::script
 {
@@ -134,6 +135,16 @@ public:
         return 0.0f;
     }
     bool isJustReleased(const std::string& /*key*/) const override {
+        return false;
+    }
+    // M1 (2026-07-15): mock 2-axis read returns the safe default
+    // path — false (unbound) so the Logia-side lambda falls back to
+    // {0, 0}. Mock has no concept of vec2 binding by design; tests
+    // that exercise non-zero vec2 install a custom provider.
+    bool getAxisValue2D(const std::string& /*key*/,
+                        double& outX, double& outY) const override {
+        outX = 0.0;
+        outY = 0.0;
         return false;
     }
 };
@@ -1549,7 +1560,70 @@ struct LogiaRuntimeBridge::Impl {
             auto* p = _input ? _input : &g_defaultInputProvider;
             return p->getAxisValue(k);
         };
+        // M1 (2026-07-15): 2-axis read returns a fresh Lua table
+        // {x=, y=}. Provider's getAxisValue2D (new INT-03-style
+        // virtual) signals bound vs unbound via return value;
+        // unbound → caller sees {0, 0} since the lambda-init defaults
+        // x/y = 0.0. Documented convention: zero-vector means
+        // "no 2-axis binding for this name" so vec2.length returns 0
+        // safely and vec2.normalized passthroughs the zero vector.
+        inputTbl["vec2"] = [this](const std::string& k) -> sol::table {
+            auto* p = _input ? _input : &g_defaultInputProvider;
+            double x = 0.0;
+            double y = 0.0;
+            // Unbound: ignore the false return; x/y stay 0.0.
+            (void)p->getAxisValue2D(k, x, y);
+            sol::table t = lua.create_table();
+            t["x"] = x;
+            t["y"] = y;
+            return t;
+        };
         lua["input"] = inputTbl;
+
+        // M1 (2026-07-15): vec2 helpers operate on Lua tables
+        // {x=number, y=number}. Pure data — operations live in the
+        // ambient, mirrors the input/time/log table pattern (no
+        // metatable, no usertype). Accept both keyed and array-style
+        // tables; missing/non-numeric fields fall back to safe
+        // defaults (length → 0.0, normalized → passthrough input).
+        // `vec2.normalized` mutates the input table to avoid an
+        // extra allocation — see design.md for the trade-off
+        // discussion; future slice can flip to a fresh table if pure
+        // semantics become required.
+        auto vec2Tbl = lua.create_table();
+        // M1 (2026-07-15): vec2 helpers read inputs via a small
+        // pair-extract helper that accepts both keyed `{x=, y=}`
+        // (FVector2-shape) and array-style `{number, number}` (1-indexed
+        // positional — common Logia literal pattern: `{3, 4}`). For
+        // any other shape (nil, empty, mixed-type fields) we yield
+        // {0.0, false} so callers see safe defaults and `length` returns
+        // 0 while `normalized` passthroughs the input unchanged.
+        auto readVec2 = [](sol::table v, double& outX, double& outY) -> bool {
+            sol::optional<double> xk = v["x"];
+            sol::optional<double> yk = v["y"];
+            if (xk && yk) { outX = *xk; outY = *yk; return true; }
+            sol::optional<double> xa = v[1];
+            sol::optional<double> ya = v[2];
+            if (xa && ya) { outX = *xa; outY = *ya; return true; }
+            outX = 0.0;
+            outY = 0.0;
+            return false;
+        };
+        vec2Tbl["length"] = [readVec2](sol::table v) -> double {
+            double x = 0.0, y = 0.0;
+            if (!readVec2(v, x, y)) return 0.0;
+            return std::sqrt(x * x + y * y);
+        };
+        vec2Tbl["normalized"] = [readVec2](sol::table v) -> sol::table {
+            double x = 0.0, y = 0.0;
+            if (!readVec2(v, x, y)) return v;
+            double len = std::sqrt(x * x + y * y);
+            if (len == 0.0) return v;  // zero-vector passthrough
+            v["x"] = x / len;
+            v["y"] = y / len;
+            return v;
+        };
+        lua["vec2"] = vec2Tbl;
 
         // LG-05 / S3.3: AYReflect-backed self.field read/write.
         // Registered as plain lua_CFunction entries (raw

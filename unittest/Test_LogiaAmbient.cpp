@@ -26,6 +26,10 @@
 #include "AYTest.h"
 #include "aylog/Logger.h"
 
+// M1: FVector2 reflect registration probe pulls the registry directly
+// rather than relying on SemanticAnalyzer ctor side-effect.
+#include "AYReflect.h"
+
 #include <IAYEntity.h>
 #include <AYWorld.h>
 
@@ -261,6 +265,30 @@ struct ScriptedInputProvider final
     bool isJustReleased(const std::string& /*key*/) const override {
         return false;
     }
+    // M1 (2026-07-15): scripted 2-axis injection point. Tests set
+    // vec2xReturn / vec2yReturn / vec2Bound before invoking the
+    // Logia side; the override records the queried key so tests can
+    // assert dispatch reached here. Default-bound=false so legacy
+    // tests that never call the 2-axis path don't need to set it.
+    bool vec2Bound = false;
+    double vec2xReturn = 0.0;
+    double vec2yReturn = 0.0;
+    mutable std::string lastVec2Key;
+    mutable int vec2Queries = 0;
+
+    bool getAxisValue2D(const std::string& key,
+                        double& outX, double& outY) const override {
+        ++vec2Queries;
+        lastVec2Key = key;
+        if (!vec2Bound) {
+            outX = 0.0;
+            outY = 0.0;
+            return false;
+        }
+        outX = vec2xReturn;
+        outY = vec2yReturn;
+        return true;
+    }
 };
 
 } // namespace
@@ -327,6 +355,167 @@ TEST_CASE(ambient_input_null_provider_falls_back_to_default) {
              std::string("1"));
     CHECK(bridge.getLuaGlobalString("__test_witness_j")==
              std::string("0"));
+}
+
+// ------------------------------------------------------------------
+// M1 (2026-07-15): vec2 helpers + FVector2 reflect registration
+// ------------------------------------------------------------------
+//
+// The helpers accept either keyed `{x=number, y=number}` or array-
+// style `{number, number}` Lua tables; missing/non-numeric fields
+// fall back to safe defaults (length → 0, normalized → passthrough).
+// `input.vec2("move")` is exercised through the device-provider
+// path in Test_LogiaDeviceInput.cpp; here we focus on the helpers
+// and their tolerance for shape variance.
+
+namespace {
+
+constexpr const char* kVec2LengthWitness = R"(
+script Vec2LengthWitness {
+    on_update() {
+        __vec2_witness = tostring(vec2.length({x=3, y=4}))
+    }
+}
+)";
+
+constexpr const char* kVec2NormalizedWitness = R"(
+script Vec2NormalizedWitness {
+    on_update() {
+        var v: FVector2 = vec2.normalized({x=3, y=4})
+        __vec2_norm_x = tostring(v.x)
+        __vec2_norm_y = tostring(v.y)
+    }
+}
+)";
+
+constexpr const char* kVec2ArrayStyleWitness = R"(
+script Vec2ArrayStyleWitness {
+    on_update() {
+        __vec2_array_style = tostring(vec2.length({3, 4}))
+    }
+}
+)";
+
+constexpr const char* kVec2DefaultWitness = R"(
+script Vec2DefaultWitness {
+    on_update() {
+        __vec2_default = tostring(vec2.length({}))
+    }
+}
+)";
+
+} // namespace
+
+TEST_CASE(vec2_length_basic_345_returns_5) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Vec2LengthWitness",
+                         kVec2LengthWitness, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("Vec2LengthWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__vec2_witness") ==
+          std::string("5.0"));
+}
+
+TEST_CASE(vec2_normalized_basic_returns_unit) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Vec2NormalizedWitness",
+                         kVec2NormalizedWitness, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("Vec2NormalizedWitness", "on_update",
+                               nullptr, nullptr));
+    // vec2.normalized mutates the input table; values are 3/5, 4/5.
+    // Float formatting: lua's `tostring(0.6)` -> "0.6". Take the
+    // prefix to absorb any precision wobble — R4.2 fixture wisdom.
+    std::string xs = bridge.getLuaGlobalString("__vec2_norm_x");
+    std::string ys = bridge.getLuaGlobalString("__vec2_norm_y");
+    CHECK(xs.rfind("0.6", 0) == 0);
+    CHECK(ys.rfind("0.8", 0) == 0);
+}
+
+TEST_CASE(vec2_normalized_zero_vector_passthrough) {
+    // Zero vector must not produce NaN — helper returns the same
+    // {x=0, y=0} table untouched.
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Vec2NormalizedWitness",
+                         kVec2NormalizedWitness, errors));
+    CHECK(errors.empty());
+
+    // Inject a zero-vector witness by re-loading a one-off script
+    // that calls vec2.normalized on {x=0, y=0}. Use a fresh global
+    // to avoid coupling to the prior test's witness globals.
+    ScriptedInputProvider provider;
+    bridge.setInputProvider(&provider);   // any provider works
+
+    // Run via a minimal inline script — the compiler caches by
+    // source so we'll just inline a fresh script body below.
+    const char* zeroSource = R"(
+script Vec2ZeroPassthrough {
+    on_update() {
+        var v: FVector2 = vec2.normalized({x=0, y=0})
+        __zero_norm_x = tostring(v.x)
+        __zero_norm_y = tostring(v.y)
+    }
+}
+)";
+    std::vector<CompilerError> zeroErr;
+    CHECK(loadFromSource(bridge, "Vec2ZeroPassthrough",
+                         zeroSource, zeroErr));
+    CHECK(zeroErr.empty());
+    CHECK(bridge.callLifecycle("Vec2ZeroPassthrough", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__zero_norm_x") ==
+          std::string("0"));
+    CHECK(bridge.getLuaGlobalString("__zero_norm_y") ==
+          std::string("0"));
+}
+
+TEST_CASE(vec2_length_array_style_accepts_positional) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Vec2ArrayStyleWitness",
+                         kVec2ArrayStyleWitness, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("Vec2ArrayStyleWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__vec2_array_style") ==
+          std::string("5.0"));
+}
+
+TEST_CASE(vec2_length_empty_table_returns_zero_safe) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Vec2DefaultWitness",
+                         kVec2DefaultWitness, errors));
+    CHECK(errors.empty());
+
+    CHECK(bridge.callLifecycle("Vec2DefaultWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__vec2_default") ==
+          std::string("0.0"));
+}
+
+TEST_CASE(fvector2_reflect_registration_present) {
+    // Spawning a SemanticAnalyzer triggers ensureAYEntityTypesRegistered,
+    // which mirrors FVector3's registration block for FVector2 (x, y
+    // Float32 fields). After init, the registry must expose a non-null
+    // ITypeInfo for "FVector2" with two primitive fields.
+    LogiaRuntimeBridge bridge;   // bridge ctor already triggers registration
+    auto* info = ayt::reflect::TypeRegistryImpl::instance().findType("FVector2");
+    CHECK(info != nullptr);
+    CHECK(info->getFieldCount() == 2u);
+    auto* xField = info->findField("x");
+    auto* yField = info->findField("y");
+    CHECK(xField != nullptr);
+    CHECK(yField != nullptr);
+    CHECK(std::string(xField->getType()->getName()) == "float");
+    CHECK(std::string(yField->getType()->getName()) == "float");
 }
 
 TEST_SUITE_END

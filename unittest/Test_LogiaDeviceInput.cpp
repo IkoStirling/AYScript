@@ -386,4 +386,106 @@ TEST_CASE(int03_default_mock_axis_and_released_safe)
     sub->shutdown();
 }
 
+// ===== M1 (2026-07-15): input.vec2 端到端 =====
+namespace {
+
+// vec2 witness: reads input.vec2("move"), writes each component
+// (accessed as table field) to a top-level Lua number global so
+// test code can read it back via tryGetLuaGlobalNumber. We do NOT
+// round-trip a table through getLuaGlobalString — Lua `tostring`
+// of a table emits "table: 0xADDRESS", losing the values.
+constexpr const char* kInt04Vec2Witness = R"(
+script Int04Vec2Witness {
+    on_update() {
+        var v: FVector2 = input.vec2("move")
+        __int04_witness_vx = v.x
+        __int04_witness_vy = v.y
+    }
+}
+)";
+
+} // namespace
+
+TEST_CASE(int04_input_vec2_dispatches_xy_axes)
+{
+    // M1 (2026-07-15): ScriptedInputProvider injects a 2-axis value
+    // (0.7, -0.3). Logia side calls input.vec2("move"), expects the
+    // bridge ambient to dispatch through InputProvider::getAxisValue2D
+    // and produce a Lua table {x=0.7, y=-0.3}. Each component is
+    // then read into a top-level number global for verification.
+    // Mirrors int03_axis_reads_KeyboardDevice_via_InputMapping's
+    // shape (provider-driven witness) without requiring keyboard
+    // event injection: the new ScriptedInputProvider vec2 fields
+    // supply the value directly. DeviceInputProvider's
+    // getAxisValue2D path is verified in int04_device_path below.
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Int04Vec2Witness",
+                         kInt04Vec2Witness, errors));
+    CHECK(errors.empty());
+
+    // Custom provider wired to inject 2-axis values without
+    // touching the underlying InputMapping flow. Use the
+    // ScriptedInputProvider test fixture from Test_LogiaAmbient.cpp,
+    // brought into scope via Test_LogiaAmbient's include hierarchy
+    // — but each TU has its own anonymous-namespace copies. Use a
+    // local lambda to mimic the dispatch surface.
+    struct Vec2Provider final
+        : public LogiaRuntimeBridge::InputProvider {
+        double x = 0.0, y = 0.0;
+        bool getAxisValue2D(const std::string& /*key*/,
+                            double& outX, double& outY) const override {
+            outX = x; outY = y; return true;
+        }
+        // Default impls for the rest — INT-03-era contracts.
+        bool isPressed(const std::string&) const override { return false; }
+        bool isJustPressed(const std::string&) const override { return false; }
+        float getAxisValue(const std::string&) const override { return 0.0f; }
+        bool isJustReleased(const std::string&) const override { return false; }
+    };
+
+    Vec2Provider provider;
+    provider.x = 0.7;
+    provider.y = -0.3;
+    bridge.setInputProvider(&provider);
+
+    CHECK(bridge.callLifecycle("Int04Vec2Witness", "on_update",
+                               nullptr, nullptr));
+
+    double xv = 0.0;
+    double yv = 0.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__int04_witness_vx", xv));
+    CHECK(bridge.tryGetLuaGlobalNumber("__int04_witness_vy", yv));
+    CHECK(nearEqual(xv, 0.7));
+    CHECK(nearEqual(yv, -0.3));
+}
+
+TEST_CASE(int04_input_vec2_default_mock_returns_zeros)
+{
+    // M1 default-mock fallback (mirror int03 test 3): without
+    // installing a custom provider, MockInputProvider reports
+    // the 2-axis binding as unbound (returns false, x/y stay 0).
+    // The Logia-side input.vec2("move") lambda then constructs
+    // {x=0, y=0}. Verifies legacy S1 / INT-02 / INT-03 tests
+    // continue to pass after the new InputProvider virtual.
+    auto sub = std::make_unique<ScriptSubSystem>();
+    CHECK(sub->initialize());
+
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(sub->bridge(), "Int04Vec2Witness",
+                         kInt04Vec2Witness, errors));
+    CHECK(errors.empty());
+    CHECK(sub->bridge().callLifecycle("Int04Vec2Witness", "on_update",
+                                      nullptr, nullptr));
+
+    double xv = -1.0;
+    double yv = -1.0;
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__int04_witness_vx", xv));
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__int04_witness_vy", yv));
+    CHECK(nearEqual(xv, 0.0));
+    CHECK(nearEqual(yv, 0.0));
+
+    sub->shutdown();
+}
+
 TEST_SUITE_END

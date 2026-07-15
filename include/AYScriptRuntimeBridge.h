@@ -291,7 +291,26 @@ namespace ayt::script
 //       `LogiaSourceMap` and `LuaCodegenResult.sourceMap`; see
 //       `AYScriptRuntimeBridge.cpp` for
 //       `Impl::sourceMaps` and `translateLuaErrorToLogia()`.
-constexpr std::size_t kLogiaPipelineVersion = 23u;
+//       2026-07-15 M1 (thin vec2 + input.vec2): bump 23 → 24.
+//       Adds three new Logia ambient surfaces (input.vec2,
+//       vec2.length, vec2.normalized) plus a 5th virtual on
+//       InputProvider (`getAxisValue2D`); also registers the
+//       `ayt::math::FVector2` reflect type in
+//       `ensureAYEntityTypesRegistered`. The new ambient
+//       surfaces change Lua emission shapes for any script that
+//       references them, and the new InputProvider virtual
+//       recompiles every cached entry that previously linked
+//       against the smaller interface. The FVector2 type
+//       registration changes the analyzer's `resolveTypeName`
+//       side-effect ordering, which means a stale cached entry
+//       compiled before FVector2 was registered would see a
+//       different ITypeInfo* lookup at runtime. Bump forces full
+//       cache refresh. See `AYInputMapping.h` for
+//       `bindAxis2D` / `getAxis2D` / `Axis2DBinding`,
+//       `AYScriptRuntimeBridge.cpp` for the new ambient lambdas
+//       and `MockInputProvider`'s default override, and
+//       `AYSemanticAnalyzer.cpp` for the `FVector2` mirror block.
+constexpr std::size_t kLogiaPipelineVersion = 24u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -520,6 +539,18 @@ public:
         // fixture) and all override.
         virtual float getAxisValue(const std::string& key) const = 0;
         virtual bool isJustReleased(const std::string& key) const = 0;
+        // M1 (2026-07-15): 2-axis read for input.vec2(name). Returns
+        // true on success (outX/outY populated from a real source),
+        // false when the named 2-axis is unbound — caller falls back
+        // to a default Lua table {0, 0}. Bridge does NOT collapse the
+        // result; Logia-side helper vec2.length / vec2.normalized
+        // read the produced table. Same breaking-change policy as the
+        // INT-03 additions: 3 implementers in this codebase all
+        // override. Mock default = {0, 0}, return false. Device
+        // default = underlying InputMapping::getAxis2D, true only when
+        // bindAxis2D has been called.
+        virtual bool getAxisValue2D(const std::string& key,
+                                    double& outX, double& outY) const = 0;
     };
     void setInputProvider(InputProvider* provider) noexcept;
     [[nodiscard]] InputProvider* inputProvider() const noexcept;

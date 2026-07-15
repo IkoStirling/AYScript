@@ -799,7 +799,6 @@ void ensureAYEntityTypesRegistered()
             ayt::reflect::detail::defaultCopy<ayt::math::FVector3>);
         reg.registerTypeInfo("FVector3", fVec3);
     }
-    // S3.11: register FVector3's primitive fields so the analyzer's
     // `analyzeMemberExpr` stamps `resolvedField` + `resolvedType=Float32`
     // on `self.position.x` leaves. Without this, the chain probe in
     // codegen never fires (leaf has null resolvedType) and the
@@ -824,6 +823,35 @@ void ensureAYEntityTypesRegistered()
             fVec3->addField(new ayt::reflect::FieldInfoImpl(
                 "z", floatInfo,
                 offsetof(ayt::math::FVector3, z),
+                ayt::reflect::FieldAttribute::Serialize));
+        }
+    }
+    // M1 (2026-07-15): mirror FVector3 registration for FVector2. `var m:
+    // FVector2` is a Logia type annotation only — analyzer stamps
+    // resolvedType=nullptr (same path as `var n: int`) so codegen does
+    // not allocate a C++ FVector2 instance. Players use FVector2 to
+    // type-tag inputs from `input.vec2(name)` (which returns a fresh
+    // Lua table {x=, y=}). Fields x/y registered so future
+    // `self.<FVector2_field>` chain reflect works, mirroring FVector3.
+    auto* fVec2 = reg.findType<ayt::math::FVector2>();
+    if (!fVec2) {
+        fVec2 = new ayt::reflect::TypeInfoImpl<ayt::math::FVector2>(
+            "FVector2",
+            ayt::reflect::detail::defaultCreate<ayt::math::FVector2>,
+            ayt::reflect::detail::defaultDestroy<ayt::math::FVector2>,
+            ayt::reflect::detail::defaultCopy<ayt::math::FVector2>);
+        reg.registerTypeInfo("FVector2", fVec2);
+    }
+    if (fVec2 && fVec2->getFieldCount() == 0) {
+        auto* floatInfo = reg.findType("float");
+        if (floatInfo) {
+            fVec2->addField(new ayt::reflect::FieldInfoImpl(
+                "x", floatInfo,
+                offsetof(ayt::math::FVector2, x),
+                ayt::reflect::FieldAttribute::Serialize));
+            fVec2->addField(new ayt::reflect::FieldInfoImpl(
+                "y", floatInfo,
+                offsetof(ayt::math::FVector2, y),
                 ayt::reflect::FieldAttribute::Serialize));
         }
     }
