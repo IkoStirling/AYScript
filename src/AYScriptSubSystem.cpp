@@ -74,7 +74,14 @@ struct ScriptSubSystem::HotReloadState {
 ScriptSubSystem::ScriptSubSystem()
 {
     _descriptor.name = "ayt.script.runtime";
-    _descriptor.dependencies = {"ayt.log", "ayt.entity"};
+    // INT-02 (2026-07-15): add "Device" dep so Logia input reads
+    // AYDevice InputMapping via DeviceInputProvider. Also fix
+    // INT-01 R3 silent dep mismatch — "Entity" name matches
+    // EntitySubSystem::getName() (no "ayt." prefix). Topo-sort
+    // silently ignores unmatched deps today, so this is purely a
+    // documentation / future-proofing fix; ordering is still
+    // governed by basePriority (Script=100 > Device=0 > Entity=0).
+    _descriptor.dependencies = {"ayt.log", "Entity", "Device"};
     _descriptor.basePriority = 100;
     _descriptor.timeType = ayt::game::SubSystemDescriptor::TimeType::Scaled;
 }
@@ -131,6 +138,14 @@ void ScriptSubSystem::shutdown()
     _hotReload.reset();
 
     if (_initialized) {
+        // INT-02 (2026-07-15): unhook any injected InputProvider so
+        // the bridge falls back to MockInputProvider before we tear
+        // down. Host shutdown ordering (GameLoop::clearAll deletes
+        // each SubSystem) means the DeviceInputProvider's
+        // DeviceManager* can become dangling between EditorApp
+        // destruction and SubSystem deletion; unhooking here is the
+        // safe contract.
+        _bridge.setInputProvider(nullptr);
         _bridge.shutdown();
         _adapter.reset();
         _initialized = false;

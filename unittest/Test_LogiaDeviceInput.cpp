@@ -1,0 +1,225 @@
+// Test_LogiaDeviceInput.cpp - INT-02 (2026-07-15)
+//
+// End-to-end smoke for Logia `input.is_pressed / is_just_pressed`
+// routed through AYDevice InputMapping via the new DeviceInputProvider
+// adapter (AYDevice/src/AYDeviceInputProvider.cpp). Headless:
+// DeviceManager::initialize is NOT called (no HWND); instead we
+// directly setKeyboard on the manager's mapping so InputMapping
+// reads from our local KeyboardDevice. The DeviceInputProvider only
+// requires _mgr->mapping() to be non-null and the mapping to have
+// its keyboard pointer set.
+//
+//   1. int02_is_pressed_reads_KeyboardDevice_via_InputMapping
+//      bindAction("jump", {Space}). onKeyDown(Space) + newFrame +
+//      callLifecycle → witness == "1". With release + newFrame,
+//      witness back to "0".
+//
+//   2. int02_is_just_pressed_is_edge_only
+//      Frame 0: onKeyDown(F) + newFrame → isJustPressed="1".
+//      Frame 1: no events + newFrame → isJustPressed="0".
+//
+//   3. int02_null_device_manager_falls_back_to_false
+//      DeviceInputProvider(nullptr) → both predicates return false.
+//      Mirrors the safe-default invariant from MockInputProvider.
+//
+//   4. int02_default_mock_falls_back_when_no_setInputProvider
+//      Without installing DeviceInputProvider, the bridge still
+//      routes through MockInputProvider (default). Same smoke as
+//      Test_LogiaAmbient.cpp::ambient_input_default_mock but
+//      exercised from a ScriptSubSystem instance (matches the
+//      production Editor + Application host path).
+
+#include "AYScript.h"
+#include "AYScriptRuntimeBridge.h"
+#include "AYScriptSubSystem.h"
+#include "AYDeviceInputProvider.h"
+#include "logia/AYCompilerError.h"
+#include "AYTest.h"
+
+#include "AYDeviceManager.h"
+#include "AYInputMapping.h"
+#include "AYKeyboardDevice.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+using ayt::script::LogiaRuntimeBridge;
+using ayt::script::ScriptSubSystem;
+using ayt::script::logia::CompilerError;
+using ayt::device::DeviceInputProvider;
+using ayt::device::DeviceManager;
+using ayt::device::InputMapping;
+using ayt::device::KeyboardDevice;
+using ayt::device::KeyCode;
+
+namespace {
+
+// Logia source: reads input.is_pressed("jump") and
+// input.is_just_pressed("jump"), writes into the bridge's Lua
+// globals. Same shape as kInputWitness in Test_LogiaAmbient.cpp
+// but kept here as a self-contained witness so this file is
+// independent of that test's TU.
+constexpr const char* kInt02InputWitness = R"(
+script Int02InputWitness {
+    on_update() {
+        __int02_witness_p = input.is_pressed("jump") and "1" or "0"
+        __int02_witness_j = input.is_just_pressed("jump") and "1" or "0"
+    }
+}
+)";
+
+bool loadFromSource(LogiaRuntimeBridge& bridge,
+                    const char* name,
+                    const char* source,
+                    std::vector<CompilerError>& errors)
+{
+    return bridge.loadScript(name, source, errors);
+}
+
+// Build a headless DeviceManager with InputMapping bound to a local
+// KeyboardDevice. We bypass DeviceManager::initialize() because it
+// requires a HWND; instead we just setKeyboard directly. The mapping
+// is the only surface DeviceInputProvider reads.
+struct HeadlessDeviceRig {
+    DeviceManager   mgr;
+    KeyboardDevice  kb;
+    InputMapping*   mapping = nullptr;
+
+    HeadlessDeviceRig()
+    {
+        mapping = &mgr.mapping();
+        mapping->setKeyboard(&kb);
+    }
+};
+
+} // namespace
+
+TEST_SUITE(LogiaDeviceInputTests)
+
+TEST_CASE(int02_is_pressed_reads_KeyboardDevice_via_InputMapping)
+{
+    HeadlessDeviceRig rig;
+    const KeyCode jumpKeys[] = {KeyCode::Space};
+    rig.mapping->bindAction("jump", jumpKeys);
+
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Int02InputWitness",
+                         kInt02InputWitness, errors));
+    CHECK(errors.empty());
+
+    DeviceInputProvider provider(&rig.mgr);
+    bridge.setInputProvider(&provider);
+
+    // Frame 1: press Space, expect is_pressed="1".
+    rig.kb.newFrame();
+    rig.kb.onKeyDown(KeyCode::Space);
+    CHECK(bridge.callLifecycle("Int02InputWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int02_witness_p") ==
+          std::string("1"));
+
+    // Frame 2: still held, witness stays "1".
+    rig.kb.newFrame();
+    CHECK(bridge.callLifecycle("Int02InputWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int02_witness_p") ==
+          std::string("1"));
+
+    // Frame 3: release Space, witness back to "0".
+    rig.kb.newFrame();
+    rig.kb.onKeyUp(KeyCode::Space);
+    CHECK(bridge.callLifecycle("Int02InputWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int02_witness_p") ==
+          std::string("0"));
+
+    // Unknown action name must safely return false (no exception,
+    // no crash) — matches MockInputProvider's "unknown key = false"
+    // behavior. We don't query it directly here (the witness uses
+    // "jump" only) but verify the provider's query interface
+    // handles it for future-proofing.
+    CHECK_FALSE(provider.isPressed("unknown_action"));
+    CHECK_FALSE(provider.isJustPressed("unknown_action"));
+}
+
+TEST_CASE(int02_is_just_pressed_is_edge_only)
+{
+    HeadlessDeviceRig rig;
+    const KeyCode fireKeys[] = {KeyCode::F};
+    rig.mapping->bindAction("fire", fireKeys);
+
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Int02InputWitness",
+                         kInt02InputWitness, errors));
+    CHECK(errors.empty());
+    DeviceInputProvider provider(&rig.mgr);
+    bridge.setInputProvider(&provider);
+
+    // The witness uses "jump" not "fire" — but the provider test
+    // also covers "fire" via direct calls (the witness only ever
+    // exercises the bool-yielding pattern through one slot).
+    // Frame 1: F down → isJustPressed("fire") true. Witness for
+    // "jump" stays "0" since we didn't press Space.
+    rig.kb.newFrame();
+    rig.kb.onKeyDown(KeyCode::F);
+    CHECK(provider.isJustPressed("fire"));
+    CHECK_FALSE(provider.isJustPressed("jump"));
+    CHECK(provider.isPressed("fire"));
+
+    // Frame 2: still held, just-pressed edge cleared.
+    rig.kb.newFrame();
+    CHECK_FALSE(provider.isJustPressed("fire"));
+    CHECK(provider.isPressed("fire"));
+
+    // Frame 3: release F.
+    rig.kb.newFrame();
+    rig.kb.onKeyUp(KeyCode::F);
+    CHECK_FALSE(provider.isPressed("fire"));
+    CHECK_FALSE(provider.isJustPressed("fire"));
+}
+
+TEST_CASE(int02_null_device_manager_falls_back_to_false)
+{
+    // Production invariant: during Editor transient teardown,
+    // DeviceInputProvider(nullptr) must return false for both
+    // predicates rather than crashing. Mirrors MockInputProvider's
+    // "unknown key = false" permissive behavior so calling
+    // setInputProvider before the manager is fully ready doesn't
+    // crash the next Logia tick.
+    DeviceInputProvider provider(nullptr);
+    CHECK_FALSE(provider.isPressed("jump"));
+    CHECK_FALSE(provider.isJustPressed("jump"));
+    CHECK_FALSE(provider.isPressed("anything"));
+    CHECK_FALSE(provider.isJustPressed("anything"));
+}
+
+TEST_CASE(int02_default_mock_falls_back_when_no_setInputProvider)
+{
+    // Without any setInputProvider call, the bridge keeps its
+    // default MockInputProvider — same shape as Test_LogiaAmbient's
+    // default mock test, but driven through ScriptSubSystem rather
+    // than a raw bridge, matching the Editor + Application host
+    // path (where ScriptSubSystem is registered into GameLoop).
+    auto sub = std::make_unique<ScriptSubSystem>();
+    CHECK(sub->initialize());
+
+    // Bridge global mock: "jump" is held, anything else isn't.
+    CHECK(sub->bridge().inputProvider() != nullptr);
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(sub->bridge(), "Int02InputWitness",
+                         kInt02InputWitness, errors));
+    CHECK(errors.empty());
+    CHECK(sub->bridge().callLifecycle("Int02InputWitness", "on_update",
+                                      nullptr, nullptr));
+    CHECK(sub->bridge().getLuaGlobalString("__int02_witness_p") ==
+          std::string("1"));
+    CHECK(sub->bridge().getLuaGlobalString("__int02_witness_j") ==
+          std::string("0"));
+
+    sub->shutdown();
+}
+
+TEST_SUITE_END
