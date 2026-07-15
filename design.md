@@ -1980,7 +1980,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
 | **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param int/float/struct ship R4.2;std::string out-param R4.2b 待) |
 | **P3** | **S4.x** | signal / await / source map | ⏳ |
-| opt | **INT-03** | 磁盘 compile cache、Editor `runTool` 菜单 | ⏳ |
+| opt | **INT-03** | `input.axis` / `input.is_just_released` (Logia 完整 input surface) | ✅ 2026-07-15 |
 | opt | **INT-04** | EventHandler host、`event.emit` | ⏳ |
 | opt | **R5.0.1** | `break` / `continue`、C-style `for`、range `for`、bound 类型校验 | ⏳ |
 | parallel | Foundation ED-01–04 | 引擎 north-star — 不阻塞 Logia | — |
@@ -2418,7 +2418,49 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 ---
 
-### 14.8 Session prompts (copy-paste)
+| 2026-07-15 | **INT-03 完成（P1b）**:`input.axis(name)->float` + `input.is_just_released(name)->bool` 真接 AYDevice,Logia 完整 input surface 闭环。**`LogiaRuntimeBridge::InputProvider` 扩 2 virtual**:`getAxisValue` (float) + `isJustReleased` (bool) — **breaking change**,codebase 3 implementer 一起 override(MockInputProvider / DeviceInputProvider / ScriptedInputProvider test fixture)。**`MockInputProvider` 扩展**:axis 默认 0.0,just_released 默认 false(S1 / INT-02 测试零回归)。**Logia ambient `input` table**:`inputTbl["axis"]` + `inputTbl["is_just_released"]` 走同 `InputProvider*` dispatch 模式。**`DeviceInputProvider` 2 override**:`getAxisValue` → `_mgr->mapping().getAxisValue` (Phase-2 bindAxis/bindAxisGamepad 已 ship),`isJustReleased` → `_mgr->mapping().isActionJustReleased`(同 `isJustPressed` 边沿语义 — `DeviceManager::pollEvents` newFrame 在 platform pump 之前,GameLoop priority Device=0 < Script=100 保证 query 永远在 pump 之后)。**SemanticAnalyzer**:加 sibling `isStaticallyNumeric(e, analyzer)`(file-local 自由函数,mirror `isStaticallyBool`) + `isNumericTypeName` helper 接受 `int` / `float` / `double` / `int64`。Branch-for-branch mirror bool:LiteralExpr (int/float) / IdentifierExpr (resolvedDecl.typeName builtin vars — R5.2-C pattern) / MemberExpr (resolvedType->getName()) / CallExpr (ambient-receiver carve-out — mirror R5.2-H.b,`input.axis(...)` 当 numeric-yielding)/ UnaryExpr (-/+ only)/ BinaryExpr (arithmetic ops yield numeric when both leaves numeric)。**Lesson**:当下 `if axis() > 0.1 && is_just_pressed(...)` 已经 PASS — BinaryExpr 比较分支靠 `leafIsStaticallyPrimitive` 已经把 ambient-receiver CallExpr 当 primitive leaf;numeric sibling 是 future-proof,不为修当下 regression。**Tests**:`Test_LogiaDeviceInput.cpp` 加 3 用例(axis KeyPair 正负交互 3 帧 / just_released 4 帧 edge / default mock 安全),`Test_LogiaAmbient.cpp` ScriptedInputProvider 加 2 默认 override;`AYScript_Test` **1208/1208 PASS**(+ 29 vs INT-02 1179,3 新 int03_*),`AYDevice_Test` **182/182 PASS**(无回归)。2 commits: `AYDevice dea8458`, `AYScript 3ae9f06`。InputProvider 接口本轮 breaking — Logia 唯一 consumer,no external dependency,accept 一次性扩。详见 §14.4。 |
+
+### 14.4 P1b — INT-03：Logia `input.axis` / `input.is_just_released`（2026-07-15）
+
+**问题**:INT-02 ship 的 input 表面只 bool(pressed / just_pressed),缺 axis (float, stick/trigger 驱动) + is_just_released (bool 边沿,on_release / charge-up 模式)。`LogiaRuntimeBridge::InputProvider` 当前 2 virtual,扩成 4。
+
+**前置已 ship**:`InputMapping::getAxisValue / isActionJustReleased / bindAxis(KeyPair) / bindAxisGamepad(GamepadAxis)` 都在 AYDevice Phase-2。Editor + Application 的 DeviceInputProvider wiring(INT-02 ship)在位。
+
+**用户决策 2026-07-15**:
+1. **Scope**:axis (float) + is_just_released (bool)同时上 — 一次扩接口免二次中断。
+2. **Axis 真接**:`DeviceInputProvider` override `getAxisValue` 转调 `InputMapping::getAxisValue`;`isJustReleased` override 转调 `isActionJustReleased`。Phase-2 bindAxis/bindAxisGamepad 已 ship,无 AYDevice 端 schema 工作。
+3. **Numeric carve-out**:加 sibling `isStaticallyNumeric(e, analyzer)` (file-local 自由函数)。Mirror bool carve-out 的 ambient-receiver CallExpr 分支 + 加 `isNumericTypeName` helper 接受 `int` / `float` / `double` / `int64`。**不动** bool carve-out。
+
+**交付 (2 module, ~340 LOC)**:
+
+1. **`AYScript/include/AYScriptRuntimeBridge.h`**:`InputProvider` 扩 2 virtual (breaking change — 3 implementer 一起 override):
+   - `virtual float getAxisValue(const std::string& key) const = 0`
+   - `virtual bool isJustReleased(const std::string& key) const = 0`
+2. **`AYScript/src/AYScriptRuntimeBridge.cpp`**:
+   - `MockInputProvider` 加 2 default override (axis 返 0.0f, just_released 返 false — S1 / INT-02 零回归)。
+   - Logia ambient `input` table 加 `inputTbl["axis"]` + `inputTbl["is_just_released"]` lambda (同 `is_pressed` / `is_just_pressed` 走 `InputProvider*` dispatch)。
+3. **`AYScript/src/logia/AYSemanticAnalyzer.cpp`**:
+   - `isNumericTypeName` helper(L189 新):`int` / `float` / `double` / `int64` (R4.x 兼容)。
+   - `isStaticallyNumeric` sibling(L401 新, ~90 LOC):mirror `isStaticallyBool` branch-for-branch。**关键 future-proof**:`if axis() then` direct condition 未来可 work;future `boundIsStaticallyFloat` helper;future type-aware codegen。
+4. **`AYDevice/include/AYDeviceInputProvider.h` + `src/AYDeviceInputProvider.cpp`**:
+   - `getAxisValue(action)` → `_mgr->mapping().getAxisValue(action)` (Phase-2 bindAxis/bindAxisGamepad)。null mgr 返 0.0f。
+   - `isJustReleased(action)` → `_mgr->mapping().isActionJustReleased(action)` (同 `isJustPressed` 边沿语义 — DeviceManager::pollEvents newFrame-before-pump)。null mgr 返 false。
+5. **Tests**:
+   - `Test_LogiaDeviceInput.cpp` 加 3 用例(`int03_axis_reads_KeyboardDevice_via_InputMapping` 3 帧 KeyPair 正负交互 / `int03_is_just_released_is_edge_only` 4 帧 edge 验证 / `int03_default_mock_axis_and_released_safe` ScriptSubSystem path default-mock)。
+   - `Test_LogiaAmbient.cpp` `ScriptedInputProvider` 加 2 default override(返 0.0f / false)保持 legacy bool-only 测试零回归。
+
+**R2 lesson — `isStaticallyNumeric` 实际不修当下 regression**:当下 `if axis() > 0.1 && is_just_pressed("fire")` 已经 PASS — BinaryExpr 比较分支靠 `leafIsStaticallyPrimitive` (R5.2-H.b 已 ship) 把 ambient-receiver CallExpr 当 primitive leaf。`isStaticallyNumeric` 是 future-proof,不是修 regression。Lesson: **加 carve-out 是给未来形状准备,不是当下修复**。
+
+**Build**:84 ninja target green,ninja_exit=0。**Tests**:`AYScript_Test` **1208/1208 PASS**(+ 29 vs INT-02 1179,3 新 `int03_*`);`AYDevice_Test` **182/182 PASS**(无回归)。2 commits: `AYDevice dea8458`, `AYScript 3ae9f06`。
+
+**Lesson**:**breaking change 之前先 audit codebase 全部 implementer**。扩 `InputProvider` 加 2 virtual 是 breaking,但 Logia 唯一 consumer,codebase 3 implementer(全在自家 repo)同时 override — 一次性扩 vs 分两次中断,选一次性。Lesson: **自己 repo 全控的 interface,breaking change 一次扩比 evolutionary 兼容更省 LOC**。
+
+**Lesson**:**`std::variant` 的 `holds_alternative` 必须 exact-match variant type**。`LiteralExpr::Value` 是 `std::variant<std::monostate, bool, float, int, std::string>`(`AYAST.h:113`),不是 `long long` / `double`。第一次写 `holds_alternative<long long>` 编译报 C2338 "T to occur exactly once"。Lesson: **new variant type 检查先 grep 头文件里 `using Value =` / `using type =`,不要凭印象写 long long / double**。
+
+**Deferred** (推 INT-04 / later):
+- `LogiaRuntimeBridge::InputProvider` 进一步扩展(`on_press` / `on_release` event callbacks)— S4.1 (`signal` / `connect`) 先。
+- `input.axis` 返回 `FVector2` (single name → xy stick pair)— multi-return shape 需要 Logia tuple 支持,推 R5.3 expression-type work。
+- Editor runtime rebind API (`device.binding.rebind`)。
 
 #### Prompt INT-01 — Editor/Game ScriptSubSystem wiring (P0)
 
