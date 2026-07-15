@@ -22,6 +22,7 @@
 #include "AYScriptRuntimeBridge.h"
 #include "AYScriptSubSystem.h"
 #include "logia/AYCompilerError.h"
+#include "LogiaTestHelpers.h"
 #include "AYTest.h"
 #include "aylog/Logger.h"
 
@@ -190,8 +191,7 @@ TEST_CASE(ambient_script_sub_system_publishes_dt_to_bridge) {
     };
 
     auto& world = ayt::entity::World::instance();
-    world.shutdown();  // isolate from any prior test (S3.4 fix pattern)
-    world.initialize();
+    logia_test::resetWorldForTest(world);
     world.registerSystem<TimeWitnessSystem>(/* priority */ 200);
 
     auto sys = std::make_unique<ScriptSubSystem>();
@@ -219,8 +219,7 @@ TEST_CASE(ambient_script_sub_system_publishes_dt_to_bridge) {
     CHECK(nearEqual(witnessDelta, 0.016));
     CHECK(nearEqual(witnessTotal, 0.016));
 
-    sys->shutdown();
-    world.shutdown();
+    logia_test::shutdownScriptHost(world, sys.get());
 }
 
 // ------------------------------------------------------------------

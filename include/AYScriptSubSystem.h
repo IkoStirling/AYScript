@@ -37,10 +37,11 @@ class LogiaScriptBridgeAdapter;
 //         script, calls `_bridge.callLifecycle(name, "on_update",
 //         systemPtr, &dt)`.
 //       * S3.4 additionally walks World::getAllEntities() and calls
-//         `entity->onUpdate(dt)` on each. This dispatches into
-//         every ScriptComponent the bound adapter wired — so a
-//         Component-host script's on_update runs through the same
-//         GameLoop tick as a System-host script.
+//         `entity->onUpdate(dt)` on each **only when** the "Entity"
+//         subsystem is not registered. When EntitySubSystem is present
+//         it already drives World::update; skipping the duplicate walk
+//         avoids double-ticking ScriptComponents in full host builds.
+//         Headless tests without "Entity" still use this path.
 //   - shutdown(): bridge shutdown + reset adapter registry.
 //
 // Intentionally NOT auto-registered via REGISTER_SUBSYSTEM in this TU —
@@ -95,12 +96,10 @@ public:
     // independently of source loading.
     void bindComponent(ayt::entity::ScriptComponent& component);
 
-    // S3.4 — drive every entity's onUpdate path. World keeps the
-    // canonical entity list; we ask it for getAllEntities() and
-    // forward dt into Entity::onUpdate, which in turn calls every
-    // component's onUpdate — including bound ScriptComponents
-    // whose `self.<f>` mutations hit AYReflect (S3.3). This is
-    // what GameLoop ticks ultimately call.
+    // S3.4 — drive every entity's onUpdate path when the "Entity"
+    // subsystem is absent (headless unittest / partial host). When
+    // EntitySubSystem is registered, World::update already ticks
+    // entities and this function returns immediately.
     void tickComponentHosts(float deltaTime);
 
     // Adapter handle so tests can drive the adapter path

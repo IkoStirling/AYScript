@@ -1974,7 +1974,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | Order | ID | 内容 | Status |
 |-------|-----|------|--------|
 | **P-R5.0** | **R5.0** | `while (cond) { body }` / `for (var i : N) { body }` 循环语句 | ✅ 2026-07-13 |
-| **P0** | **INT-01** | Editor/Game 注册 `ScriptSubSystem` + Play 加载 `.logia` | ⏳ |
+| **P0** | **INT-01** | Editor/Game 注册 `ScriptSubSystem` + Play 加载 `.logia` | ✅ 2026-07-15 |
 | **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ⏳ |
 | **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
 | **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
@@ -2295,16 +2295,25 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 当前 `AYEditor` / `AYApplication` **未**引用 `ScriptSubSystem` → Play 模式不会跑 Logia。
 
-**锁定决策（待实现）**：
+**锁定决策（2026-07-15 实现）**：
 
 | 项 | 决策 |
 |----|------|
-| 注册时机 | `AYApplication::registerSubSystems()` 或 `AYEditorApp` init，在 `GameLoop` 启动前 |
-| 依赖顺序 | `ScriptSubSystem` 依赖 `ayt.entity`（descriptor 已声明）；在 `ResourceSubSystem` 之后、`RendererSubSystem` 前后均可 |
-| 脚本路径约定 | 开发期：`Content/Scripts/<ScriptName>.logia`；组件 `setScriptName("PlayerController")` 与文件名同名 |
-| 加载入口 | `ScriptSubSystem::bindAndLoadFromFile(comp, path, errs)` 或场景序列化后批量 bind |
-| 热重载 | Editor dev：`setHotReloadEnabled(true)` + `bindAndLoadFromFile` 已 `watchScriptPath` |
-| 验收 | Play 模式下 `examples/player_controller.logia` 能改 `self.speed` / `self.position.y` |
+| 注册时机 | `EditorApp::registerSubSystems` 在 `bootstrapModule()` + `RendererSubSystem::registerSubSystem()` 之后显式 `registerSubSystem(new ScriptSubSystem())`；App 同理在 `bootstrapEntityCore()` 之后（不接 `bootstrapModule()` 以避免强制拉入 Renderer / SkinnedMesh / Animation 渲染系统） |
+| 依赖顺序 | `ScriptSubSystem` 依赖 `ayt.entity` + `ayt.log`（descriptor 已声明）；实测 AYEntity 注册名是 `"Entity"` 与 `"ayt.entity"` 不匹配 → 当前由 `basePriority` (100 > 0) 隐性保证；R3 已记录 dep-string 修正为 follow-up |
+| 脚本路径约定 | 开发期：`<Editor assetRoot>/Scripts/<ScriptName>.logia`（assetRoot 通过 `EditorPlayRuntime::resolvePersistentCacheRoot()` 派生 = `<exeDir>/ayeditor_cache\\assets\\`）；App 端默认 `<assetRoot>/Scripts/<ScriptName>.logia` |
+| 加载入口 | Editor 走 `EditorPlayRuntime::bindPlayerScript()`（spwan 后调用 `ScriptSubSystem::bindAndLoadFromFile`），App 端用户在 Game 代码内手动调用同名 API |
+| 热重载 | Editor 端顺序：`bindAndLoadFromFile` → `setHotReloadEnabled(true)`（**关键**：bind 在前让 watch path 先入 `byPath`，再 enable 时 `setHotReloadEnabled` 的回扫会一次性 OS-watch 所有已注册路径 — 见 `AYScriptSubSystem.cpp:160-176`）；App 端默认不开热重载 |
+| 验收 | Play 模式下 `examples/player_controller.logia` 在 Editor 加载：Cube + Character + PlayerController 三个 entity 同时渲染，self.position.x 在 Play tick 中每帧 +`speed*dt`（已通过 `int01_editor_binding_drives_scriptcomponent_at_1x` 测试）；改 `.logia` 自动 reload（已通过 `int01_hot_reload_doubles_speed_via_file_edit` 测试） |
+
+**R1 (double-tick 风险) 已解**：`ScriptSubSystem::tickComponentHosts` 已在 S3.5 提交 `80d2a11` ship 前加入 `if (SubSystemRegistry::findSubSystem("Entity") != nullptr) return;` 守卫——Editor + Application 都同时注册 Entity + Script 时，Entity 自己负责 entity tick，Script 跳过 entity walk 避免 `self.position.x += speed*dt` 跑 2 倍。Headless 测试（只 register Script）继续走 entity walk 路径，R5.2 / Test_LogiaSystemHost 等不受影响。
+
+**新文件**：
+- `AYEditor/include/EditorPlayerController.h` — sample `PlayerController : ScriptComponent`（speed=10, jump_force=5, position 起始 0）
+- `AYEditor/src/EditorPlayerController.cpp` — 一次性 AYReflect 注册 + `World::registerComponentType<PlayerController>`（与 S3.11 `ensureAYEntityTypesRegistered()` 联动注册 FVector3 字段）
+- `AYScript/unittest/Test_LogiaScriptSubSystemPlay.cpp` — 3 用例：1× 单步速度、5× 热重载速率、R1 守卫负断言
+
+**不动**：Logia 编译器 / bridge 语义；AYScript 内的显式注册契约（不偷偷自动注册）；descriptors.dep 字符串（保留为后续修复项）。
 
 **不做**：改 Logia 语法；在 AYScript 内硬编码 Editor 路径（路径由宿主传入）。
 

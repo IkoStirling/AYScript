@@ -206,8 +206,7 @@ TEST_CASE(lg04_runtime_on_update_invoked_per_tick) {
     using ayt::script::test::MovementSystem;
 
     auto& world = ayt::entity::World::instance();
-    world.shutdown();  // isolate singleton state from any prior test run
-    world.initialize();
+    logia_test::resetWorldForTest(world);
 
     // Register the C++ host (use AY_SYSTEM-equivalent explicit call to
     // avoid pulling in a static-init cycle with the test executable).
@@ -268,8 +267,7 @@ script MovementSystem {
     // become unreadable.
     std::string counter = bridge.getLuaGlobalString("__lg04_counter");
     CHECK(counter == "4");
-    sub->shutdown();
-    world.shutdown();
+    logia_test::shutdownScriptHost(world, sub.get());
 }
 
 // ============================================================================
@@ -318,8 +316,7 @@ TEST_CASE(s310_system_host_self_field_reads_cpp_value) {
     using ayt::script::test::MovementSystem;
 
     auto& world = ayt::entity::World::instance();
-    world.shutdown();
-    world.initialize();
+    logia_test::resetWorldForTest(world);
     world.registerSystem<MovementSystem>(/* priority */ 200);
     ayt::entity::ISystem* sys = world.findSystemByName("MovementSystem");
     CHECK(sys != nullptr);
@@ -348,8 +345,7 @@ script MovementSystem {
                                 static_cast<void*>(sys), &dt));
     CHECK(bridge.getLuaGlobalString("__test_witness") == std::string("2.5"));
 
-    sub->shutdown();
-    world.shutdown();
+    logia_test::shutdownScriptHost(world, sub.get());
 }
 
 TEST_CASE(s310_system_host_self_field_writes_cpp_value) {
@@ -361,8 +357,7 @@ TEST_CASE(s310_system_host_self_field_writes_cpp_value) {
     using ayt::script::test::MovementSystem;
 
     auto& world = ayt::entity::World::instance();
-    world.shutdown();
-    world.initialize();
+    logia_test::resetWorldForTest(world);
     world.registerSystem<MovementSystem>(/* priority */ 200);
     ayt::entity::ISystem* sys = world.findSystemByName("MovementSystem");
     CHECK(sys != nullptr);
@@ -390,8 +385,7 @@ script MovementSystem {
                                 static_cast<void*>(sys), &dt));
     CHECK(ms->moveSpeed == 3.5f);
 
-    sub->shutdown();
-    world.shutdown();
+    logia_test::shutdownScriptHost(world, sub.get());
 }
 
 TEST_CASE(s310_system_host_self_field_codegen_rewrite) {

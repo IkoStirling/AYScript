@@ -5,6 +5,8 @@
 #include "AYScriptBridgeAdapter.h"
 #include "aylog/Logger.h"
 
+#include <AYSubSystemRegistry.h>
+
 #include "AYIO.h"
 
 // S3.1 (LG-04) and S3.4: drive Logia scripts (System + Component hosts)
@@ -340,6 +342,16 @@ void ScriptSubSystem::bindComponent(ayt::entity::ScriptComponent& component)
 void ScriptSubSystem::tickComponentHosts(float deltaTime)
 {
     if (!_initialized) return;
+
+    // EntitySubSystem ("Entity") already calls World::update, which
+    // walks every entity's onUpdate. Skip here to avoid double-ticking
+    // ScriptComponents in full host builds; headless tests that do not
+    // register "Entity" still rely on this path.
+    if (ayt::game::SubSystemRegistry::instance().findSubSystem("Entity")
+            != nullptr) {
+        return;
+    }
+
     auto& world = ayt::entity::World::instance();
     auto entities = world.getAllEntities();
     for (auto* e : entities) {
