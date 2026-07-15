@@ -126,6 +126,16 @@ public:
     bool isJustPressed(const std::string& /*key*/) const override {
         return false;
     }
+    // INT-03 (2026-07-15): S1 had no axis / release-edge concept;
+    // safe defaults so legacy tests that never call setInputProvider
+    // keep reading zero / false. Real AYDevice wiring lives in
+    // DeviceInputProvider (AYDeviceSubSystem target).
+    float getAxisValue(const std::string& /*key*/) const override {
+        return 0.0f;
+    }
+    bool isJustReleased(const std::string& /*key*/) const override {
+        return false;
+    }
 };
 
 MockInputProvider g_defaultInputProvider;
@@ -1522,6 +1532,22 @@ struct LogiaRuntimeBridge::Impl {
         inputTbl["is_just_pressed"] = [this](const std::string& k) -> bool {
             auto* p = _input ? _input : &g_defaultInputProvider;
             return p->isJustPressed(k);
+        };
+        // INT-03 (2026-07-15): axis (float) + is_just_released
+        // (bool edge). Same provider-dispatch shape as the bool
+        // siblings — pure lambda forwarding to the registered
+        // InputProvider (or default mock fallback). Real AYDevice
+        // wiring: DeviceInputProvider overrides both. The semantic
+        // analyzer's `isStaticallyNumeric` sibling recognizes
+        // input.axis(...) so `if axis() > 0.1 && is_just_pressed(...)`
+        // type-checks cleanly.
+        inputTbl["is_just_released"] = [this](const std::string& k) -> bool {
+            auto* p = _input ? _input : &g_defaultInputProvider;
+            return p->isJustReleased(k);
+        };
+        inputTbl["axis"] = [this](const std::string& k) -> float {
+            auto* p = _input ? _input : &g_defaultInputProvider;
+            return p->getAxisValue(k);
         };
         lua["input"] = inputTbl;
 

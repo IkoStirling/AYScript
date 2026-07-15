@@ -186,6 +186,18 @@ bool isBooleanTypeName(const std::string& name)
     return name == "bool";
 }
 
+// INT-03 (2026-07-15): numeric-type-name mirror of
+// isBooleanTypeName. Used by the new isStaticallyNumeric sibling
+// to detect "is this expression a number?". Accepts int / float /
+// double plus int64 for R4.x long-path compat — Logia source
+// has no separate int64 literal syntax so this is a forward-
+// looking entry, not a current code path.
+bool isNumericTypeName(const std::string& name)
+{
+    return name == "int" || name == "float" || name == "double"
+        || name == "int64";
+}
+
 // R5.2-H (2026-07-14): forward-declared helper used by
 // `isStaticallyBool`'s comparison branch. Defined below the
 // call site because `isStaticallyBool` is the primary public
@@ -372,6 +384,121 @@ bool isStaticallyBool(const Expr* e, const SemanticAnalyzer* analyzer)
             default:
                 // Plus / Minus / Star / Slash / Percent / Equal /
                 // PlusEqual / etc. — none produce bool.
+                return false;
+        }
+    }
+
+    return false;
+}
+
+// INT-03 (2026-07-15): numeric-yielding mirror of isStaticallyBool.
+// Mirrors the same ambient-receiver CallExpr carve-out so that any
+// future caller wanting "is this expression statically numeric?"
+// gets the same treatment as bool-yielding expressions. Today no
+// caller uses it directly — the BinaryExpr comparison branch
+// (L365-366 above) already accepts `axis() > 0` via
+// leafIsStaticallyPrimitive which treats ambient-receiver CallExpr
+// as a primitive leaf — but this future-proofs:
+//   (a) `if axis() then` direct condition (currently rejected;
+//       comparison or `> 0` wrapper is required);
+//   (b) future boundIsStaticallyFloat helper for log.error("n=%d", n)
+//       numeric-arg validation;
+//   (c) future type-aware codegen that wants to know the numeric
+//       yield type for bridging.
+//
+// Mirrors isStaticallyBool branch-for-branch: LiteralExpr
+// (long long / double), IdentifierExpr (via resolvedDecl.typeName
+// for builtin vars — R5.2-C pattern), MemberExpr (via
+// resolvedType->getName()), CallExpr (ambient-receiver carve-out
+// + resolvedMethod return-type check), UnaryExpr (-/+ only,
+// ! falls through), BinaryExpr (arithmetic ops yield numeric
+// when both leaves numeric — Plus / Minus / Star / Slash / Percent).
+bool isStaticallyNumeric(const Expr* e, const SemanticAnalyzer* analyzer)
+{
+    if (!e) return false;
+
+    if (auto* lit = dynamic_cast<const LiteralExpr*>(e)) {
+        // Numeric literal: int / float (per LiteralExpr::Value
+        // variant — see AYAST.h:113). bool literal falls through
+        // to false here (handled by isStaticallyBool). String
+        // literal is not numeric.
+        return std::holds_alternative<int>(lit->value)
+            || std::holds_alternative<float>(lit->value);
+    }
+
+    if (auto* id = dynamic_cast<const IdentifierExpr*>(e)) {
+        // R5.2-C pattern (mirror): builtin-var scope entry has
+        // type=nullptr, but VarDeclStmt.typeName still carries
+        // the user's annotation. Read it via resolvedDecl.
+        if (id->resolvedDecl) {
+            if (auto* vd = static_cast<const VarDeclStmt*>(
+                    id->resolvedDecl)) {
+                if (isNumericTypeName(vd->typeName)) {
+                    return true;
+                }
+            }
+        }
+        if (!id->resolvedType) return false;
+        return isNumericTypeName(id->resolvedType->getName());
+    }
+
+    if (auto* m = dynamic_cast<const MemberExpr*>(e)) {
+        if (!m->resolvedType) return false;
+        return isNumericTypeName(m->resolvedType->getName());
+    }
+
+    if (auto* c = dynamic_cast<const CallExpr*>(e)) {
+        // INT-03 ambient-receiver carve-out (mirror R5.2-H.b for
+        // bool): input.axis(...) / log.info(...) where the
+        // receiver is an ambient identifier is treated as
+        // numeric-yielding — the host runtime injects these
+        // names and contracts that axis-shaped calls return
+        // float. Without this carve-out every canonical Logia
+        // PlayerController.move_x example would fail to
+        // compile in future numeric condition contexts because
+        // c->resolvedMethod is null for non-self callees (see
+        // analyzeCallExpr L1431 — resolvedMethod is only
+        // stamped for self.<method>(...)).
+        if (!c->resolvedMethod) {
+            if (analyzer) {
+                if (auto* mem = dynamic_cast<const MemberExpr*>(c->callee.get())) {
+                    if (auto* recvId = dynamic_cast<const IdentifierExpr*>(mem->object.get())) {
+                        if (SemanticAnalyzer::isAmbientIdentifier(recvId->name)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        auto* rt = c->resolvedMethod->getReturnType();
+        if (!rt) return false;
+        return isNumericTypeName(rt->getName());
+    }
+
+    if (auto* u = dynamic_cast<const UnaryExpr*>(e)) {
+        // Numeric-preserving unary: -n / +n. Logical-not (!)
+        // yields bool, falls through to false. Bitwise-not (~)
+        // is not in Logia surface.
+        if (u->op.type != TokenType::Minus && u->op.type != TokenType::Plus) {
+            return false;
+        }
+        return isStaticallyNumeric(u->operand.get(), analyzer);
+    }
+
+    if (auto* b = dynamic_cast<const BinaryExpr*>(e)) {
+        // Arithmetic ops yield numeric when both leaves numeric.
+        // Comparison ops yield bool (handled by isStaticallyBool
+        // branch). && / || require bool leaves (also bool branch).
+        switch (b->op.type) {
+            case TokenType::Plus:
+            case TokenType::Minus:
+            case TokenType::Star:
+            case TokenType::Slash:
+            case TokenType::Percent:
+                return isStaticallyNumeric(b->left.get(), analyzer)
+                    && isStaticallyNumeric(b->right.get(), analyzer);
+            default:
                 return false;
         }
     }

@@ -511,6 +511,15 @@ public:
         virtual ~InputProvider() = default;
         virtual bool isPressed(const std::string& key) const = 0;
         virtual bool isJustPressed(const std::string& key) const = 0;
+        // INT-03 (2026-07-15): axis + release edge for
+        // PlayerController stick/trigger driving + on_release
+        // callbacks. Breaking change for any external
+        // InputProvider implementer — this codebase has exactly
+        // 3 (MockInputProvider file-local; DeviceInputProvider
+        // in AYDeviceSubSystem; ScriptedInputProvider test
+        // fixture) and all override.
+        virtual float getAxisValue(const std::string& key) const = 0;
+        virtual bool isJustReleased(const std::string& key) const = 0;
     };
     void setInputProvider(InputProvider* provider) noexcept;
     [[nodiscard]] InputProvider* inputProvider() const noexcept;

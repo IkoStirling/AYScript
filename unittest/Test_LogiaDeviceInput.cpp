@@ -222,4 +222,168 @@ TEST_CASE(int02_default_mock_falls_back_when_no_setInputProvider)
     sub->shutdown();
 }
 
+// ===== INT-03 (2026-07-15): axis + is_just_released =====
+
+// Axis witness: reads input.axis("move_x") and writes to a Lua
+// global number. Kept self-contained like the int02 witness.
+constexpr const char* kInt03AxisWitness = R"(
+script Int03AxisWitness {
+    on_update() {
+        __int03_witness_a = input.axis("move_x")
+    }
+}
+)";
+
+// Release-edge witness: reads input.is_just_released("fire") and
+// writes 1/0 string.
+constexpr const char* kInt03RelWitness = R"(
+script Int03RelWitness {
+    on_update() {
+        __int03_witness_r = input.is_just_released("fire") and "1" or "0"
+    }
+}
+)";
+
+// Combined witness — exercises axis + just_released in one script
+// so the default-mock test (int03_default_mock_axis_and_released_safe)
+// can verify both fields from a single tick.
+constexpr const char* kInt03AllWitness = R"(
+script Int03AllWitness {
+    on_update() {
+        __int03_witness_a = input.axis("move_x")
+        __int03_witness_r = input.is_just_released("fire") and "1" or "0"
+    }
+}
+)";
+
+bool nearEqual(double a, double b, double eps = 1e-5)
+{
+    return std::fabs(a - b) < eps;
+}
+
+TEST_CASE(int03_axis_reads_KeyboardDevice_via_InputMapping)
+{
+    // INT-03 (2026-07-15): bindAxis(KeyPair) → input.axis(name)
+    // → InputMapping::getAxisValue(name). Verify KeyPair
+    // negative/positive interaction:
+    //   D held alone → +1.0
+    //   A+D both held → cancels to 0.0
+    //   A alone → -1.0
+    // Headless: bypass DeviceManager::initialize (HWND-bound);
+    // setKeyboard directly on mapping. Mirrors int02 fixture
+    // pattern.
+    HeadlessDeviceRig rig;
+    const InputMapping::KeyPair moveX[] = {{KeyCode::A, KeyCode::D}};
+    rig.mapping->bindAxis("move_x", moveX);
+
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Int03AxisWitness",
+                         kInt03AxisWitness, errors));
+    CHECK(errors.empty());
+
+    DeviceInputProvider provider(&rig.mgr);
+    bridge.setInputProvider(&provider);
+
+    // Frame 1: D held → +1.0
+    rig.kb.newFrame();
+    rig.kb.onKeyDown(KeyCode::D);
+    CHECK(bridge.callLifecycle("Int03AxisWitness", "on_update",
+                               nullptr, nullptr));
+    double v = 0.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__int03_witness_a", v));
+    CHECK(nearEqual(v, 1.0));
+
+    // Frame 2: A+D both held → cancels to 0.0
+    rig.kb.onKeyDown(KeyCode::A);
+    CHECK(bridge.callLifecycle("Int03AxisWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.tryGetLuaGlobalNumber("__int03_witness_a", v));
+    CHECK(nearEqual(v, 0.0));
+
+    // Frame 3: release D → -1.0
+    rig.kb.newFrame();
+    rig.kb.onKeyUp(KeyCode::D);
+    CHECK(bridge.callLifecycle("Int03AxisWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.tryGetLuaGlobalNumber("__int03_witness_a", v));
+    CHECK(nearEqual(v, -1.0));
+
+    // Direct provider query — unbound axis → 0.0
+    CHECK(nearEqual(provider.getAxisValue("unbound_axis"), 0.0));
+}
+
+TEST_CASE(int03_is_just_released_is_edge_only)
+{
+    // INT-03 (2026-07-15): is_just_released edge semantics mirror
+    // is_just_pressed (DeviceManager::pollEvents newFrame-before-
+    // pump ordering). Frame 0 = release fires edge (1).
+    // Frame 1+ = cleared (0) until next release.
+    HeadlessDeviceRig rig;
+    const KeyCode fireKeys[] = {KeyCode::F};
+    rig.mapping->bindAction("fire", fireKeys);
+
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "Int03RelWitness",
+                         kInt03RelWitness, errors));
+    CHECK(errors.empty());
+    DeviceInputProvider provider(&rig.mgr);
+    bridge.setInputProvider(&provider);
+
+    // Frame 1: F pressed → still pressed, NOT released yet.
+    rig.kb.newFrame();
+    rig.kb.onKeyDown(KeyCode::F);
+    CHECK(bridge.callLifecycle("Int03RelWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int03_witness_r") == "0");
+
+    // Frame 2: still held → still 0.
+    rig.kb.newFrame();
+    CHECK(bridge.callLifecycle("Int03RelWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int03_witness_r") == "0");
+
+    // Frame 3: F released → release edge fires → 1.
+    rig.kb.newFrame();
+    rig.kb.onKeyUp(KeyCode::F);
+    CHECK(bridge.callLifecycle("Int03RelWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int03_witness_r") == "1");
+
+    // Frame 4: no events → cleared, back to 0.
+    rig.kb.newFrame();
+    CHECK(bridge.callLifecycle("Int03RelWitness", "on_update",
+                               nullptr, nullptr));
+    CHECK(bridge.getLuaGlobalString("__int03_witness_r") == "0");
+}
+
+TEST_CASE(int03_default_mock_axis_and_released_safe)
+{
+    // INT-03 default-mock fallback (mirror int02 test 4):
+    // Without any setInputProvider call, MockInputProvider
+    // returns 0.0 for axis and false for just_released.
+    // Verifies legacy S1 / INT-02 tests don't regress because
+    // of the InputProvider interface extension.
+    auto sub = std::make_unique<ScriptSubSystem>();
+    CHECK(sub->initialize());
+
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(sub->bridge(), "Int03AllWitness",
+                         kInt03AllWitness, errors));
+    CHECK(errors.empty());
+    CHECK(sub->bridge().callLifecycle("Int03AllWitness", "on_update",
+                                      nullptr, nullptr));
+
+    // Default axis returns 0.0.
+    double a = -1.0;
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__int03_witness_a", a));
+    CHECK(nearEqual(a, 0.0));
+
+    // Default just_released returns false → "0".
+    CHECK(sub->bridge().getLuaGlobalString("__int03_witness_r") == "0");
+
+    sub->shutdown();
+}
+
 TEST_SUITE_END

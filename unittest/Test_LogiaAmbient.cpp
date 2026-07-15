@@ -249,6 +249,18 @@ struct ScriptedInputProvider final
         lastJustPressedKey = key;
         return justPressedReturn;
     }
+    // INT-03 (2026-07-15): pure-virtual defaults added by the
+    // InputProvider extension. Tests that exercise only bool
+    // predicates continue to use the legacy fields above; new
+    // axis/just_released tests live in Test_LogiaDeviceInput.cpp.
+    // Returns safe defaults (0.0 / false) so legacy tests don't
+    // need to set them explicitly.
+    float getAxisValue(const std::string& /*key*/) const override {
+        return 0.0f;
+    }
+    bool isJustReleased(const std::string& /*key*/) const override {
+        return false;
+    }
 };
 
 } // namespace
