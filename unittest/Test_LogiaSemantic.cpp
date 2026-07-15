@@ -1452,4 +1452,154 @@ script T {
     CHECK(hasErrorAt(r, 3, ErrorCode::TypeMismatch));
 }
 
+// =====================================================================
+// S5 ED-03 (2026-07-15): per-line Lua → Logia source map.
+//
+// The Lua codegen now produces a `LogiaSourceMap` alongside the
+// generated Lua source — index N (1-based) is the Logia source
+// location of the Lua line emitted at Lua line N. The 4 tests
+// below anchor the core invariants:
+//
+//   1. Vector size matches the count of `\n` in the generated Lua.
+//   2. The map's anchors match the originating Stmt sourceLocs.
+//   3. Codegen preamble / epilogue / blank lines are anchored to
+//      `{}` (line 0 = untranslatable).
+//   4. `LogiaSourceMap::lookup(luaLine)` returns `{}` for
+//      out-of-range Lua lines.
+//
+// All tests use `compileLogiaToLua()` (the heap-backed pipeline
+// wrapper in `AYLogiaPipeline.h`) so the full front-end + codegen
+// path is exercised.
+// =====================================================================
+
+TEST_CASE(s5ed03_sourcemap_size_matches_lua_lines) {
+    auto r = compileLogiaToLua(R"(
+script T {
+    var n: int = 0
+    on_start() {
+        n = 1
+        n = 2
+        n = 3
+    }
+}
+)");
+    CHECK(r.success);
+    // Count newlines in generated Lua.
+    int newlines = 0;
+    for (char c : r.lua) {
+        if (c == '\n') ++newlines;
+    }
+    // The source map's index 0 is reserved (untranslatable
+    // sentinel); indices 1..N map to Lua lines 1..N. So vector
+    // size must be `newlines + 1`.
+    CHECK(static_cast<int>(r.sourceMap.luaLineToSource.size()) == newlines + 1);
+}
+
+TEST_CASE(s5ed03_sourcemap_anchors_match_stmt_source_locs) {
+    // Plant a script where each Stmt's sourceLoc is known:
+    //   line 2: `script T {`
+    //   line 3: `var n: int = 0` (VarDeclStmt at var keyword on line 3)
+    //   line 4: `on_start() {`  (LifecycleFuncDecl at lifecycle kw on line 4)
+    //   line 5: `    n = 1`     (ExprStmt at line 5)
+    //   line 6: `    n = 2`     (ExprStmt at line 6)
+    //   line 7: `}`             (close script — no Stmt)
+    //   line 8: `}`             (close lifecycle body — no Stmt)
+    auto r = compileLogiaToLua(R"(
+script T {
+    var n: int = 0
+    on_start() {
+        n = 1
+        n = 2
+    }
+}
+)");
+    CHECK(r.success);
+    CHECK(r.sourceMap.luaLineToSource.size() >= 4);
+
+    // Lua line 1 is the codegen `--` comment header (no Logia
+    // anchor → line 0). Lua line 2 is `local M = {}` (also no
+    // anchor). Lua line 3 is blank (no anchor). The first
+    // user-source-anchored Lua line is the `local n = 0` var
+    // declaration, which should anchor to line 3 (the `var`
+    // keyword in source).
+    //
+    // Find the Lua line index whose anchor's `line` is 3 — that
+    // must be the VarDeclStmt's emit (R5.0-style 3-line preamble
+    // plus possibly a blank line above it; the exact index depends
+    // on codegen formatting but the *anchor* is invariant).
+    bool foundVarAnchor = false;
+    for (const auto& anchor : r.sourceMap.luaLineToSource) {
+        if (anchor.line == 3) { foundVarAnchor = true; break; }
+    }
+    CHECK(foundVarAnchor);
+
+    // The `n = 1` ExprStmt must anchor to source line 5. The
+    // `n = 2` ExprStmt must anchor to source line 6. Both must
+    // appear somewhere in the source map (Lua line number is
+    // implementation-dependent due to preamble formatting).
+    bool foundExpr1 = false;
+    bool foundExpr2 = false;
+    for (const auto& anchor : r.sourceMap.luaLineToSource) {
+        if (anchor.line == 5) foundExpr1 = true;
+        if (anchor.line == 6) foundExpr2 = true;
+    }
+    CHECK(foundExpr1);
+    CHECK(foundExpr2);
+}
+
+TEST_CASE(s5ed03_sourcemap_header_footer_unanchored) {
+    // The codegen preamble (`--` comment, `local M = {}`) and
+    // epilogue (`return M`) plus the blank lines between top-level
+    // members have no Logia source — they must anchor to
+    // `SourceLocation{}` (line 0). The first few entries of the
+    // source map should include at least one line-0 anchor (the
+    // preamble).
+    auto r = compileLogiaToLua(R"(
+script T {
+    var n: int = 0
+    on_start() { }
+}
+)");
+    CHECK(r.success);
+    CHECK(r.sourceMap.luaLineToSource.size() >= 3);
+
+    // Lua line 1 is the `--` header comment (no anchor).
+    CHECK(r.sourceMap.luaLineToSource[1].line == 0);
+    // Lua line 2 is `local M = {}` (no anchor).
+    CHECK(r.sourceMap.luaLineToSource[2].line == 0);
+    // Lua line 3 is the blank line after the preamble (no anchor).
+    CHECK(r.sourceMap.luaLineToSource[3].line == 0);
+}
+
+TEST_CASE(s5ed03_sourcemap_lookup_out_of_range_returns_zero) {
+    auto r = compileLogiaToLua(R"(
+script T {
+    on_start() { }
+}
+)");
+    CHECK(r.success);
+    CHECK_FALSE(r.sourceMap.luaLineToSource.empty());
+
+    // Lookup(0) is always out of range (index 0 is reserved).
+    auto at0 = r.sourceMap.lookup(0);
+    CHECK(at0.line == 0);
+    CHECK(at0.column == 0);
+
+    // Lookup(INT_MAX) is always out of range.
+    auto atMax = r.sourceMap.lookup(2147483647);
+    CHECK(atMax.line == 0);
+    CHECK(atMax.column == 0);
+
+    // Lookup(negative) is always out of range.
+    auto atNeg = r.sourceMap.lookup(-1);
+    CHECK(atNeg.line == 0);
+    CHECK(atNeg.column == 0);
+
+    // Lookup(beyond-end) is always out of range.
+    int beyond = static_cast<int>(r.sourceMap.luaLineToSource.size()) + 10;
+    auto atBeyond = r.sourceMap.lookup(beyond);
+    CHECK(atBeyond.line == 0);
+    CHECK(atBeyond.column == 0);
+}
+
 TEST_SUITE_END

@@ -2,7 +2,7 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-14）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H + S5 ED-02 已交付**；`AYScript_Test` **1058/1058** 全绿；`kLogiaPipelineVersion = 22`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列 + §5.7.4.x+4 S5 ED-02 source-location stamping。
+> **文档状态（2026-07-15）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H + S5 ED-02 + S5 ED-03 已交付**；`AYScript_Test` **1066/1066** 全绿；`kLogiaPipelineVersion = 23`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列 + §5.7.4.x+4 S5 ED-02 source-location stamping + §5.7.4.x+5 S5 ED-03 Lua runtime panic → Logia source line translation。
 > **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R5.2 待选：R5.2-F (negative step) / R5.2-G (var step + runtime defense) / R5.2-I (multi-hop chain 收紧)。
 > **指挥入口**：§14 + §14.8（copy-paste prompts）。
 
@@ -1295,6 +1295,76 @@ R5.2-C/D/E/H 是同款 philosophy 的四个切片：
 3. **brace-init `{a, b}` 跟 aggregate-initialization 在有非-trivial default-ctor field 的 struct 上是 MSVC trap** — silent reject,加 `static_assert` 都 catch 不到。Lesson:helper 装 sourceLoc setter 时 explicit `.line = ; .column = ;` 比 `{a, b}` 安全
 
 **`kLogiaPipelineVersion 21 → 22`** — 纯 diagnostic-surface 改但 stale cached diagnostics 会 silently flip from `0:0` 到 real lines,bump 强重 compile。
+
+#### 5.7.4.x+5 S5 ED-03 — Lua runtime panic → Logia source line translation（2026-07-15）
+
+**状态**：✅ 完成。`kLogiaPipelineVersion 22 → 23`。`AYScript_Test` **1066/1066 全绿**（1058 S5 ED-02 baseline + 8 S5 ED-03 新增: 4 codegen-layer + 3 bridge-layer + 1 CLI smoke）。
+
+**为什么必须有**：S5 ED-02 让 **编译时** diagnostic 携带 Logia line/col,但 **运行时** panic 仍输出 raw Lua traceback。Gameplay dev 在 hot-reload 的 `.logia` 文件里写 `self.someNonexistentField()`,Lua 抛 `[string "..."]:42: attempt to index a nil value (local 'self')` — 那个 `42` 是 **生成的 Lua 行号**,不是用户 `.logia` 文件的行号。Dev 必须 mental-map "Lua line 42" → "Logia line N" 通过 codegen 模型。这是 debug 体验的最后一公里。
+
+**用户决策 2026-07-15** (this conversation plan-mode Q&A):
+- **Error API 形状** → `LogiaRuntimeBridge::getLastError()` 返 `TranslatedRuntimeError { luaMessage; SourceLocation logiaLoc; bool translated; }`。模仿 `AYPlugin::DynamicLib::_lastError` pattern (`include/DynamicLib.h:31`)
+- **Source map 粒度** → per-line `std::vector<SourceLocation>` indexed by Lua line。O(1) lookup;~50 lines/script 的内存微不足道
+
+**核心数据结构** (include/logia/AYLuaCodegen.h):
+```cpp
+struct LogiaSourceMap {
+    std::vector<SourceLocation> luaLineToSource;  // index N = Lua line N → Logia loc
+    SourceLocation lookup(int luaLine) const;     // O(1),out-of-range 返 {} (line 0)
+};
+struct LuaCodegenResult {
+    ...
+    LogiaSourceMap sourceMap;  // S5 ED-03
+};
+```
+
+**Codegen 改动** (src/logia/AYLuaCodegen.cpp):
+- **新 helper `writeLine(content)`** = `indent(); _out += content + "\n"; ++_luaLineCount; _sourceMap.luaLineToSource.resize + push _currentAnchor`。这是 S5 ED-03 的中心记账入口,replaces previously-unused `line()` helper(`grep _out += "..."\\n` 在 audit 中发现 ~35 sites 直接写 `_out`,13 sites 写裸 `\n`)。
+- **`emitStmt` dispatcher** 在 dispatch 前 `_currentAnchor = stmt.sourceLoc` — 所有 emit path 共享 single dispatcher,每个 Stmt 触发一次 anchor 重置
+- **新 `writeBlankLine()`** — codegen 在 lifecycle / helper 之间插入的可读性空行;push `{}` (无 Logia source)
+- **新 `writeNoAnchor(content)`** — codegen preamble (`-- Auto-generated ...`, `local M = {}`) + epilogue (`return M`) 走这个,push `{}` 让 runtime translation 正确返回 "untranslatable" 而不是指向用户代码
+- **`emitAssignmentTarget` 内嵌的 `local __tmp = ...`** 也走 `writeLine` — 之前是 `_out += "local ...\n"` 直接写,现在是显式 anchor-tracking 行
+- **Emit 方法全重构** (emitVarDecl / emitIfStmt / emitWhileStmt / emitForStmt / emitBreak / emitContinue / emitBlock / emitLabel / emitReturn / emitVarDecl / emitLifecycleFunc / emitFunctionDecl / emitLocalVar / emitExprStmt) — multi-write 模式 (e.g. `local NAME = EXPR`) collapse 成单 `writeLine("local NAME = EXPR")`;compound assign (S3.10/3.11 reflect call rewrite) 写两行,都锚定到同一个 ExprStmt.sourceLoc (正确:runtime panic 落在任意一行都是同一个 Logia source line)
+
+**Codegen output shape 不变**:`writeLine()` refactor 是 byte-identical emit shape 的纯记账改造。所有 1058 S5 ED-02 测试不变过。
+
+**Pipeline 改动** (include/logia/AYLogiaPipeline.h + src/logia/AYLogiaPipeline.cpp):
+- `LogiaToLuaResult.sourceMap` 字段新增
+- `compileLogiaToLua` 把 `generated.sourceMap` move 到 `result.sourceMap`
+
+**Bridge 改动** (src/AYScriptRuntimeBridge.cpp):
+- **`Impl::sourceMaps` map** — 与 `Impl::scripts` map 并行,keyed by `scriptName`
+- **`Impl::CompileCacheEntry`** 加 `LogiaSourceMap sourceMap` — cache hit 路径直接拿缓存的 sourceMap,无需重新跑 front end
+- **`Impl::_lastError`**: `TranslatedRuntimeError` 字段,callLifecycle 失败时填充
+- **`shutdown()`** clear `sourceMaps` + reset `_lastError`,保持与 `scripts` / `_compileCache` / `_compileHits` 同步
+- **新 file-local helper `translateLuaErrorToLogia(scriptName, luaMessage, sourceMaps)`** — parse `[string "..."]:N:` 第一个 frame 的 Lua line,通过 source map 翻译成 Logia loc;返 `{}` 当无法 parse 或 scriptName 不在 map 中
+- **`callLifecycle` 失败分支** — populate `_lastError`,**enrich `ayt::log::error(...)` 输出** 当 translation 成功 (`<input>:line:col:` prefix),失败 fall back 到 raw Lua traceback format。语义:dev 看 log 能直接定位 `.logia` 文件行号
+- **`callLifecycle` 成功路径** — reset `_lastError` 到 default
+
+**API 改动** (include/AYScriptRuntimeBridge.h):
+```cpp
+struct TranslatedRuntimeError {
+    std::string luaMessage;
+    logia::SourceLocation logiaLoc;
+    bool translated = false;
+};
+[[nodiscard]] TranslatedRuntimeError getLastError() const noexcept;
+```
+
+**测试**:
+- **Codegen-layer** (Test_LogiaSemantic.cpp): `s5ed03_sourcemap_size_matches_lua_lines` / `s5ed03_sourcemap_anchors_match_stmt_source_locs` / `s5ed03_sourcemap_header_footer_unanchored` / `s5ed03_sourcemap_lookup_out_of_range_returns_zero`
+- **Bridge-layer** (Test_LogiaRuntime.cpp): `s5ed03_bridge_translates_runtime_error_to_logia_line` (planted `error("boom")` on line 4,assert `getLastError().logiaLoc.line == 4 && translated == true`) / `s5ed03_bridge_last_error_cleared_by_successful_call` (first script panics, second succeeds,after second call `_lastError` reset) / `s5ed03_bridge_chunk_load_failure_records_last_error` (load-time vs call-time 失败区分,environmental skip 当 front-end 拒绝 planted bad pattern)
+- **CLI smoke** (Test_LogiaCli.cpp): `cli_s5ed03_codegen_output_unchanged_by_sourcemap_refactor` — 由于 CLI `compile` subcommand 不调用 lifecycle (runtime panic 是 in-process bridge 关注点),CLI smoke 改为 codegen shape unchanged 验证:assert CLI 输出 Lua 含 baseline 子串 (`local n = 0`, `function M.on_start(self)`, `local M = {}`, `return M`, `-- Auto-generated ...`) 证明 `writeLine()` refactor 不破坏 emit shape
+
+**Lessons learned**:
+1. **Unused helper 是埋点**:file audit 发现 `line()` helper 存在但 0 caller — S5 ED-03 直接 promote 它为 `writeLine()` 是 O(20 lines) 的 diff。如果 audit 没发现,就得为 ~48 sites 各自重写 anchor tracking
+2. **`emitStmt` 是 S5 ED-03 的唯一 anchor 更新点**:所有 13 个 concrete Stmt subclass 都通过这个 dispatcher,把 `_currentAnchor = stmt.sourceLoc` 写一次就覆盖全部。如果每个 emit 方法各自 set anchor,会复制 13 次 + 漏掉的 risk
+3. **Compound assign 的 2-line emit 都锚定到 ExprStmt.sourceLoc**:runtime panic 落在 `local __tmp = ...` 或 `ayt_reflect_set_field(...)` 任意一行,语义上是同一个 Logia source line (the `self.field += rhs` statement)。两者共享 anchor 是 correct
+4. **Codegen preamble/epilogue 锚定到 `{}`**:让 runtime translation 返 "untranslatable" — 这才是正确行为,不是 bug。Codegen 自己生成的行不代表用户代码
+5. **CLI smoke 在没有 `run` subcommand 时降级**:CLI 只能验证 codegen shape unchanged,不能验证 runtime translation path。Runtime panic translation 是 in-process bridge 关注点,Test_LogiaRuntime 的 bridge tests 覆盖。CLI 测试不能反映 in-process `_lastError` state
+6. **MSVC `<input>` placeholder 是 contract 简化**:runtime anchor 的 `file` 字段空着(codegen 不知道 `.logia` 路径,loadScript 收 string 不收 path)。让 host 端从自己的 context 填 — 比 plumb 路径通过整条 chain 更 cheap
+
+**`kLogiaPipelineVersion 22 → 23`** — codegen output byte-identical,但 `Impl::CompileCacheEntry` 新增 `LogiaSourceMap` 字段,stale cache entry 缺字段会让 cache-hit path 编译失败。bump 强重 compile cache。
 
 #### 5.7.5 消费方矩阵
 

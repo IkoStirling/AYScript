@@ -45,6 +45,12 @@ LogiaToLuaResult compileLogiaToLua(const std::string& source,
     }
 
     result.lua = std::move(generated.source);
+    // S5 ED-03 (2026-07-15): forward the codegen-side per-line
+    // Lua → Logia source map alongside the generated Lua source.
+    // The runtime bridge reads `result.sourceMap` in `loadScript`
+    // and caches it per scriptName so a runtime panic can be
+    // translated back to the originating Logia line.
+    result.sourceMap = std::move(generated.sourceMap);
     result.success = true;
     return result;
 }

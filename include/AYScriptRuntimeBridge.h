@@ -277,7 +277,21 @@ namespace ayt::script
 //       field declarations and `AYSemanticAnalyzer.cpp` for the
 //       `sourceLocFor(Expr|Stmt|ScriptDecl)` helpers + the 7
 //       newly-populated `d.location = sourceLocFor(...)` sites.
-constexpr std::size_t kLogiaPipelineVersion = 22u;
+//       2026-07-15 S5 ED-03: bump 22 → 23. Lua runtime panic
+//       translation: `callLifecycle` failures now expose a
+//       `LogiaSourceMap`-derived Logia source location via the
+//       new `getLastError()` accessor. Codegen output
+//       byte-identical; new struct types
+//       (`logia::LogiaSourceMap`, `LogiaRuntimeBridge::TranslatedRuntimeError`);
+//       no AST shape change. `Impl::CompileCacheEntry` gains
+//       `LogiaSourceMap sourceMap` so a cache-hit path reuses
+//       the previously-cached map without re-running the front
+//       end; bump forces every existing cache entry to refresh
+//       and pick up the new field. See `AYLuaCodegen.h` for
+//       `LogiaSourceMap` and `LuaCodegenResult.sourceMap`; see
+//       `AYScriptRuntimeBridge.cpp` for
+//       `Impl::sourceMaps` and `translateLuaErrorToLogia()`.
+constexpr std::size_t kLogiaPipelineVersion = 23u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -419,6 +433,34 @@ public:
 
     // Look up a previously-loaded script.
     [[nodiscard]] bool hasScript(const std::string& scriptName) const;
+
+    // === S5 ED-03 (2026-07-15) — Lua-line → Logia-line error translation ===
+
+    // The translated form of a Lua runtime error surfaced by
+    // `callLifecycle` when a script panics (or by chunk-load errors
+    // in `loadScript`). The raw `luaMessage` is always populated
+    // when an error has occurred. The `logiaLoc` is populated when
+    // the traceback's first `[string "..."]:N:` Lua frame maps to a
+    // line the bridge has a recorded Logia anchor for; `translated`
+    // is true iff `logiaLoc.line > 0`.
+    //
+    // The `logiaLoc.file` field is left empty by the bridge — the
+    // originating `.logia` path is not plumbed through `loadScript`
+    // today (loadScript takes a string source, not a path). A
+    // future slice could populate it from the bridge's call-site
+    // context if needed.
+    struct TranslatedRuntimeError {
+        std::string luaMessage;
+        logia::SourceLocation logiaLoc;
+        bool translated = false;
+    };
+
+    // Returns the last Lua runtime error captured by `callLifecycle`
+    // (and by chunk-load errors in `loadScript`). Cleared by
+    // `shutdown()` and reset on every successful lifecycle call.
+    // Returns `{ "", {}, false }` when no error has occurred (the
+    // default-constructed state).
+    [[nodiscard]] TranslatedRuntimeError getLastError() const noexcept;
 
     // Invoke a lifecycle method on the named script.
     //

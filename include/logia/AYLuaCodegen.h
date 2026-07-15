@@ -29,12 +29,43 @@ struct LuaCodegenOptions {
     LogiaHostContext hostContext = defaultLogiaHostContext();
 };
 
+// S5 ED-03 (2026-07-15): per-line source map produced by LuaCodegen
+// alongside the generated Lua source. Index N is the Logia
+// SourceLocation corresponding to the Lua line emitted at Lua line N
+// (1-based). Index 0 is reserved as a sentinel (zero / "no anchor")
+// to match Lua's 1-based line numbering — callers always check
+// `luaLine >= 1 && luaLine < luaLineToSource.size()` before
+// dereferencing. Memory footprint: one SourceLocation per emitted
+// Lua line; a typical ~50-line script's map is trivial.
+//
+// The `file` field of each SourceLocation is empty at codegen time —
+// the bridge populates it from the originating `.logia` path on
+// consumption (codegen has no knowledge of the script's filesystem
+// path; the source passed to `Compiler::compile` is a string).
+struct LogiaSourceMap {
+    std::vector<SourceLocation> luaLineToSource;
+
+    // Look up the Logia SourceLocation for a Lua line. Returns
+    // `{}` (line 0) when `luaLine` is out of range. Codegen
+    // initializes every emitted line, so the in-range case is the
+    // common path; the out-of-range check fails closed (no assert)
+    // because Lua-side tracebacks may reference lines outside the
+    // script chunk (e.g. internal Lua trampolines) — those simply
+    // surface as "untranslatable" to the bridge.
+    SourceLocation lookup(int luaLine) const;
+};
+
 struct LuaCodegenResult {
     bool success = false;
     std::vector<CompilerError> errors;
     // Generated Lua source. Empty when success == false (and when codegen
     // produces a recoverable but partial source we still keep it for debug).
     std::string source;
+    // S5 ED-03 (2026-07-15): per-line Lua-line → Logia-source-location
+    // map produced alongside `source`. Same lifetime semantics
+    // (populated when success == true). Empty when codegen never
+    // reached the emit pass (e.g. parser produced no script decl).
+    LogiaSourceMap sourceMap;
 };
 
 // For compile + codegen together, prefer compileLogiaToLua() in
@@ -122,7 +153,10 @@ private:
                                      std::size_t& hopCount);
 
     // Helpers
-    void line(const std::string& s = {});
+    void line(const std::string& s = {});   // legacy helper — kept but unused after S5 ED-03.
+    void writeLine(const std::string& content);  // S5 ED-03 (2026-07-15): anchor-tracking replacement for `line()`. Writes a single Lua line and records its anchor in `_sourceMap`.
+    void writeBlankLine();  // S5 ED-03 (2026-07-15): blank-line emitter for codegen readability; anchors to {} (no Logia source).
+    void writeNoAnchor(const std::string& content);  // S5 ED-03 (2026-07-15): codegen preamble / epilogue line; anchors to {}.
     void indent();
     void dedent();
     std::string escapeString(const std::string& s) const;
@@ -142,6 +176,21 @@ private:
     // codegen then skips the reflect-call rewrite and keeps S2.5
     // bare member access (a runtime no-op, matches existing tests).
     std::string _currentHostTypeName;
+
+    // S5 ED-03 (2026-07-15): per-line Lua-line → Logia-source-location
+    // map populated alongside `_out` by `writeLine()`. Exposed via
+    // `LuaCodegenResult.sourceMap`. Index N is the Logia anchor for
+    // the Lua line written at position N (1-based; index 0 reserved).
+    LogiaSourceMap _sourceMap;
+    // S5 ED-03: anchor set by `emitStmt()` to the current Stmt's
+    // `sourceLoc`. Every line written by `writeLine()` records
+    // `_currentAnchor` in `_sourceMap` until `emitStmt()` updates
+    // it again. The header/footer emit path in `generate()` does
+    // NOT update this — those lines map to `{}` (no anchor).
+    SourceLocation _currentAnchor;
+    // S5 ED-03: total emitted Lua lines (1-based). Drives
+    // `_sourceMap.luaLineToSource` growth in `writeLine()`.
+    int _luaLineCount = 0;
 
     std::vector<CompilerError> _errors;
 };

@@ -104,6 +104,17 @@ std::size_t makeCacheKey(const std::string& src,
 
 namespace {
 
+// S5 ED-03 (2026-07-15): file-local helper forward declaration.
+// Defined after `LogiaRuntimeBridge::callLifecycle` so it can
+// read the bridge's `sourceMaps` map by reference (rather than
+// threading it through every call site). Forward declaring here
+// keeps `callLifecycle`'s body referring to it without ordering
+// constraints during compilation.
+logia::SourceLocation translateLuaErrorToLogia(
+    const std::string& scriptName,
+    const std::string& luaMessage,
+    const std::unordered_map<std::string, logia::LogiaSourceMap>& sourceMaps);
+
 class MockInputProvider final
     : public ayt::script::LogiaRuntimeBridge::InputProvider {
 public:
@@ -1382,6 +1393,22 @@ struct LogiaRuntimeBridge::Impl {
     // scriptName → module table (the table returned by the chunk)
     std::unordered_map<std::string, sol::table> scripts;
 
+    // S5 ED-03 (2026-07-15): per-script LogiaSourceMap indexed by
+    // scriptName — paired with `scripts` so a `callLifecycle` Lua
+    // panic can be translated back to the originating .logia line.
+    // Cleared by `shutdown()` alongside `scripts` and the compile
+    // cache. The map's `file` field is left empty by codegen (no
+    // .logia path is known at compile time); the bridge caller can
+    // populate it from its own context if it wants `getLastError`
+    // to carry an absolute path.
+    std::unordered_map<std::string, logia::LogiaSourceMap> sourceMaps;
+
+    // S5 ED-03 (2026-07-15): last Lua runtime error captured by
+    // `callLifecycle` (and by chunk-load errors in `loadScript`).
+    // Read via `LogiaRuntimeBridge::getLastError()`. Cleared by
+    // `shutdown()` and reset on every successful lifecycle call.
+    LogiaRuntimeBridge::TranslatedRuntimeError _lastError;
+
     // S3.5: ambient time/input state, owned by the bridge.
     // Populated by tickAmbient() before any lifecycle dispatch;
     // read by `time.delta` / `time.total` Lua accessors. The
@@ -1402,8 +1429,14 @@ struct LogiaRuntimeBridge::Impl {
     // failed) and a snapshot of the diagnostics surface — so a
     // cache hit on a previously-failing source reproduces the same
     // error report without re-running the front end.
+    //
+    // S5 ED-03 (2026-07-15): also caches the per-line Lua →
+    // Logia source map so a cache-hit path can re-install the
+    // source map alongside the regenerated Lua chunk without
+    // re-running the front end.
     struct CompileCacheEntry {
         std::string generatedLua;
+        logia::LogiaSourceMap sourceMap;  // S5 ED-03
         bool compileOk = false;  // captures success/failure once.
     };
     std::unordered_map<std::size_t, CompileCacheEntry> _compileCache;
@@ -1556,6 +1589,14 @@ bool LogiaRuntimeBridge::initialize()
 void LogiaRuntimeBridge::shutdown()
 {
     _impl->scripts.clear();
+    // S5 ED-03 (2026-07-15): also clear the per-script source maps.
+    // Paired with `scripts` so a post-shutdown loadScript starts
+    // from a clean state — no stale Lua → Logia line translations
+    // for scripts whose module tables are gone.
+    _impl->sourceMaps.clear();
+    // S5 ED-03 (2026-07-15): drop the last captured runtime error
+    // so a fresh post-shutdown session starts with no error state.
+    _impl->_lastError = LogiaRuntimeBridge::TranslatedRuntimeError{};
     // S3.6 (LG-06a): shutdown also wipes the compile cache so a
     // post-shutdown loadScript starts from a clean miss. _impl is
     // preserved across shutdown() (the bridge is reusable), but the
@@ -1609,12 +1650,14 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     const std::size_t cacheKey = makeCacheKey(logiaSource, ctx);
     auto cacheIt = _impl->_compileCache.find(cacheKey);
     std::string cachedLua;
+    logia::LogiaSourceMap cachedMap;  // S5 ED-03: cache-hit's source map.
     bool cachedOk = false;
     const bool isCacheHit = (cacheIt != _impl->_compileCache.end());
 
     if (isCacheHit) {
         ++_impl->_compileHits;
         cachedLua = cacheIt->second.generatedLua;
+        cachedMap = cacheIt->second.sourceMap;
         cachedOk  = cacheIt->second.compileOk;
     } else {
         ++_impl->_compileMisses;
@@ -1623,9 +1666,11 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     // Bridge stage 1: get a `luaSrc` + `luaOk` either from cache
     // (cache hit) or by running the full pipeline (cache miss).
     std::string luaSrc;
+    logia::LogiaSourceMap sourceMap;  // S5 ED-03: alongside luaSrc.
     bool luaOk  = false;
     if (isCacheHit) {
         luaSrc = cachedLua;
+        sourceMap = cachedMap;  // S5 ED-03
         luaOk  = cachedOk;
         if (!luaOk) {
             // Cached compile-failure: surface the same error a fresh
@@ -1640,6 +1685,11 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
             ce.column = 0;
             errors.push_back(std::move(ce));
             _impl->scripts.erase(scriptName);
+            // S5 ED-03: drop the cached source map too so
+            // `hasScript` and `sourceMaps` stay in sync (the
+            // failed compile has no Lua chunk to translate
+            // against).
+            _impl->sourceMaps.erase(scriptName);
             return false;
         }
     } else {
@@ -1652,21 +1702,26 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         if (!pipeline.success) {
             errors = std::move(pipeline.errors);
             _impl->scripts.erase(scriptName);
+            _impl->sourceMaps.erase(scriptName);  // S5 ED-03
             _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
                 std::string{},
+                logia::LogiaSourceMap{},  // S5 ED-03: default-constructed.
                 false,
             };
             return false;
         }
 
         luaSrc = std::move(pipeline.lua);
+        sourceMap = std::move(pipeline.sourceMap);  // S5 ED-03
         luaOk  = true;
 
         // Populate the cache BEFORE running the Lua chunk so a
         // successful safe_script that then produces a runtime error
         // still leaves the compile result cached for the next load.
+        // S5 ED-03 (2026-07-15): also cache the source map.
         _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
             luaSrc,
+            sourceMap,
             true,
         };
     }
@@ -1683,6 +1738,11 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         ce.column = 0;
         errors.push_back(std::move(ce));
         _impl->scripts.erase(scriptName);
+        // S5 ED-03 (2026-07-15): a chunk-load error means the Lua
+        // chunk didn't execute to completion — there's no
+        // runnable module table, so the source map is meaningless.
+        // Drop it so `hasScript` and `sourceMaps` stay consistent.
+        _impl->sourceMaps.erase(scriptName);
         return false;
     }
 
@@ -1696,9 +1756,19 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         ce.column = 0;
         errors.push_back(std::move(ce));
         _impl->scripts.erase(scriptName);
+        // S5 ED-03 (2026-07-15): same rationale as the safe_script
+        // error path above — no module table, drop the source map.
+        _impl->sourceMaps.erase(scriptName);
         return false;
     }
     _impl->scripts[scriptName] = returned;
+    // S5 ED-03 (2026-07-15): store the source map alongside the
+    // module table so `callLifecycle` can translate runtime
+    // panics back to the originating Logia line. The source map
+    // is identified by the same `scriptName` key as the module
+    // table; both maps are erased in lockstep on every error
+    // path that drops `scripts[name]`.
+    _impl->sourceMaps[scriptName] = std::move(sourceMap);
     return true;
 }
 
@@ -1860,11 +1930,119 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
 
     if (!r.valid()) {
         sol::error err = r;
-        ayt::log::error("Logia call '%s.%s' failed: %s",
-                        scriptName.c_str(), methodName.c_str(), err.what());
+        std::string msg = err.what();
+        // S5 ED-03 (2026-07-15): capture the raw Lua message AND
+        // attempt to translate the first Lua frame back to the
+        // originating Logia source line. The translated form is
+        // exposed via `getLastError()` for in-process callers
+        // (tests, editor / IDE hosts); the existing
+        // `ayt::log::error(...)` call is enriched with the
+        // translated location when available, so dev-facing log
+        // output also points at the right Logia source line.
+        _impl->_lastError.luaMessage = msg;
+        _impl->_lastError.logiaLoc = translateLuaErrorToLogia(
+            scriptName, msg, _impl->sourceMaps);
+        _impl->_lastError.translated =
+            (_impl->_lastError.logiaLoc.line > 0);
+        if (_impl->_lastError.translated) {
+            // S5 ED-03 (2026-07-15): enriched log line. The
+            // "<input>" placeholder marks the anchor as the
+            // bridge-side translation (the originating .logia
+            // path is not plumbed through loadScript today —
+            // future slice could populate it from caller
+            // context).
+            ayt::log::error("Logia call '%s.%s' failed at %s:%d:%d: %s",
+                            scriptName.c_str(), methodName.c_str(),
+                            "<input>",
+                            _impl->_lastError.logiaLoc.line,
+                            _impl->_lastError.logiaLoc.column,
+                            msg.c_str());
+        } else {
+            // S5 ED-03 (2026-07-15): pre-ED-03 log format — fall
+            // back to the raw Lua-line-prefixed message when no
+            // Logia anchor is available.
+            ayt::log::error("Logia call '%s.%s' failed: %s",
+                            scriptName.c_str(), methodName.c_str(), msg.c_str());
+        }
         return false;
     }
+    // S5 ED-03 (2026-07-15): successful lifecycle call clears any
+    // prior `_lastError`. This matches the semantics spelled out
+    // in the header doc ("reset on every successful lifecycle
+    // call") — a host that polls `getLastError()` between
+    // dispatch ticks sees a clean state on success.
+    _impl->_lastError = LogiaRuntimeBridge::TranslatedRuntimeError{};
     return true;
+}
+
+// S5 ED-03 (2026-07-15): parse a `[string "..."]:N:` frame out of
+// a sol::error traceback and translate `N` via the per-script
+// source map. Returns the translated Logia SourceLocation when
+// the lookup succeeds, else `{}` (which signals "untranslatable"
+// — caller's `translated` flag becomes false).
+//
+// Sol2's `sol::error::what()` returns the traceback Lua itself
+// would have printed, which can include multiple `[string "..."]:N:`
+// frames (one per stack frame in Lua-land). We extract the FIRST
+// matching Lua line number — that's typically the actual error
+// site, not an intermediate stack frame in a Lua helper.
+//
+// Examples of traceback shapes:
+//   "[string \"...\"]:42: attempt to index a nil value (local 'self')"
+//   "[string \"...\"]:42: attempt to perform arithmetic on a nil value\nstack traceback:\n\t[string \"...\"]:42: in main chunk"
+namespace {
+
+logia::SourceLocation translateLuaErrorToLogia(
+    const std::string& scriptName,
+    const std::string& luaMessage,
+    const std::unordered_map<std::string, logia::LogiaSourceMap>& sourceMaps)
+{
+    // Walk the message looking for "[string \"", then "]:", then
+    // a digit run, then ":". The first successful parse wins.
+    // Returns SourceLocation{} (line 0) when no frame parses or
+    // no source map is registered for `scriptName`.
+    auto mapIt = sourceMaps.find(scriptName);
+    if (mapIt == sourceMaps.end()) {
+        return {};
+    }
+    const logia::LogiaSourceMap& map = mapIt->second;
+    std::size_t cursor = 0;
+    while (cursor < luaMessage.size()) {
+        auto openQuote = luaMessage.find("[string \"", cursor);
+        if (openQuote == std::string::npos) return {};
+        auto lineMarker = luaMessage.find("]:", openQuote);
+        if (lineMarker == std::string::npos) return {};
+        std::size_t lineStart = lineMarker + 2;  // skip past "]:"
+        // Skip non-digit prefix (defensive — Lua always emits a
+        // digit at this position, but be robust to future Lua
+        // versions adding prefixes).
+        while (lineStart < luaMessage.size()
+               && !std::isdigit(static_cast<unsigned char>(luaMessage[lineStart]))) {
+            ++lineStart;
+        }
+        std::size_t lineEnd = lineStart;
+        while (lineEnd < luaMessage.size()
+               && std::isdigit(static_cast<unsigned char>(luaMessage[lineEnd]))) {
+            ++lineEnd;
+        }
+        if (lineEnd == lineStart) return {};
+        int luaLine = std::atoi(
+            luaMessage.substr(lineStart, lineEnd - lineStart).c_str());
+        if (luaLine > 0) {
+            return map.lookup(luaLine);
+        }
+        cursor = lineEnd + 1;
+    }
+    return {};
+}
+
+} // namespace
+
+// S5 ED-03 (2026-07-15): public accessor.
+LogiaRuntimeBridge::TranslatedRuntimeError
+LogiaRuntimeBridge::getLastError() const noexcept
+{
+    return _impl ? _impl->_lastError : TranslatedRuntimeError{};
 }
 
 // ------------------------------------------------------------
