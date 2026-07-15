@@ -1975,7 +1975,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 |-------|-----|------|--------|
 | **P-R5.0** | **R5.0** | `while (cond) { body }` / `for (var i : N) { body }` 循环语句 | ✅ 2026-07-13 |
 | **P0** | **INT-01** | Editor/Game 注册 `ScriptSubSystem` + Play 加载 `.logia` | ✅ 2026-07-15 |
-| **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ⏳ |
+| **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ✅ 2026-07-15 |
 | **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
 | **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
 | **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param int/float/struct ship R4.2;std::string out-param R4.2b 待) |
@@ -2373,6 +2373,48 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 3. **`MethodInfoImpl` 变长模板**：**禁止**放入 AYReflect foundation TU；保持 `logia/AYMethodInfoImpl.h` private。
 4. **热重载析构顺序**：`stopHotReload()` → `adapter.reset()` → `bridge.shutdown()`（§S3.7b）。
 5. **Editor 栈**：接 ScriptSubSystem 时**不要**破坏现有 `uiBackend` shutdown 顺序（见 AYEditor 会话记录）。
+
+---
+
+| 2026-07-15 | **INT-02 完成（P1）**：Logia `input.is_pressed/is_just_pressed` 真接 AYDevice `InputMapping`,PlayerController 可读真实键盘。**`DeviceInputProvider`**(AYDeviceSubSystem target,非 AYDevice core — 保持 core AYScript-dep-free,纯虚接口跨 module 边界)— LogiaRuntimeBridge::InputProvider 适配,持 raw `DeviceManager*`,Editor teardown 时 `nullptr` 安全。**Editor**:`DeviceManager` 从 stack-local hoist 为 `AYEditorApp` 成员(`_devices` / `_inputProvider`);`~EditorApp` 先 `_inputProvider.reset()` 再 `_devices.reset()` 保证 provider 永远在 devices 之前 unhook;`registerSubSystems()` ScriptSubSystem 注册后注入 provider。**Application**:`static DeviceInputProvider(&DeviceSubSystem::findRegistered()->manager())`,`bridge.setInputProvider` — `ScriptSubSystem::shutdown()` 防御性 `setInputProvider(nullptr)` 保证 GameLoop clearAll 顺序安全。**ScriptSubSystem**:`_descriptor.dependencies` 从 `{"ayt.log", "ayt.entity"}` → `{"ayt.log", "Entity", "Device"}`(修 INT-01 R3 silent dep mismatch + 加 Device dep);`shutdown()` 加 `setInputProvider(nullptr)` 防御。**Tests**:`Test_LogiaDeviceInput.cpp` 4 用例(is_pressed 3 帧 witness / is_just_pressed edge / nullptr 安全 / ScriptSubSystem path 默认 mock),`AYScript_Test` **1179/1179** PASS(+ 63 vs INT-01 1116 baseline),`AYDevice_Test` **182/182** PASS。4 commits: `AYDevice a1820a3`, `AYEditor 3a46d2a`, `AYApplication d32a20d`, `AYScript ef9efe4`。**Deferred** → INT-03:`input.axis(name)->float` + `is_just_released`(扩 InputProvider 接口 + semantic analyzer numeric-yielding carve-out)。`LogiaRuntimeBridge::InputProvider` 接口本轮**不变**;新增 InputProvider impl 不影响现有 mock fallback 行为。详见 §14.3。|
+
+### 14.3 P1 — INT-02：Logia input 真接 AYDevice InputMapping（2026-07-15）
+
+**问题**：S3.5 ship 的 `input.is_pressed / is_just_pressed` 走可注入 `LogiaRuntimeBridge::InputProvider*`，默认 `MockInputProvider`(S1 jump-only 行为)。Editor + Application 都没注入真实 provider → Logia `input.is_pressed("jump")` 永远拿 mock 值,PlayerController 完全不看真实键盘。
+
+**前置**：AYDevice Phase-2 已 ship — `KeyboardDevice` / `MouseDevice` / `InputMapping` / `DeviceManager::pollEvents()`(newFrame → 平台 pump → gamepad poll 顺序正确)。
+
+**交付 (4 module, ~270 LOC)**：
+
+1. **`AYDevice/src/AYDeviceInputProvider.{h,cpp}`** (NEW)：`DeviceInputProvider : LogiaRuntimeBridge::InputProvider`,构造接收 `DeviceManager*`,`isPressed/isJustPressed` 转调 `_mgr->mapping().isActionPressed/isActionJustPressed`。`nullptr` manager 安全返回 false(Editor transient teardown 安全)。
+   - **放在 AYDeviceSubSystem target(不是 AYDevice core)** — AYDevice core 保持 AYScript-dep-free(纯虚接口)。AYDeviceSubSystem 已 link AYGameLoop,加 PRIVATE AYScript 是同模式。
+
+2. **`AYEditor`** : `AYEditorApp.h` 加 `_devices` / `_inputProvider` private member(`#pragma once` forward-declare 避免 header leak)。`~EditorApp()` 先 `_inputProvider.reset()` 再 `_devices.reset()` — provider 永远在 devices 之前 unhook。`run()` 把 stack-local `DeviceManager devices` hoist 成 `_devices = make_unique<DeviceManager>()`。`registerSubSystems()` ScriptSubSystem 注册后注入 `DeviceInputProvider`。`CMakeLists.txt` 加 PRIVATE AYDeviceSubSystem link。
+
+3. **`AYApplication`** : `registerSubSystems()` ScriptSubSystem 注册后:`static DeviceInputProvider provider(&DeviceSubSystem::findRegistered()->manager())`,bridge.setInputProvider。Provider 是 static 但安全 — `ScriptSubSystem::shutdown()` 在 INT-02 commit 里加了 `_bridge.setInputProvider(nullptr)` 防御,GameLoop clearAll 顺序保证 bridge 在 DeviceSubSystem delete 之前已 drop reference。
+
+4. **`AYScript/src/AYScriptSubSystem.cpp`**:
+   - `_descriptor.dependencies` 从 `{"ayt.log", "ayt.entity"}` → `{"ayt.log", "Entity", "Device"}`。修 INT-01 R3 silent dep mismatch + 加 Device dep。topo-sort 仍 silently ignore unmatched deps(今天 GameLoop 按 priority 排 Script=100 > Device=0),这一改是 documentation + future-proof。
+   - `shutdown()` 加 `_bridge.setInputProvider(nullptr)` 防御(防止 host 析构顺序假设)。
+
+5. **`AYScript/unittest/Test_LogiaDeviceInput.cpp`** (NEW, 4 用例):
+   - `int02_is_pressed_reads_KeyboardDevice_via_InputMapping` — 3 帧 witness(down/hold/up)。
+   - `int02_is_just_pressed_is_edge_only` — 2 帧 edge check。
+   - `int02_null_device_manager_falls_back_to_false` — Editor teardown 安全。
+   - `int02_default_mock_falls_back_when_no_setInputProvider` — ScriptSubSystem path(Editor + App host 形状)。
+   - 测试 link AYDevice + AYDeviceSubSystem。
+
+**Frame-edge ordering R2**:`DeviceManager::pollEvents()` `newFrame()` 在平台 pump **之前**(`AYDeviceManager.cpp:142-158`),`isActionJustPressed` 边沿在 pump 后可见,同帧 query 拿得到,跨帧清掉。ScriptSubSystem 在 GameLoop update 顺序里跑在 Device 之后(priority Device=0 < Script=100),所以 `input.is_just_pressed` query 永远在 pump 之后。
+
+**Editor keyboard R3 (no-op)**:`AYEditorApp::handleHostMessage` 不 forward `WM_KEYDOWN` 到 `KeyboardDevice`,但 `DeviceManager::wireInputCallbacks()` 已经把 WindowManager key callback 直接接到 `KeyboardDevice::onKeyDown/Up` — 键盘事件走 WindowManager SDL/Win32 pump → callback → KeyboardDevice,不经 `handleHostMessage`。Editor 不用改 `handleHostMessage`。
+
+**Build**: 84 ninja target green,ninja_exit=0。**Tests**: `AYScript_Test` **1179/1179 PASS**(+ 63 cases 从 INT-01 baseline 1116,含 4 新 `int02_*`);`AYDevice_Test` **182/182 PASS**;`AYApplicationTest` PASS。`AYEditor_UnitTests` 不在 build target 里(独立 target,本次 build script 没列),Editor 侧集成走 E2E。
+
+**Deferred** (P1 → INT-03 / later):
+- `input.axis(name) -> float` — 需要扩 `InputProvider` 接口 + semantic analyzer 加 numeric-yielding carve-out(或 sibling `isStaticallyNumeric`)。
+- `input.is_just_released(name) -> bool` — 镜像 `is_just_pressed`,`InputMapping::isActionJustReleased` 已存在,只缺接口扩展。
+- Logia `on_key_down` / `on_key_up` 事件回调 — S4.1(`signal`/`connect`)先。
+- Script-side `device.binding.rebind()` / `InputProfile::applyTo()` — Editor runtime API,INT-04。
 
 ---
 
