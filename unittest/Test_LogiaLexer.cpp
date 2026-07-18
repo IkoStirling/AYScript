@@ -123,4 +123,38 @@ TEST_CASE(string_literal_unterminated) {
     CHECK(tokens[0].type == TokenType::Unknown);
 }
 
+// S4.1 (2026-07-15): `signal` is now a lexer-reserved keyword for the
+// per-component signal-declaration surface. The companion call surfaces
+// `emit` and `connect` are deliberately NOT keywords — they stay
+// Identifiers and are recognized by analyzer shape (free-function
+// ambient pattern, same as input/log/time). These two tests pin both
+// halves so a future commit can't accidentally blanket-reserve emit /
+// connect.
+
+TEST_CASE(keyword_signal) {
+    std::vector<Token> tokens;
+    tokenize("signal", tokens);
+    CHECK(tokens.size() == 2u);
+    CHECK(tokens[0].type == TokenType::Signal);
+    CHECK(tokens[0].lexeme == "signal");
+    CHECK(tokens[1].type == TokenType::EndOfFile);
+}
+
+TEST_CASE(emit_and_connect_are_identifiers_not_keywords) {
+    // S4.1: `emit` and `connect` are analyzer shape-recognised
+    // ambient call names — NOT reserved by the lexer. This mirrors how
+    // `input` / `log` / `time` work: they're ordinary Identifiers that
+    // the analyzer treats specially when they appear as a CallExpr
+    // callee. Pinning this here means a future refactor can't blanket-
+    // reserve them without breaking user code that uses those names as
+    // variables / helpers (e.g. `var emit = ...` should still parse).
+    std::vector<Token> tokens;
+    tokenize("emit connect", tokens);
+    CHECK(tokens.size() == 3u);
+    CHECK(tokens[0].type == TokenType::Identifier);
+    CHECK(tokens[0].lexeme == "emit");
+    CHECK(tokens[1].type == TokenType::Identifier);
+    CHECK(tokens[1].lexeme == "connect");
+}
+
 TEST_SUITE_END

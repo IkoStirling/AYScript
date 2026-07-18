@@ -1,0 +1,67 @@
+// S4.1 (2026-07-15) — signal_demo.logia
+//
+// Demonstrates the per-component event surface introduced in S4.1:
+//
+//   - `signal NAME(params)?;` declares an event at script-block scope.
+//     Pure metadata — analyzer cross-checks signal-name / arity /
+//     type compat against `emit(...)` and `connect(...)` calls.
+//   - `connect("name", handler_fn)` registers a handler. The handler
+//     is a script-block `function` (not a lifecycle). The connect
+//     call wraps the handler in a closure that injects `self`, so the
+//     handler body can read / mutate fields just like a lifecycle body.
+//   - `emit("name", ...args)` fires the event. All registered handlers
+//     run, in registration order, with the supplied args forwarded.
+//
+// `emit` and `connect` are NOT lexer-reserved keywords — the analyzer
+// shape-recognises them as ordinary CallExprs whose callee is the
+// IdentifierExpr "emit" / "connect". This mirrors how `input` /
+// `log` / `time` work, and means a user can still write
+// `var emit = 5` if they really want (analyzer ignores those uses).
+//
+// Multi-instance isolation: each PlayerController instance has its
+// own `self` lightuserdata → its own `self._signals` lazy-init table.
+// Emitting on instance A never reaches instance B's handlers. See
+// design §14.5 S4.1 row for the full spec.
+
+script PlayerController {
+
+    signal damaged(amount: int)         // event with one int param
+    signal healed(amount: int)
+    signal died()                        // zero-param event
+
+    on_start() {
+        // Register handlers once. The closure-wrap that codegen
+        // applies means `self` is in scope inside `on_damaged` /
+        // `on_healed` / `on_died`, even though they aren't
+        // lifecycle methods.
+        connect("damaged", on_damaged)
+        connect("healed", on_healed)
+        connect("died", on_died)
+    }
+
+    on_update(dt: float) {
+        if input.is_pressed("hit") {
+            emit("damaged", 10)
+        }
+        if input.is_pressed("heal") {
+            emit("healed", 5)
+        }
+        if self.hp <= 0 {
+            emit("died")
+        }
+    }
+
+    function on_damaged(amount: int) {
+        self.hp = self.hp - amount
+        log.info("PlayerController hit for " + tostring(amount))
+    }
+
+    function on_healed(amount: int) {
+        self.hp = self.hp + amount
+        log.info("PlayerController healed for " + tostring(amount))
+    }
+
+    function on_died() {
+        log.info("PlayerController died")
+    }
+}

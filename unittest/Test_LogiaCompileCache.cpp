@@ -300,4 +300,43 @@ TEST_CASE(shutdown_wipes_compile_cache) {
     CHECK(bridge.compileCacheHitCount()  == 0u);
 }
 
+// S4.1 (2026-07-15): the pipeline version bump (24 → 25) forces
+// every pre-existing cache entry to miss on first load after the
+// bump. We can't test the cross-process migration (a process running
+// v24 doesn't exist any more), but we CAN pin that a fresh bridge
+// sees the expected version constant — and that loading a
+// signal-bearing script compiles successfully end-to-end (the cache
+// key implicitly includes the version, so a miss on first load is
+// the success path).
+TEST_CASE(s41_cache_version_bump_force_first_load_miss) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+
+    const char* signalSrc = R"(
+script SignalScript {
+    signal ping()
+    on_start() {
+        connect("ping", on_ping)
+    }
+    on_update(dt: float) {
+        emit("ping")
+    }
+    function on_ping() {
+        __test_witness = "pinged"
+    }
+}
+)";
+    // First load: miss (counter == 1).
+    CHECK(loadScriptDefault(bridge, "SignalScript", signalSrc, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.compileCacheMissCount() == 1u);
+    CHECK(bridge.compileCacheHitCount()  == 0u);
+    CHECK(bridge.hasScript("SignalScript"));
+
+    // Second load with identical source: hit (counter == 1, miss unchanged).
+    CHECK(loadScriptDefault(bridge, "SignalScript", signalSrc, errors));
+    CHECK(bridge.compileCacheHitCount()  == 1u);
+    CHECK(bridge.compileCacheMissCount() == 1u);
+}
+
 TEST_SUITE_END

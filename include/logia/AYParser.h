@@ -26,6 +26,7 @@ private:
     std::unique_ptr<Stmt> parseVarDecl();
     std::unique_ptr<Stmt> parseLifecycleFunc(LifecycleKind kind, const Token& keywordTok);   // S5 ED-02: keywordTok for sourceLoc
     std::unique_ptr<Stmt> parseFunctionDeclStmt();   // 2026-07-11 audit fix
+    std::unique_ptr<Stmt> parseSignalDecl(const Token& signalTok);   // S4.1 (2026-07-15): per-component signal declaration
     std::unique_ptr<Stmt> parseStatement();
     std::vector<Param> parseParamList();
 

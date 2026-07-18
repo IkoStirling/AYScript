@@ -5,6 +5,8 @@
 // functions with no parameters, `self.field` member access.
 
 #include "AYScript.h"
+#include "logia/AYParser.h"
+#include "logia/AYLexer.h"
 #include "AYTest.h"
 
 using namespace ayt::script::logia;
@@ -346,6 +348,214 @@ script T {
         }
     }
     CHECK(found);
+}
+
+// S4.1 (2026-07-15): per-component signal declarations are accepted
+// at script-block scope. Companion call sites `emit(...)` and
+// `connect(...)` are ordinary CallExprs — the parser does NOT need
+// to know they are special; analyzer shape-recognition does that.
+// These tests pin the parser-side surface.
+
+TEST_CASE(s41_parse_signal_zero_params) {
+    const char* source = R"(
+script PlayerController {
+    signal died()
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    // S4.1 surface is parser-side accept-only. Semantic validation
+    // (signal name resolution, type checks) is the analyzer's job in
+    // a later commit; the parser here just has to produce a
+    // SignalDeclStmt with the right name and empty param list.
+    CHECK(result.success);
+    CHECK(result.program && result.program->scripts.size() == 1u);
+    const auto& members = result.program->scripts[0]->members;
+    CHECK(members.size() == 1u);
+    auto* sig = dynamic_cast<SignalDeclStmt*>(members[0].get());
+    CHECK(sig != nullptr);
+    CHECK(sig->name == "died");
+    CHECK(sig->params.empty());
+    // S5 ED-02: sourceLoc stamps at the signal name position.
+    CHECK(sig->sourceLoc.line >= 2);
+}
+
+TEST_CASE(s41_parse_signal_with_typed_params) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int, source: string)
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    const auto& members = result.program->scripts[0]->members;
+    CHECK(members.size() == 1u);
+    auto* sig = dynamic_cast<SignalDeclStmt*>(members[0].get());
+    CHECK(sig != nullptr);
+    CHECK(sig->name == "damaged");
+    CHECK(sig->params.size() == 2u);
+    CHECK(sig->params[0].name == "amount");
+    CHECK(sig->params[0].typeName == "int");
+    CHECK(sig->params[1].name == "source");
+    CHECK(sig->params[1].typeName == "string");
+}
+
+TEST_CASE(s41_parse_multiple_signal_decls) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    signal died()
+    signal healed(amount: int)
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    const auto& members = result.program->scripts[0]->members;
+    CHECK(members.size() == 3u);
+    CHECK(dynamic_cast<SignalDeclStmt*>(members[0].get()) != nullptr);
+    CHECK(dynamic_cast<SignalDeclStmt*>(members[1].get()) != nullptr);
+    CHECK(dynamic_cast<SignalDeclStmt*>(members[2].get()) != nullptr);
+}
+
+TEST_CASE(s41_parse_signal_optional_trailing_semicolon) {
+    // Mirrors `var x: int = 5;` style — trailing `;` is optional.
+    const char* source = R"(
+script P {
+    signal hit();
+    signal heal(amount: int);
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    const auto& members = result.program->scripts[0]->members;
+    CHECK(members.size() == 2u);
+    CHECK(dynamic_cast<SignalDeclStmt*>(members[0].get()) != nullptr);
+    CHECK(dynamic_cast<SignalDeclStmt*>(members[1].get()) != nullptr);
+}
+
+TEST_CASE(s41_parse_signal_in_lifecycle_body_is_error) {
+    // Same restriction as `function NAME(...)` inside a lifecycle
+    // body — the gate in parseStatement rejects this with a
+    // tailored message.
+    const char* source = R"(
+script T {
+    on_start() {
+        signal doomed()
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK_FALSE(result.success);
+    bool found = false;
+    for (const auto& e : result.errors) {
+        if (e.message.find("signal declarations only allowed as script members")
+            != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE(s41_parse_signal_emit_and_connect_are_call_exprs) {
+    // `emit` and `connect` are NOT lexer-reserved; the parser treats
+    // them as ordinary Identifier callees inside a CallExpr. The
+    // analyzer stamps `ambientCall` on them in commit 4, but
+    // the AST shape here is a regular CallExpr(IdentifierExpr("emit"),
+    // [...]).
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_start() {
+        connect("damaged", on_damaged)
+    }
+    on_update(dt: float) {
+        if input.is_pressed("hit") {
+            emit("damaged", 10)
+        }
+    }
+    function on_damaged(amount: int) {
+        log.info("hit")
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult result = compiler.compile(source);
+    CHECK(result.success);
+    CHECK(result.program && result.program->scripts.size() == 1u);
+    // Find the on_update body and look for the emit CallExpr. Pin
+    // that the callee is an IdentifierExpr named "emit" (NOT
+    // member-of-self — analyzer shape comes later).
+    const auto& members = result.program->scripts[0]->members;
+    LifecycleFuncDecl* updateFn = nullptr;
+    for (const auto& m : members) {
+        auto* lc = dynamic_cast<LifecycleFuncDecl*>(m.get());
+        if (lc && lc->kind == LifecycleKind::OnUpdate) {
+            updateFn = lc;
+            break;
+        }
+    }
+    CHECK(updateFn != nullptr);
+    CHECK_FALSE(updateFn->body.empty());
+    auto* ifStmt = dynamic_cast<IfStmt*>(updateFn->body[0].get());
+    CHECK(ifStmt != nullptr);
+    CHECK_FALSE(ifStmt->thenBranch.empty());
+    auto* emitStmt = dynamic_cast<ExprStmt*>(ifStmt->thenBranch[0].get());
+    CHECK(emitStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(emitStmt->expr.get());
+    CHECK(call != nullptr);
+    auto* calleeId = dynamic_cast<IdentifierExpr*>(call->callee.get());
+    CHECK(calleeId != nullptr);
+    CHECK(calleeId->name == "emit");
+    CHECK(call->args.size() == 2u);
+}
+
+// S4.1b (2026-07-18): pin that `disconnect(id)` is parsed as a
+// plain `CallExpr` whose callee is `IdentifierExpr("disconnect")`
+// with exactly 1 argument — same shape-recognition pattern as
+// `emit` / `connect`. The analyzer stamps `ambientCall =
+// AmbientCallKind::Disconnect`; codegen lowers to
+// `__ay_disconnect(self, id)`.
+TEST_CASE(s41b_parse_disconnect_is_call_expr) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    var hit_handler: int = 0
+    on_destroy() {
+        disconnect(hit_handler)
+    }
+    function on_damaged(amount: int) { }
+}
+)";
+    std::vector<Token> tokens;
+    tokenize(source, tokens);
+    ayt::script::logia::Parser parser(tokens);
+    auto program = parser.parse();
+    CHECK(program != nullptr);
+    CHECK(!parser.hasErrors());
+    CHECK(program->scripts.size() == 1u);
+    // members[0] = signal, [1] = var, [2] = on_destroy, [3] = function
+    auto* onDestroy = dynamic_cast<LifecycleFuncDecl*>(
+        program->scripts[0]->members[2].get());
+    CHECK(onDestroy != nullptr);
+    CHECK(onDestroy->body.size() >= 1u);
+    auto* exprStmt = dynamic_cast<ExprStmt*>(onDestroy->body[0].get());
+    CHECK(exprStmt != nullptr);
+    auto* call = dynamic_cast<CallExpr*>(exprStmt->expr.get());
+    CHECK(call != nullptr);
+    auto* calleeId = dynamic_cast<IdentifierExpr*>(call->callee.get());
+    CHECK(calleeId != nullptr);
+    CHECK(calleeId->name == "disconnect");
+    CHECK(call->args.size() == 1u);
+    // The id arg should be an IdentifierExpr referencing the
+    // `var hit_handler` declared above.
+    auto* idArg = dynamic_cast<IdentifierExpr*>(call->args[0].get());
+    CHECK(idArg != nullptr);
+    CHECK(idArg->name == "hit_handler");
 }
 
 TEST_SUITE_END

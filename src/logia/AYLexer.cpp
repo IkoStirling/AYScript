@@ -151,6 +151,13 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         {"on_destroy", TokenType::OnDestroy},
         {"run", TokenType::Run},  // S3.8b: Tool host entry point.
         {"function", TokenType::Function},  // 2026-07-11: script-block helper.
+        // S4.1 (2026-07-15): per-component signal declaration. `emit`
+        // and `connect` are deliberately NOT keywords — the analyzer
+        // shape-recognizes them inside `CallExpr` only (free function
+        // ambient pattern), so user identifiers named `emit` /
+        // `connect` continue to work elsewhere. Mirrors the input /
+        // log / time ambient recognition surface.
+        {"signal", TokenType::Signal},
         // NOTE: `local` is intentionally NOT reserved (would break
         // the 15 R3/R4 tests that write `local s = ...` and rely on
         // the implicit-global declaration). SemanticAnalyzer emits a

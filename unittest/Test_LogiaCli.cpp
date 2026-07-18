@@ -17,6 +17,7 @@
 #include "AYTest.h"
 
 #include "CliCompile.h"
+#include "CliTestPaths.h"
 #include "logia/AYCompilerError.h"
 #include "logia/AYLogia.h"
 
@@ -68,19 +69,28 @@ std::string readFile(const std::string& path)
     return oss.str();
 }
 
-// Locate the ays-logia binary. CMake's add_test knows the path; the
-// binary lives at <build>/AYRuntime/AYScript/cli/ays-logia.exe. The
-// unittest binary runs from <build>/AYRuntime/AYScript/unittest/, so
-// the relative path is ../cli/ays-logia.exe. Try a few candidates so
-// the same test works whether the cwd is the unittest dir or a
-// parent.
+// Locate the ays-logia binary. Prefer the CMake-generated absolute path
+// (works from VS debugger / any cwd). Fall back to relative candidates
+// for manual runs from the unittest directory.
 std::string locateBinary()
 {
+#ifdef AYSCRIPT_AYS_LOGIA_EXE_PATH
+    {
+        std::ifstream f(AYSCRIPT_AYS_LOGIA_EXE_PATH, std::ios::binary);
+        if (f.good()) {
+            return AYSCRIPT_AYS_LOGIA_EXE_PATH;
+        }
+    }
+#endif
     const std::vector<std::string> candidates = {
         "../cli/ays-logia.exe",
+        "../cli/ays-logia",
         "cli/ays-logia.exe",
+        "cli/ays-logia",
         "../../cli/ays-logia.exe",
+        "../../cli/ays-logia",
         "ays-logia.exe",
+        "ays-logia",
         "Release/ays-logia.exe",
         "Debug/ays-logia.exe",
     };
@@ -89,6 +99,16 @@ std::string locateBinary()
         if (f.good()) return c;
     }
     return {};
+}
+
+// Quote the executable when the path contains spaces (CreateProcess).
+std::string makeCliCommand(const std::string& bin, const std::string& args)
+{
+    std::string exe = bin;
+    if (exe.find(' ') != std::string::npos) {
+        exe = "\"" + exe + "\"";
+    }
+    return exe + " " + args;
 }
 
 struct ExecResult {
@@ -222,15 +242,16 @@ ExecResult runCommand(const std::string& cmd)
     return out;
 }
 
-// Bail-out macro for end-to-end tests when the ays-logia binary
-// cannot be located. Returns from the test function so subsequent
-// CHECKs aren't evaluated against garbage data.
+// Hard requirement for end-to-end tests — missing binary is a failure,
+// not a silent skip (CI / local must build target `ays-logia`).
 #define REQUIRE_CLI_BIN(bin)                                                    \
     do {                                                                        \
         if ((bin).empty()) {                                                    \
-            fprintf(stderr, "[skip] ays-logia binary not found\n");             \
-            return;                                                             \
+            fprintf(stderr,                                                       \
+                    "[FAIL] ays-logia binary not found — build target "         \
+                    "ays-logia (CMake: CliTestPaths.h)\n");                     \
         }                                                                       \
+        CHECK_FALSE((bin).empty());                                             \
     } while (0)
 
 } // namespace
@@ -350,7 +371,8 @@ script PlayerController {
 )";
     }
 
-    ExecResult r = runCommand(bin + " compile " + srcPath + " -o " + outPath);
+    ExecResult r = runCommand(
+        makeCliCommand(bin, "compile " + srcPath + " -o " + outPath));
     CHECK(r.exitCode == 0);
     CHECK(r.stderrText.find("error:") == std::string::npos);
     const std::string lua = readFile(outPath);
@@ -375,8 +397,8 @@ script BuildTool {
 )";
     }
 
-    ExecResult r = runCommand(bin + " compile " + srcPath +
-                              " --host tool -o " + outPath);
+    ExecResult r = runCommand(
+        makeCliCommand(bin, "compile " + srcPath + " --host tool -o " + outPath));
     CHECK(r.exitCode == 0);
     const std::string lua = readFile(outPath);
     CHECK(lua.find("function M.run()") != std::string::npos);
@@ -395,7 +417,7 @@ TEST_CASE(cli_binary_compile_syntax_error_exits_nonzero) {
         f << "script Bad { on_start() { log.info(\"x\"";  // missing braces
     }
 
-    ExecResult r = runCommand(bin + " compile " + srcPath);
+    ExecResult r = runCommand(makeCliCommand(bin, "compile " + srcPath));
     CHECK(r.exitCode != 0);
     // Diagnostic must mention `error:` on stderr for grep-friendliness.
     CHECK(r.stderrText.find("error:") != std::string::npos);
@@ -407,7 +429,7 @@ TEST_CASE(cli_binary_compile_syntax_error_exits_nonzero) {
 TEST_CASE(cli_binary_unknown_flag_exits_with_usage) {
     const std::string bin = locateBinary();
     REQUIRE_CLI_BIN(bin);
-    ExecResult r = runCommand(bin + " compile --no-such-flag");
+    ExecResult r = runCommand(makeCliCommand(bin, "compile --no-such-flag"));
     CHECK(r.exitCode == 2);  // bad usage
     CHECK(r.stderrText.find("Usage") != std::string::npos);
 }
@@ -415,7 +437,7 @@ TEST_CASE(cli_binary_unknown_flag_exits_with_usage) {
 TEST_CASE(cli_binary_missing_subcommand_exits_with_usage) {
     const std::string bin = locateBinary();
     REQUIRE_CLI_BIN(bin);
-    ExecResult r = runCommand(bin);
+    ExecResult r = runCommand(makeCliCommand(bin, ""));
     CHECK(r.exitCode == 2);
     CHECK(r.stderrText.find("Usage") != std::string::npos);
 }
@@ -442,7 +464,7 @@ TEST_CASE(cli_s5ed02_analyzer_error_includes_line_col) {
              "}\n";
     }
 
-    ExecResult r = runCommand(bin + " compile " + srcPath);
+    ExecResult r = runCommand(makeCliCommand(bin, "compile " + srcPath));
     CHECK(r.exitCode != 0);
     // The analyzer-side error is on line 3 (where `for (var i : "five")`
     // is planted; the leading `\n` in the source puts `script T {`
@@ -494,7 +516,8 @@ TEST_CASE(cli_s5ed03_codegen_output_unchanged_by_sourcemap_refactor) {
              "}\n";
     }
 
-    ExecResult r = runCommand(bin + " compile " + srcPath + " -o " + outPath);
+    ExecResult r = runCommand(
+        makeCliCommand(bin, "compile " + srcPath + " -o " + outPath));
     CHECK(r.exitCode == 0);
 
     const std::string lua = readFile(outPath);

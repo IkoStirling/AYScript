@@ -1,0 +1,67 @@
+// disconnect_demo.logia — S4.1b (2026-07-18) surface demo.
+//
+// Mirrors the `signal_demo.logia` PlayerController shape but
+// completes the disconnect half of the per-component event surface:
+//
+//   1. `signal NAME(params)?;` declares an event with a typed
+//      parameter list (compile-time arity + type validation).
+//   2. `connect("name", handler_fn)` returns an int connection id.
+//      The id is per-instance and required to be stored in
+//      `var h: int` (Logia's static-only philosophy — no init-
+//      position type inference, so `var h = connect(...)` without
+//      an annotation is rejected at compile time).
+//   3. `disconnect(id)` tombstone-marks the handler by id. The
+//      runtime uses dense-mark (rec.dead=true), not list[i]=nil,
+//      because Lua's ipairs() stops at the first nil hole.
+//
+// End-to-end flow:
+//   on_start     — register handler, store id in `hit_handler`
+//   on_update    — emit triggers the registered handler once
+//   on_destroy   — disconnect; subsequent emits no longer fire
+
+script DisconnectDemo {
+
+    signal damaged(amount: int)
+    signal healed(amount: int)
+
+    var hit_handler: int = 0
+
+    on_start() {
+        // S4.1b (2026-07-18): connect returns an int id that we
+        // must capture to later disconnect. Without the `: int`
+        // annotation on `hit_handler`, Logia's analyzer rejects
+        // the program ("unknown type ''") — there is no
+        // expression-position type inference.
+        hit_handler = connect("damaged", on_damaged)
+    }
+
+    on_update(dt: float) {
+        if input.is_pressed("hit") {
+            emit("damaged", 10)
+        }
+        if input.is_pressed("heal") {
+            emit("healed", 5)
+        }
+    }
+
+    on_destroy() {
+        // Tombstone the handler. After this point, even if
+        // `emit("damaged", ...)` fires, the handler no longer
+        // runs. Multiple disconnects of the same id are safe
+        // (helper is a no-op on missing ids).
+        disconnect(hit_handler)
+        hit_handler = 0
+    }
+
+    function on_damaged(amount: int) {
+        // S4.1 D-2 self-bind: the helper body sees `self` via the
+        // `__ay_bound_self` slot that __ay_emit stamps around
+        // handler dispatch. self.hp is reflect-resolved against
+        // the host type's AYReflect registry.
+        self.hp = self.hp - amount
+    }
+
+    function on_healed(amount: int) {
+        self.hp = self.hp + amount
+    }
+}

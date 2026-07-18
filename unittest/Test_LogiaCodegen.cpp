@@ -296,4 +296,147 @@ script PlayerController {
     CHECK_FALSE(contains(lua, "__tmp_"));
 }
 
+// S4.1 (2026-07-15): per-component signal codegen. The helper block
+// is emitted ONCE per script (only when the script declares ≥1
+// signal), and emit/connect CallExprs lower to specialised Lua
+// (not generic dispatch). These tests pin both halves of the
+// codegen surface and the source-map anchor contract (S5 ED-03
+// interaction — runtime panic translation must still point at the
+// signal line, not the helper block).
+
+TEST_CASE(s41_codegen_signal_script_emits_helper_block) {
+    // Pin the full helper block shape: M._signalNames table +
+    // __ay_connect + __ay_emit helpers, in that order, before any
+    // lifecycle / function body.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_start() { }
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    const std::string& lua = r.lua;
+    CHECK(containsFlat(lua, "M._signalNames = { [\"damaged\"] = true }"));
+    CHECK(containsFlat(lua, "local function __ay_connect(self, name, handler)"));
+    CHECK(containsFlat(lua, "local function __ay_emit(self, name, ...)"));
+    // The two helpers must appear BEFORE the lifecycle emission.
+    const size_t helperPos = lua.find("__ay_connect");
+    const size_t lifecyclePos = lua.find("function M.on_start");
+    CHECK(helperPos != std::string::npos);
+    CHECK(lifecyclePos != std::string::npos);
+    CHECK(helperPos < lifecyclePos);
+}
+
+TEST_CASE(s41_codegen_no_signal_script_emits_no_helper_block) {
+    // Zero-cost guard: scripts that don't declare signals must not
+    // pay for the helper block / metadata table.
+    const char* source = R"(
+script PlayerController {
+    on_update(dt: float) {
+        log.info("hello")
+    }
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    const std::string& lua = r.lua;
+    CHECK_FALSE(contains(lua, "__ay_connect"));
+    CHECK_FALSE(contains(lua, "__ay_emit"));
+    CHECK_FALSE(contains(lua, "_signalNames"));
+}
+
+TEST_CASE(s41_codegen_emit_lowering_shape) {
+    // emit("damaged", 10) lowers to __ay_emit(self, "damaged", 10).
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit("damaged", 10)
+    }
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    CHECK(contains(r.lua, "__ay_emit(self, \"damaged\", 10)"));
+    // And the bare-name `emit(...)` MUST NOT leak into the chunk —
+    // that would mean the analyzer's stamp didn't take effect.
+    CHECK_FALSE(contains(r.lua, "emit(\"damaged\""));
+}
+
+TEST_CASE(s41_codegen_connect_lowering_shape_with_self_bind) {
+    // connect("damaged", on_damaged) lowers to a closure-wrapped
+    // handler call that injects `self`:
+    //   __ay_connect(self, "damaged", function(...) local self = ...; return on_damaged(...) end)
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_start() {
+        connect("damaged", on_damaged)
+    }
+    function on_damaged(amount: int) {}
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    CHECK(contains(r.lua, "__ay_connect(self, \"damaged\", function(...) return on_damaged(...) end)"));
+}
+
+TEST_CASE(s41_codegen_multiple_signals_share_one_signalNames_table) {
+    // Three signals declared → one `M._signalNames` table with three
+    // entries, not three separate emissions.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    signal died()
+    signal healed(amount: int)
+    on_start() { }
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    CHECK(containsFlat(r.lua, "[\"damaged\"] = true"));
+    CHECK(containsFlat(r.lua, "[\"died\"] = true"));
+    CHECK(containsFlat(r.lua, "[\"healed\"] = true"));
+    // Count the helper block emission: `local function __ay_connect`
+    // should appear exactly once.
+    size_t count = 0;
+    size_t pos = 0;
+    while ((pos = r.lua.find("local function __ay_connect", pos))
+           != std::string::npos) {
+        ++count;
+        ++pos;
+    }
+    CHECK(count == 1u);
+}
+
+TEST_CASE(s41_codegen_helper_block_anchored_to_signal_line) {
+    // S5 ED-03 interaction: when a runtime panic fires inside one
+    // of the helpers, the source-map must point at the signal
+    // declaration line, not the helper's own `local function`
+    // line. Pin that the source map has a non-zero entry for the
+    // signal-decl line.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_start() { }
+}
+)";
+    const auto r = compileLogiaToLua(source);
+    CHECK(r.success);
+    // Pin that the source map is non-empty and has at least one
+    // anchor pointing at line 3 (the signal decl). We don't pin
+    // a specific index — codegen layout may shift between commits
+    // — but the line must be reachable.
+    CHECK_FALSE(r.sourceMap.luaLineToSource.empty());
+    bool foundSignalAnchor = false;
+    for (const auto& loc : r.sourceMap.luaLineToSource) {
+        if (loc.line == 3 && loc.column >= 0) {
+            foundSignalAnchor = true;
+            break;
+        }
+    }
+    CHECK(foundSignalAnchor);
+}
+
 TEST_SUITE_END

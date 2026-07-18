@@ -796,4 +796,59 @@ script T { on_start() { for (var i : 0, 10, 0) { } } }
           || _lastDump.errorsContain("step"));
 }
 
+// S4.1 (2026-07-15): golden dump for a signal-bearing script.
+// Pins the full emit shape end-to-end:
+//   - M._signalNames metadata table
+//   - __ay_connect + __ay_emit local helpers
+//   - emit() lowering (no bare `emit(...)` leakage)
+//   - connect() lowering with closure-wrap self-bind
+// If a future commit reorders helpers / changes the call args, the
+// golden dump here must be updated alongside it (single point of
+// truth for the surface shape).
+TEST_CASE(emit_dump_40_s41_signal_surface) {
+    const char* src = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    signal died()
+    on_start() {
+        connect("damaged", on_damaged)
+        connect("died", on_died)
+    }
+    on_update(dt: float) {
+        if input.is_pressed("hit") {
+            emit("damaged", 10)
+        }
+    }
+    function on_damaged(amount: int) {}
+    function on_died() {}
+}
+)";
+    dumpCase("40_s41_signal_surface", src, /*expectSuccess=*/true);
+    // Helper block ordering: M._signalNames first, then connect +
+    // emit helpers, then lifecycle bodies.
+    const std::string& lua = _lastDump.emittedLua;
+    const size_t namesPos = lua.find("M._signalNames");
+    const size_t connectPos = lua.find("local function __ay_connect");
+    const size_t emitPos = lua.find("local function __ay_emit");
+    const size_t lifecyclePos = lua.find("function M.on_start");
+    CHECK(namesPos != std::string::npos);
+    CHECK(connectPos != std::string::npos);
+    CHECK(emitPos != std::string::npos);
+    CHECK(lifecyclePos != std::string::npos);
+    CHECK(namesPos < connectPos);
+    CHECK(connectPos < emitPos);
+    CHECK(emitPos < lifecyclePos);
+    // Both signal names land in the metadata table.
+    CHECK(containsFlat(lua, "[\"damaged\"] = true"));
+    CHECK(containsFlat(lua, "[\"died\"] = true"));
+    // emit() lowered to __ay_emit(self, ...).
+    CHECK(containsFlat(lua, "__ay_emit(self, \"damaged\", 10)"));
+    CHECK(!containsFlat(lua, "emit(\"damaged\", 10)"));
+    // connect() lowered with closure-wrap self-bind.
+    CHECK(containsFlat(lua,
+        "__ay_connect(self, \"damaged\", function(...) return on_damaged(...) end)"));
+    CHECK(containsFlat(lua,
+        "__ay_connect(self, \"died\", function(...) return on_died(...) end)"));
+}
+
 TEST_SUITE_END

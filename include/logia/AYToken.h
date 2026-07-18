@@ -20,6 +20,15 @@ enum class TokenType : uint8_t {
                     // lifecycle body it produces a hard error
                     // ("function declarations only allowed as
                     // script members").
+    Signal,         // S4.1 (2026-07-15): per-component signal
+                    // declaration `signal NAME(params)?;`. Parser
+                    // restricts to ScriptDecl members; inside a
+                    // lifecycle body it produces a hard error
+                    // ("signal declarations only allowed as
+                    // script members"). `emit` and `connect` are
+                    // ordinary Identifiers — analyzer shape-recognizes
+                    // them inside `CallExpr` (mirrors the input/log/
+                    // time ambient pattern; not lexer-reserved).
     If,
     Else,
     While,            // R5.0 (2026-07-13): `while (cond) { body }` → `while cond do ... end`

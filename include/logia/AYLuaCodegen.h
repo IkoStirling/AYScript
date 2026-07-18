@@ -162,6 +162,13 @@ private:
     std::string escapeString(const std::string& s) const;
     void errorAt(const Token& tok, const std::string& message);
 
+    // S4.1 D-2: inside script-block `function` helpers, bare `self`
+    // is not a Lua parameter (helpers are top-level). Emit the
+    // module-local `__ay_bound_self` slot that `__ay_emit` sets for
+    // the duration of handler dispatch — so connected handlers see
+    // the same receiver the emit ran on.
+    const char* selfLua() const;
+
     LuaCodegenOptions _options;
     std::string _out;
     int _indent = 0;
@@ -176,6 +183,10 @@ private:
     // codegen then skips the reflect-call rewrite and keeps S2.5
     // bare member access (a runtime no-op, matches existing tests).
     std::string _currentHostTypeName;
+
+    // S4.1 D-2: true while emitting a script-block FunctionDeclStmt
+    // body. Drives `selfLua()` toward `__ay_bound_self`.
+    bool _emittingScriptHelper = false;
 
     // S5 ED-03 (2026-07-15): per-line Lua-line → Logia-source-location
     // map populated alongside `_out` by `writeLine()`. Exposed via

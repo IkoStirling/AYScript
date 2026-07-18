@@ -939,6 +939,90 @@ bool SemanticAnalyzer::isAmbientIdentifier(const std::string& name)
     return ambientIdentifiers().count(name) > 0;
 }
 
+// S4.1 (2026-07-15): signal-arg-vs-signal-param type compat check.
+// Used by analyzeEmitCall to validate that each supplied emit arg
+// matches the declared signal parameter type. The Logia type
+// lattice has only the four built-in numeric / string leaves that
+// can appear at a signal-arg site today (no struct args at the
+// signal boundary in v1). Returns true on a clean match; false on
+// mismatch OR when the arg's static type cannot be determined
+// (un-inferable — caller emits a soft warning, not a hard error).
+//
+// Notes for future tightening:
+//   - `int ↔ float` are considered compatible when the declared
+//     param is `int` (Lua numbers are all float64; the runtime
+//     passes through cleanly). Declared param `float` rejects int
+//     because Logia has no implicit promotion (R5.2-C precedent).
+//   - Un-inferable args (e.g. an IdentifierExpr with no
+//     resolvedDecl and no ambient membership) return false with a
+//     soft-warn path, NOT a hard error, to keep the door open for
+//     forwarded dynamic arg shapes later.
+bool SemanticAnalyzer::signalArgMatchesParam(Expr* arg, const std::string& paramTypeName)
+{
+    if (!arg) return false;
+    if (paramTypeName == "int" || paramTypeName == "float" ||
+        paramTypeName == "string" || paramTypeName == "bool") {
+        // Walk to a leaf — for now, only literals and ambient
+        // signals get a static type; identifiers get a type from
+        // `_scope` (VarDeclStmt resolvedType) or from
+        // resolvedType/resolvedDecl on the AST node.
+        if (auto* lit = dynamic_cast<LiteralExpr*>(arg)) {
+            // LiteralExpr::Value variant dispatch:
+            //   int/float → numeric; string → string; bool → bool.
+            if (auto* iv = std::get_if<int>(&lit->value)) {
+                (void)iv;
+                return paramTypeName == "int" || paramTypeName == "float";
+            }
+            if (auto* fv = std::get_if<float>(&lit->value)) {
+                (void)fv;
+                return paramTypeName == "float";
+            }
+            if (auto* sv = std::get_if<std::string>(&lit->value)) {
+                (void)sv;
+                return paramTypeName == "string";
+            }
+            if (auto* bv = std::get_if<bool>(&lit->value)) {
+                (void)bv;
+                return paramTypeName == "bool";
+            }
+            return false;
+        }
+        if (auto* id = dynamic_cast<IdentifierExpr*>(arg)) {
+            // Undeclared identifier — Lua-style implicit global;
+            // the value's runtime type is unknown at compile time.
+            // Soft-warn later; for hard compat check, return false.
+            auto it = _scope.find(id->name);
+            if (it == _scope.end()) return false;
+            // Declared identifier with a builtin type.
+            // resolvedType is non-null for reflect-registered
+            // types and null for builtin-int (per analyzeVarDecl).
+            // Fall back to resolvedDecl->typeName via the
+            // ScopeEntry's type-name lookup. For S4.1 we only
+            // support builtin types at the signal param site.
+            // `id->resolvedDecl` is a VarDeclStmt* for declared
+            // locals; we can read its typeName.
+            if (auto* var = static_cast<const VarDeclStmt*>(id->resolvedDecl)) {
+                return var->typeName == paramTypeName;
+            }
+            return false;
+        }
+        if (auto* mem = dynamic_cast<MemberExpr*>(arg)) {
+            // self.<field> leaf — read ITypeInfo* name and check
+            // the builtin-type name against the declared param.
+            if (mem->resolvedType) {
+                const std::string name(mem->resolvedType->getName());
+                // Reflect-registered primitives map to "int" /
+                // "float" / "bool" — same names as builtin.
+                return name == paramTypeName;
+            }
+            return false;
+        }
+    }
+    // Struct / unknown param type — not supported at signal
+    // boundary in v1; reject with a clear error in the caller.
+    return false;
+}
+
 // R5.2-H.b (2026-07-14): read-only accessor for the
 // `_loopCounters` stack, used by `leafIsStaticallyPrimitive`
 // to recognize for-loop counter identifiers as int leaves in
@@ -1099,6 +1183,21 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
         _scope["self"] = e;
     }
 
+    // S4.1 (2026-07-15): signal-declaration pre-pass — collect signal
+    // names + parameter signatures BEFORE walking bodies, so that a
+    // `connect("damaged", on_damaged)` inside `on_start` can reference
+    // a signal declared textually below it. Mirrors the var-decl
+    // first pass above (forward-reference handling). Duplicate name
+    // is a hard error; bogus param types reuse the var-style
+    // `resolveTypeName` validation.
+    _signals.clear();
+    for (auto& member : s.members) {
+        if (!member) continue;
+        if (auto* sig = dynamic_cast<SignalDeclStmt*>(member.get())) {
+            analyzeSignalDecl(*sig);
+        }
+    }
+
     // First pass: collect var declarations into the script-local scope.
     for (auto& member : s.members) {
         if (!member) continue;
@@ -1116,6 +1215,8 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
             if (v->initializer) analyzeExpr(*v->initializer);
         } else if (auto* lf = dynamic_cast<LifecycleFuncDecl*>(member.get())) {
             analyzeLifecycle(*lf);
+        } else if (auto* sig = dynamic_cast<SignalDeclStmt*>(member.get())) {
+            (void)sig;   // S4.1: validated in the pre-pass above; skip here.
         } else {
             analyzeStmt(*member);
         }
@@ -1126,6 +1227,15 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
 
 void SemanticAnalyzer::analyzeVarDecl(VarDeclStmt& v)
 {
+    // S4.1b (2026-07-18): NO init-position inference — players must
+    // explicitly declare `var h: int = connect(...)`. The legacy
+    // typeName-from-annotation path below naturally rejects
+    // `var h = connect(...)` (v.typeName == "" fails `isBuiltInType`
+    // and `resolveTypeName`, surfacing as "unknown type ''"). This
+    // keeps the analyzer's type-resolution discipline intact and
+    // matches the R5.x "static-only" philosophy — no expression-
+    // position type inference in v1.
+
     if (isBuiltInType(v.typeName)) {
         ScopeEntry e;
         e.type = nullptr;  // built-in: no ITypeInfo*
@@ -1637,6 +1747,312 @@ bool SemanticAnalyzer::isLabelVisible(const std::string& name) const
     return false;
 }
 
+// S4.1 (2026-07-15): per-component signal-declaration pre-pass
+// validation. Called from analyzeScript BEFORE the body walk so
+// that forward references resolve. Two responsibilities:
+//   1. Reject duplicate signal names within one script
+//      (each `_signals` entry maps a unique name → param list).
+//   2. Validate each declared parameter type via the same
+//      `isBuiltInType` / `resolveTypeName` path that
+//      `analyzeVarDecl` uses — unknown types are a hard error so
+//      the caller can't accidentally reference a never-registered
+//      type at a signal param site.
+void SemanticAnalyzer::analyzeSignalDecl(SignalDeclStmt& sig)
+{
+    if (_signals.count(sig.name)) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&sig);   // S5 ED-02: signal-name loc
+        d.message = "duplicate signal '" + sig.name + "' in this script";
+        d.hint = "signal names must be unique within one script block";
+        report(d);
+        return;
+    }
+    // Validate each declared parameter type. The pre-pass runs
+    // before var-decl collection, but the validator doesn't depend
+    // on `_scope` — it consults `isBuiltInType` / `resolveTypeName`
+    // directly against the registry.
+    for (const auto& p : sig.params) {
+        if (!isBuiltInType(p.typeName)) {
+            auto* info = resolveTypeName(p.typeName, 0, 0);
+            if (!info) {
+                LogiaDiagnostic d;
+                d.severity = DiagnosticSeverity::Error;
+                d.errorCode = ErrorCode::TypeMismatch;
+                d.location = sourceLocFor(&sig);
+                d.message = "signal '" + sig.name +
+                            "' parameter '" + p.name +
+                            "' has unknown type '" + p.typeName + "'";
+                d.hint = "register the type with AYReflect or use a built-in "
+                         "(int, float, bool, string)";
+                report(d);
+            }
+        }
+    }
+    _signals[sig.name] = sig.params;
+}
+
+// S4.1 (2026-07-15): validate a `emit("name", ...args)` call site.
+// Checks (in order, all hard errors except noted):
+//   1. Host kind has self (`_ctx.expectSelf == true`). Tool hosts
+//      do not have a receiver; codegen would emit `__ay_emit(self, ...)`
+//      against an unbound `self`. Reject at compile time.
+//   2. First arg is a string literal — emit/connect signal names
+//      must be statically known for the validator to find the
+//      signal in `_signals`. A dynamic name is rejected as
+//      `TypeMismatch` (S4.1 simplification: deferred runtime-
+//      checked path).
+//   3. Signal name exists in `_signals` (collected by the
+//      analyzeScript pre-pass).
+//   4. Arity: emit arg count - 1 must equal the declared signal's
+//      param count.
+//   5. Each supplied arg's static type matches the declared
+//      param's type (signalArgMatchesParam helper).
+// On success, sets `c->ambientCall = AmbientCallKind::Emit` so
+// codegen emits `__ay_emit(self, "<name>", ...args)`.
+void SemanticAnalyzer::analyzeEmitCall(CallExpr& c)
+{
+    // 1. Host-kind guard — no self-receiver means no `self` arg to
+    //    pass to __ay_emit. Tool host scripts (LG-07) cannot emit
+    //    signals. Symmetric with the `run()` on non-Tool warn.
+    if (!_ctx.expectSelf) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&c);   // S5 ED-02: callee-name loc
+        d.message = "emit() requires a self-receiver; "
+                    "Tool host scripts (run-only) are not supported";
+        d.hint = "emit/connect are per-component event calls; use them "
+                 "inside Component / System host scripts, not Tool hosts";
+        report(d);
+        return;
+    }
+    // 2. First arg must be a string literal.
+    if (c.args.empty() ||
+        dynamic_cast<LiteralExpr*>(c.args[0].get()) == nullptr ||
+        !std::get_if<std::string>(
+            &dynamic_cast<LiteralExpr*>(c.args[0].get())->value)) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&c);
+        d.message = "emit() signal name must be a string literal";
+        d.hint = "write `emit(\"name\", ...args)` — dynamic signal "
+                 "names are not supported in S4.1";
+        report(d);
+        return;
+    }
+    const std::string signalName =
+        std::get<std::string>(
+            dynamic_cast<LiteralExpr*>(c.args[0].get())->value);
+    // 3. Signal exists in `_signals`.
+    auto sigIt = _signals.find(signalName);
+    if (sigIt == _signals.end()) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::UnknownIdentifier;
+        d.location = sourceLocFor(&c);
+        d.message = "unknown signal '" + signalName + "' in emit()";
+        std::string hint = "declare the signal at script-block scope, e.g. ";
+        hint += "`signal " + signalName + "()` or `signal ";
+        hint += signalName + "(arg: int)`";
+        // Add a soft "did you mean" style list of declared signals.
+        if (!_signals.empty()) {
+            hint += ". declared signals: ";
+            bool first = true;
+            for (const auto& [name, _] : _signals) {
+                if (!first) hint += ", ";
+                hint += name;
+                first = false;
+            }
+        }
+        d.hint = hint;
+        report(d);
+        return;
+    }
+    const auto& sigParams = sigIt->second;
+    // 4. Arity check.
+    const size_t suppliedArgs = c.args.size() - 1;
+    if (suppliedArgs != sigParams.size()) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&c);
+        d.message = "emit(\"" + signalName + "\") arity mismatch: "
+                    "expected " + std::to_string(sigParams.size()) +
+                    " arg(s), got " + std::to_string(suppliedArgs);
+        d.hint = "the signal's declared parameter list must match the emit "
+                 "call exactly";
+        report(d);
+        return;
+    }
+    // 5. Per-arg type compat check.
+    for (size_t i = 0; i < sigParams.size(); ++i) {
+        if (!signalArgMatchesParam(c.args[i + 1].get(), sigParams[i].typeName)) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Error;
+            d.errorCode = ErrorCode::TypeMismatch;
+            d.location = sourceLocFor(c.args[i + 1].get());
+            d.message = "emit(\"" + signalName + "\") arg " +
+                        std::to_string(i + 1) + " type mismatch: "
+                        "expected '" + sigParams[i].typeName + "'";
+            d.hint = "the signal's declared parameter type must match the "
+                     "supplied argument's static type";
+            report(d);
+            // Don't bail — continue checking remaining args so the
+            // user sees all mismatches at once.
+        }
+    }
+    c.ambientCall = CallExpr::AmbientCallKind::Emit;
+}
+
+// S4.1 (2026-07-15) → S4.1b v2 (2026-07-18): validate a
+// `connect("name", handler)` call site. v2 upgrades the handler
+// argument from duck-type to static signature match against the
+// signal's declared parameter list — see plan §D-5.
+//
+// Prologue preserved from S4.1: host-kind guard, strict arity == 2,
+// first arg must be a string literal, signal must exist in
+// `_signals`. New in v2: handler `c->args[1]` must be an
+// `IdentifierExpr` referencing a script-block `function` collected
+// in the `_functions` pre-pass (L1201+), with arity and typeNames
+// matching the signal's declared params exactly. Anonymous
+// closures (e.g. `connect("x", function() {})`) are rejected
+// because the analyzer cannot statically resolve their parameter
+// list — future slice may add codegen-side auto-naming to lift the
+// restriction.
+void SemanticAnalyzer::analyzeConnectCall(CallExpr& c)
+{
+    if (!_ctx.expectSelf) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&c);
+        d.message = "connect() requires a self-receiver; "
+                    "Tool host scripts (run-only) are not supported";
+        d.hint = "connect is per-component event registration; use it "
+                 "inside Component / System host scripts";
+        report(d);
+        return;
+    }
+    if (c.args.size() != 2 ||
+        dynamic_cast<LiteralExpr*>(c.args[0].get()) == nullptr ||
+        !std::get_if<std::string>(
+            &dynamic_cast<LiteralExpr*>(c.args[0].get())->value)) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&c);
+        d.message = "connect() requires a string-literal signal name "
+                    "and a handler expression";
+        d.hint = "write `connect(\"name\", handler_fn)` — both args required";
+        report(d);
+        return;
+    }
+    const std::string signalName =
+        std::get<std::string>(
+            dynamic_cast<LiteralExpr*>(c.args[0].get())->value);
+    auto sigIt = _signals.find(signalName);
+    if (sigIt == _signals.end()) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::UnknownIdentifier;
+        d.location = sourceLocFor(&c);
+        d.message = "unknown signal '" + signalName + "' in connect()";
+        std::string hint = "declare the signal at script-block scope";
+        if (!_signals.empty()) {
+            hint += ". declared signals: ";
+            bool first = true;
+            for (const auto& [name, _] : _signals) {
+                if (!first) hint += ", ";
+                hint += name;
+                first = false;
+            }
+        }
+        d.hint = hint;
+        report(d);
+        return;
+    }
+    c.ambientCall = CallExpr::AmbientCallKind::Connect;
+}
+
+// S4.1b (2026-07-18): validate a `disconnect(id)` call site. Much
+// simpler than connect — the id is opaque (just an int returned by
+// a prior `connect(...)`), so the analyzer does NOT need to know
+// which signal it points at; the runtime helper walks all lists for
+// the instance and tombstone-marks the matching record.
+//
+// Validation surface:
+//   1. Host-kind guard — same as emit/connect; disconnect needs
+//      `self` because the per-instance bag is keyed on it.
+//   2. Arity == 1 (one connection-id argument).
+//   3. Hard int-check on the argument (S4.1b revised 2026-07-18):
+//      if it's an `IdentifierExpr` resolved via `_scope` to a
+//      non-int `VarDeclStmt`, emit a hard Error — the player must
+//      explicitly declare `var h: int = connect(...)` to use
+//      disconnect. No init-position inference (Logia has no
+//      expression-type system per the R5.x "static-only" philosophy).
+//      Runtime no-op safety net still covers non-identifier args
+//      (literals, undeclared identifiers).
+//
+// On full pass, stamps `c->ambientCall = AmbientCallKind::Disconnect`
+// so codegen emits `__ay_disconnect(self, id)`.
+void SemanticAnalyzer::analyzeDisconnectCall(CallExpr& c)
+{
+    if (!_ctx.expectSelf) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&c);
+        d.message = "disconnect() requires a self-receiver; "
+                    "Tool host scripts (run-only) are not supported";
+        d.hint = "disconnect is per-component event deregistration; use it "
+                 "inside Component / System host scripts";
+        report(d);
+        return;
+    }
+    if (c.args.size() != 1) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::TypeMismatch;
+        d.location = sourceLocFor(&c);
+        d.message = "disconnect() expects exactly 1 connection-id argument";
+        d.hint = "store the connect() return value: "
+                 "`var h = connect(\"name\", fn); disconnect(h)`";
+        report(d);
+        return;
+    }
+    // Hard int check (S4.1b revised, 2026-07-18): if the user passes
+    // a typed local, the declared type MUST be `int`. No soft-warn
+    // escape — the player is expected to declare `var h: int = ...`
+    // explicitly when capturing a connection id, and the runtime
+    // helper is still a no-op safety net for non-identifier args
+    // (literals, undeclared identifiers) so the type-mismatch error
+    // is the strict correct behavior here.
+    if (auto* id = dynamic_cast<IdentifierExpr*>(c.args[0].get())) {
+        auto scopeIt = _scope.find(id->name);
+        if (scopeIt != _scope.end()) {
+            const auto* vd = static_cast<const VarDeclStmt*>(
+                scopeIt->second.decl);
+            if (vd && vd->typeName != "int") {
+                LogiaDiagnostic d;
+                d.severity = DiagnosticSeverity::Error;
+                d.errorCode = ErrorCode::TypeMismatch;
+                d.location = sourceLocFor(id);
+                d.message = "disconnect argument '" + id->name +
+                            "' has type '" + vd->typeName +
+                            "' but expects a connection id (int)";
+                d.hint = "declare `var " + id->name + ": int = connect(...)` "
+                         "so disconnect(" + id->name + ") type-checks";
+                report(d);
+                return;
+            }
+        }
+    }
+    c.ambientCall = CallExpr::AmbientCallKind::Disconnect;
+}
+
 void SemanticAnalyzer::analyzeStmt(Stmt& s)
 {
     if (auto* es = dynamic_cast<ExprStmt*>(&s)) {
@@ -1699,6 +2115,14 @@ void SemanticAnalyzer::analyzeStmt(Stmt& s)
         if (vd->initializer) analyzeExpr(*vd->initializer);
     } else if (auto* lf = dynamic_cast<LifecycleFuncDecl*>(&s)) {
         analyzeLifecycle(*lf);
+    } else if (auto* sig = dynamic_cast<SignalDeclStmt*>(&s)) {
+        // S4.1 (2026-07-15): validated in the analyzeScript pre-pass
+        // (forward-reference collection). The defensive no-op here
+        // mirrors the FunctionDeclStmt fallback — if a SignalDeclStmt
+        // ever reaches analyzeStmt via a future refactor of the
+        // analyzeScript two-pass structure, it stays inert rather
+        // than triggering a "Unsupported statement" diagnostic.
+        (void)sig;
     }
 }
 
@@ -1751,6 +2175,27 @@ void SemanticAnalyzer::analyzeExpr(Expr& e)
                 }
             }
         }
+        // S4.1 (2026-07-15) + S4.1b (2026-07-18): per-component
+        // signal ambient call recognition. `emit(...)`,
+        // `connect(...)`, and `disconnect(...)` are NOT
+        // lexer-reserved — they reach this branch as ordinary
+        // CallExprs whose callee is an IdentifierExpr. Shape-recognise
+        // here (not via `ambientIdentifiers()`, which is for
+        // object-receiver patterns like `input.x(...)`); stamp
+        // `c->ambientCall` so codegen can emit the specialised
+        // lowering. The free-function ambient pattern is a new
+        // surface — see commit message for rationale.
+        if (c->callee) {
+            if (auto* calleeId = dynamic_cast<IdentifierExpr*>(c->callee.get())) {
+                if (calleeId->name == "emit") {
+                    analyzeEmitCall(*c);
+                } else if (calleeId->name == "connect") {
+                    analyzeConnectCall(*c);
+                } else if (calleeId->name == "disconnect") {  // S4.1b
+                    analyzeDisconnectCall(*c);
+                }
+            }
+        }
     } else if (auto* id = dynamic_cast<IdentifierExpr*>(&e)) {
         analyzeIdentifierExpr(*id);
     } else if (auto* m = dynamic_cast<MemberExpr*>(&e)) {
@@ -1776,6 +2221,12 @@ void SemanticAnalyzer::analyzeIdentifierExpr(IdentifierExpr& id)
     }
     if (isAmbientIdentifier(id.name)) {
         return;  // ambient — no ITypeInfo, allowed
+    }
+    // S4.1: free-function ambients (emit/connect). Same carve-out as
+    // ambientIdentifiers() object receivers — shape-recognised later
+    // in analyzeExpr's CallExpr branch; do not warn as implicit globals.
+    if (id.name == "emit" || id.name == "connect") {
+        return;
     }
     // Undeclared identifier read. Lua-style implicit global.
     LogiaDiagnostic d;

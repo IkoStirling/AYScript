@@ -1602,4 +1602,245 @@ script T {
     CHECK(atBeyond.column == 0);
 }
 
+// S4.1 (2026-07-15): per-component signal surface — semantic
+// validation of signal declarations + emit / connect call sites.
+// All cases below pin one rule from the analyzer; a regression in
+// any of them points at a specific clause in `analyzeSignalDecl`,
+// `analyzeEmitCall`, or `analyzeConnectCall`.
+
+namespace {
+
+// Helper: compile a Logia source string under `toolLogiaHostContext`
+// (which sets `expectSelf = false`) — used for the Tool-host
+// rejection test. Component host is the default
+// (`defaultLogiaHostContext()`); Tool host tests need an explicit
+// ctx.
+CompileResult compileAsTool(const char* source)
+{
+    Compiler compiler;
+    return compiler.compile(source, toolLogiaHostContext());
+}
+
+bool hasErrorContaining(const CompileResult& r, const std::string& needle)
+{
+    for (const auto& e : r.diagnostics) {
+        if (e.severity == DiagnosticSeverity::Error &&
+            e.message.find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TEST_CASE(s41_duplicate_signal_name_is_hard_error) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    signal damaged()
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "duplicate signal 'damaged'"));
+}
+
+TEST_CASE(s41_emit_unknown_signal_is_hard_error_with_hint) {
+    // Pin that the error message names the unknown signal AND that
+    // the hint lists the declared signals — matches the
+    // LuaKeywordLeak hint style at L1668.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit("nope", 1)
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "unknown signal 'nope' in emit()"));
+    // Verify the hint mentions the declared signal so the user can
+    // find the typo immediately.
+    bool hintHasDeclaredName = false;
+    for (const auto& d : r.diagnostics) {
+        if (d.severity == DiagnosticSeverity::Error &&
+            d.message.find("nope") != std::string::npos &&
+            d.hint.find("damaged") != std::string::npos) {
+            hintHasDeclaredName = true;
+            break;
+        }
+    }
+    CHECK(hintHasDeclaredName);
+}
+
+TEST_CASE(s41_emit_arity_mismatch_is_hard_error) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit("damaged")
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "arity mismatch"));
+}
+
+TEST_CASE(s41_emit_arg_type_mismatch_is_hard_error) {
+    // `signal damaged(amount: int)` declared as int; caller passes
+    // a string literal — must reject.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit("damaged", "hi")
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "type mismatch"));
+}
+
+TEST_CASE(s41_emit_non_literal_name_is_hard_error) {
+    // `emit(name, ...)` with `name` as a variable, not a string
+    // literal — rejected because static validation needs the
+    // signal name up front.
+    const char* source = R"(
+script PlayerController {
+    var name: string = "damaged"
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit(name, 1)
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "signal name must be a string literal"));
+}
+
+TEST_CASE(s41_connect_unknown_signal_is_hard_error) {
+    const char* source = R"(
+script PlayerController {
+    on_start() {
+        connect("nope", handler)
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "unknown signal 'nope' in connect()"));
+}
+
+TEST_CASE(s41_connect_wrong_arity_is_hard_error) {
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_start() {
+        connect("damaged")
+    }
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "requires a string-literal signal name"));
+}
+
+TEST_CASE(s41_valid_signal_call_stamps_ambient_call_kind) {
+    // The success path must stamp `c.ambientCall = Emit` so codegen
+    // (in a later commit) can emit `__ay_emit(self, ...)` rather
+    // than falling through to the generic Lua call path. We can't
+    // directly read the AST field from outside (CallExpr::ambientCall
+    // is internal), but we CAN confirm the call compiles cleanly
+    // — the codegen path in commit 5 will fail loudly if the stamp
+    // is missing.
+    const char* source = R"(
+script PlayerController {
+    signal damaged(amount: int)
+    on_update(dt: float) {
+        emit("damaged", 10)
+    }
+    function handler(amount: int) {}
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK(r.success);
+}
+
+TEST_CASE(s41_emit_in_tool_host_is_hard_error) {
+    // Tool hosts (run-only, no self receiver) cannot use emit /
+    // connect. The host-kind guard rejects this at compile time so
+    // codegen never has to think about `self` in a self-less
+    // context.
+    const char* source = R"(
+script BuildTool {
+    signal done()
+    run() {
+        emit("done")
+    }
+}
+)";
+    const CompileResult r = compileAsTool(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "Tool host scripts"));
+}
+
+TEST_CASE(s41_connect_in_tool_host_is_hard_error) {
+    const char* source = R"(
+script BuildTool {
+    signal done()
+    run() {
+        connect("done", h)
+    }
+}
+)";
+    const CompileResult r = compileAsTool(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "Tool host scripts"));
+}
+
+TEST_CASE(s41_bogus_signal_param_type_is_hard_error) {
+    // `signal foo(bar: bad_type)` — bad_type is not registered and
+    // not a built-in. The analyzer must reject at pre-pass time so
+    // emit/connect arg-type checks downstream don't crash.
+    const char* source = R"(
+script PlayerController {
+    signal foo(bar: bad_type)
+}
+)";
+    Compiler compiler;
+    const CompileResult r = compiler.compile(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "unknown type 'bad_type'"));
+}
+
+// S4.1b (2026-07-18): disconnect host-kind guard. Tool host
+// scripts have no `self` receiver, so per-instance signal tables
+// don't exist for them — calling disconnect() must be a hard
+// error, mirroring the S4.1 emit/connect guards.
+TEST_CASE(s41b_disconnect_in_tool_host_is_hard_error) {
+    const char* source = R"(
+script BuildTool {
+    run() {
+        disconnect(0)
+    }
+}
+)";
+    const CompileResult r = compileAsTool(source);
+    CHECK_FALSE(r.success);
+    CHECK(hasErrorContaining(r, "Tool host scripts"));
+}
+
 TEST_SUITE_END

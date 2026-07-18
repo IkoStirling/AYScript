@@ -306,11 +306,51 @@ namespace ayt::script
 //       compiled before FVector2 was registered would see a
 //       different ITypeInfo* lookup at runtime. Bump forces full
 //       cache refresh. See `AYInputMapping.h` for
-//       `bindAxis2D` / `getAxis2D` / `Axis2DBinding`,
+//       `bindAxis2D` / `getAxis2D` / `Axis2Binding`,
 //       `AYScriptRuntimeBridge.cpp` for the new ambient lambdas
 //       and `MockInputProvider`'s default override, and
 //       `AYSemanticAnalyzer.cpp` for the `FVector2` mirror block.
-constexpr std::size_t kLogiaPipelineVersion = 24u;
+//       2026-07-15 S4.1 (signal / connect event surface): bump
+//       24 → 25. Adds the per-component signal declaration grammar
+//       (`signal NAME(params)?;` at script-block scope), the
+//       `emit(...)` and `connect(...)` free-function ambient calls
+//       shape-recognised by `analyzeCallExpr`, and the codegen
+//       helper block (`M._signalNames` + `__ay_connect` +
+//       `__ay_emit`) emitted when a script declares ≥1 signal.
+//       The codegen output shape for signal-bearing scripts
+//       changes (new helpers, new metadata table, lowered
+//       emit/connect call exprs); a v24-cached chunk that
+//       references emit / connect would nil-call at runtime.
+//       Bump forces full cache refresh. See `AYAst.h` for
+//       `SignalDeclStmt` + `CallExpr::AmbientCallKind`,
+//       `AYLexer.cpp` for the `signal` keyword entry,
+//       `AYParser.cpp` for `parseSignalDecl` + the `parseStatement`
+//       gate, `AYSemanticAnalyzer.cpp` for `analyzeSignalDecl` +
+//       `analyzeEmitCall` + `analyzeConnectCall`, and
+//       `AYLuaCodegen.cpp` for `emitScript`'s helper-block emit
+//       and `emitExpr`'s CallExpr lowering.
+//       2026-07-15 S4.1 D-2 fix: bump 25 → 26. Helper block now
+//       emits `local __ay_bound_self` and `__ay_emit` stamps it
+//       around handler dispatch; script-block `function` bodies
+//       rewrite bare `self` to that slot. v25-cached chunks for
+//       signal scripts would miss self-bind at handler runtime.
+//       2026-07-18 S4.1b (disconnect + connect-handle): bump 26
+//       → 27. (1) Helper block shape changed — `__ay_connect`
+//       now returns an int connection id and stores handlers as
+//       `{ id, fn, dead }` records; new `__ay_disconnect(self,
+//       id)` helper tombstone-marks the record by id. v26-cached
+//       chunks call the old `void` connect signature and break
+//       on disconnect. (2) Signal analyzer upgrades connect
+//       handler validation from v1 Lua duck-type to v2 static
+//       signature match (handler `function` params must equal the
+//       signal's param count + types) — programs that compiled
+//       under v26 with mismatched handlers must recompile and now
+//       error at compile time. See `AYAst.h` for the new
+//       `AmbientCallKind::Disconnect` value, `AYSemanticAnalyzer.cpp`
+//       for `_functions` pre-pass + v2 signature check +
+//       `analyzeDisconnectCall`, and `AYLuaCodegen.cpp` for the
+//       helper-block reshape + `__ay_disconnect` lowering.
+constexpr std::size_t kLogiaPipelineVersion = 27u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

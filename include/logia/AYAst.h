@@ -100,6 +100,28 @@ public:
         : callee(std::move(callee)), args(std::move(args)) {}
     ExprPtr callee;
     std::vector<ExprPtr> args;
+
+    // S4.1 (2026-07-15): ambient-call recognition tag. The
+    // SemanticAnalyzer stamps this when `callee` is an
+    // `IdentifierExpr` matching a known ambient free-function name
+    // (currently `emit` / `connect`). Codegen reads it to emit the
+    // specialized lowering (`__ay_emit(self, ...)` /
+    // `__ay_connect(self, ..., handler)`) instead of falling through
+    // to the generic Lua call path — which would invoke a global
+    // `emit` / `connect` that doesn't exist and fail at runtime.
+    //
+    // Default `None` preserves source-compat: any CallExpr produced
+    // by code paths that don't know about ambients still works as
+    // before (generic lowering emits `callee(args)`).
+    //
+    // S4.1b (2026-07-18): append `Disconnect` for the
+    // `disconnect(id)` ambient — `id` is the int returned by
+    // `connect(...)`. Analyzer stamps this when the callee
+    // identifier matches, codegen lowers to `__ay_disconnect(self,
+    // id)`. Disconnect shares the same shape-recognition pattern
+    // as Emit / Connect (free function, IdentifierExpr callee).
+    enum class AmbientCallKind { None, Emit, Connect, Disconnect };
+    AmbientCallKind ambientCall = AmbientCallKind::None;
 };
 
 class IdentifierExpr : public Expr {
@@ -381,6 +403,28 @@ public:
     std::string name;
     std::vector<Param> params;
     std::vector<StmtPtr> body;
+};
+
+// S4.1 (2026-07-15): per-component signal declaration. Lives as a
+// metadata-only member of `ScriptDecl` (alongside `VarDeclStmt`,
+// `LifecycleFuncDecl`, `FunctionDeclStmt`). Carries NO body — the
+// signal is just a named event with a typed parameter list. The
+// analyzer collects these in a first pass so that forward references
+// work (e.g. `on_start { connect("damaged", on_damaged) }` can
+// reference a signal declared textually below it). Codegen reads
+// the names for the `_signalNames` module table and seeds the
+// per-instance `_signals` map lazily at first connect.
+//
+// Restriction: same as `FunctionDeclStmt` — the parser only accepts
+// this form when called from `parseScriptMembers`; inside lifecycle
+// bodies or anywhere else the lexer sees `signal`, the parser
+// rejects with an explicit error (see `parseStatement`).
+class SignalDeclStmt : public Stmt {
+public:
+    SignalDeclStmt(std::string name, std::vector<Param> params)
+        : name(std::move(name)), params(std::move(params)) {}
+    std::string name;
+    std::vector<Param> params;
 };
 
 class ScriptDecl {

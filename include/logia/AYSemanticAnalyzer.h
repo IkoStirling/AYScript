@@ -120,6 +120,11 @@ private:
     void analyzeExpr(Expr& e);
     void analyzeMemberExpr(MemberExpr& m, const ayt::reflect::ITypeInfo* parent);
     void analyzeIdentifierExpr(IdentifierExpr& id);
+    void analyzeSignalDecl(SignalDeclStmt& sig);   // S4.1 (2026-07-15)
+    void analyzeEmitCall(CallExpr& c);             // S4.1 (2026-07-15)
+    void analyzeConnectCall(CallExpr& c);          // S4.1 (2026-07-15)
+    void analyzeDisconnectCall(CallExpr& c);       // S4.1b (2026-07-18)
+    bool signalArgMatchesParam(Expr* arg, const std::string& paramTypeName); // S4.1 (2026-07-15)
 
     // R5.2-C (2026-07-14): verify a `for (var i : <bound>)` bound
     // expression statically reduces to int. Recurses into
@@ -210,6 +215,15 @@ private:
     // `_labelStack` for symmetry (each loop body frame is its
     // own set of named locals).
     std::vector<std::unordered_set<std::string>> _loopCounters;
+
+    // S4.1 (2026-07-15): per-script signal declarations collected in
+    // the `analyzeScript` pre-pass so that `connect("name", h)` and
+    // `emit("name", ...)` calls inside lifecycle bodies can validate
+    // signal-name references against a forward-visible set. Key is
+    // the signal's declared name; value is the parameter list used
+    // for arity + type-compat checking at call sites. Cleared at the
+    // start of every `analyzeScript`.
+    std::unordered_map<std::string, std::vector<Param>> _signals;
 
     // Type of the currently-analyzed `self` (the host type matching
     // the script's name). nullptr if no current script (shouldn't

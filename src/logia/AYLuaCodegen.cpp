@@ -159,6 +159,121 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
     // reflect-call rewrites. Scope is per-script — reset on exit.
     _currentHostTypeName = script.hostTypeName;
 
+    // S4.1 (2026-07-15): zero-cost guard. If the script declares
+    // no signals, we emit no helper block — `__ay_emit` / `__ay_connect`
+    // / `_signalNames` are pure overhead for scripts that don't use
+    // the surface. Cache the decision up-front so the per-pass
+    // loops below don't have to recompute it.
+    bool hasAnySignal = false;
+    for (const auto& member : script.members) {
+        if (dynamic_cast<SignalDeclStmt*>(member.get())) {
+            hasAnySignal = true;
+            break;
+        }
+    }
+
+    // S4.1 (2026-07-15): when signals exist, emit the helper block
+    // once per module BEFORE any function body. The block:
+    //   1. records `M._signalNames = { ["name1"] = true, ... }`
+    //      for tooling / debug / hot-reload introspection. Runtime
+    //      codegen does NOT read this — validation is compile-time.
+    //   2. defines `__ay_connect` / `__ay_emit` against
+    //      `M._instanceSignals[self]` — NOT `self._signals`.
+    //      Logia `self` is a lightuserdata (C++ host pointer); Lua
+    //      cannot index lightuserdata. Key the module table by the
+    //      lightuserdata itself so each receiver stays isolated.
+    // Anchor to the FIRST signal decl's sourceLoc so runtime panic
+    // translation (S5 ED-03) points at the signal keyword if a
+    // helper raises.
+    if (hasAnySignal) {
+        const SignalDeclStmt* firstSignal = nullptr;
+        for (const auto& member : script.members) {
+            if (auto* s = dynamic_cast<SignalDeclStmt*>(member.get())) {
+                firstSignal = s;
+                break;
+            }
+        }
+        if (firstSignal) _currentAnchor = firstSignal->sourceLoc;
+
+        // Build `M._signalNames = { ["a"] = true, ["b"] = true }`.
+        // Single-line emit keeps the source map dense. Whitespace
+        // around `{` matches the S4.1 acceptance test's strict
+        // substring check (`containsFlat` is exact-match, not
+        // whitespace-tolerant).
+        std::string namesLine = "M._signalNames = { ";
+        bool firstName = true;
+        for (const auto& member : script.members) {
+            if (auto* s = dynamic_cast<const SignalDeclStmt*>(member.get())) {
+                if (!firstName) namesLine += ", ";
+                namesLine += "[\"";
+                namesLine += s->name;
+                namesLine += "\"] = true";
+                firstName = false;
+            }
+        }
+        namesLine += " }";
+        writeLine(namesLine);
+
+        writeLine("M._instanceSignals = M._instanceSignals or {}");
+        // D-2: module-local slot bound for the duration of handler
+        // dispatch. Script-block helpers are top-level Lua functions
+        // (no `self` parameter); they read this slot when the
+        // Logia source mentions `self`. Connect-wrap upvalues alone
+        // cannot inject into a separately defined helper's scope.
+        writeLine("local __ay_bound_self = nil");
+        // The three helpers — emitted as separate lines so each is
+        // anchored to the signal keyword (any helper panic still
+        // maps back to the signal line). S4.1b (2026-07-18) added
+        // `__ay_disconnect` and reshaped `__ay_connect` /
+        // `__ay_emit` to track per-record `dead` tombstones + a
+        // bag-scoped `_nextId` counter so connect can return an
+        // int connection id that disconnect uses to deregister.
+        //
+        // Dense-mark tombstone (D-4): disconnect sets `rec.dead =
+        // true` rather than `list[i] = nil` because Lua's
+        // `ipairs()` stops at the first nil (Lua 5.4 reference
+        // manual §6.1 — "stops at first absent index"). Slot is
+        // kept in place; emit skips via `if not rec.dead`. O(1)
+        // disconnect, full sweep on emit.
+        writeLine("local function __ay_connect(self, name, handler)");
+        writeLine("    local bag = M._instanceSignals[self]");
+        writeLine("    if not bag then bag = {}; M._instanceSignals[self] = bag end");
+        writeLine("    local id = bag._nextId or 1");
+        writeLine("    bag._nextId = id + 1");
+        writeLine("    local list = bag[name]");
+        writeLine("    if not list then list = {}; bag[name] = list end");
+        writeLine("    list[#list + 1] = { id = id, fn = handler }");
+        writeLine("    return id");
+        writeLine("end");
+        writeBlankLine();
+        writeLine("local function __ay_disconnect(self, id)");
+        writeLine("    local bag = M._instanceSignals[self]");
+        writeLine("    if not bag then return end");
+        writeLine("    for name, list in pairs(bag) do");
+        writeLine("        if type(list) == \"table\" then");
+        writeLine("            for i, rec in ipairs(list) do");
+        writeLine("                if rec.id == id then");
+        writeLine("                    rec.dead = true");
+        writeLine("                    return");
+        writeLine("                end");
+        writeLine("            end");
+        writeLine("        end");
+        writeLine("    end");
+        writeLine("end");
+        writeBlankLine();
+        writeLine("local function __ay_emit(self, name, ...)");
+        writeLine("    local bag = M._instanceSignals[self]; if not bag then return end");
+        writeLine("    local list = bag[name]; if not list then return end");
+        writeLine("    local prev = __ay_bound_self");
+        writeLine("    __ay_bound_self = self");
+        writeLine("    for i, rec in ipairs(list) do");
+        writeLine("        if not rec.dead then rec.fn(...) end");
+        writeLine("    end");
+        writeLine("    __ay_bound_self = prev");
+        writeLine("end");
+        writeBlankLine();
+    }
+
     // S5 ED-03 (2026-07-15): each top-level member is anchored to
     // its own sourceLoc before emit. The `emitStmt` dispatcher
     // handles nested Stmts; this top-level loop is the
@@ -323,9 +438,14 @@ void LuaCodegen::emitFunctionDecl(const FunctionDeclStmt& fn)
     header += ")";
     writeLine(header);
     ++_indent;
+    // S4.1 D-2: rewrite bare `self` inside helpers to `__ay_bound_self`
+    // (set by `__ay_emit` around handler dispatch).
+    const bool prevHelper = _emittingScriptHelper;
+    _emittingScriptHelper = true;
     for (const auto& s : fn.body) {
         emitStmt(*s);
     }
+    _emittingScriptHelper = prevHelper;
     --_indent;
     writeLine("end");
 }
@@ -371,6 +491,19 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     // we still emit clean Lua rather than corrupting the chunk.
     if (auto* fn = dynamic_cast<const FunctionDeclStmt*>(&stmt)) {
         emitFunctionDecl(*fn);
+        return;
+    }
+    // S4.1 (2026-07-15): defensive — SignalDeclStmt's runtime
+    // surface is the helper block + `M._signalNames` metadata
+    // emitted by `emitScript` (which runs before any member loop).
+    // The per-member loop filters SignalDeclStmt out by
+    // dynamic_cast branch, so this is normally unreachable. If a
+    // future refactor routes signals here, the no-op keeps the
+    // existing behavior intact rather than falling through to the
+    // "Unsupported statement" assertion. Mirrors the FunctionDeclStmt
+    // defensive guard above.
+    if (auto* sig = dynamic_cast<const SignalDeclStmt*>(&stmt)) {
+        (void)sig;
         return;
     }
     errorAt(Token{}, "Unsupported statement in codegen");
@@ -638,7 +771,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                 && isSingleHopSelfFieldExpr(*bin->left)) {
                 std::string rhs = emitExpr(*bin->right);
                 std::string out;
-                out += "ayt_reflect_set_field(self, \"";
+                out += "ayt_reflect_set_field(";
+                out += selfLua();
+                out += ", \"";
                 out += _currentHostTypeName;
                 out += "\", \"";
                 out += singleHopSelfFieldName(*bin->left);
@@ -654,7 +789,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                 // self.field <op>= rhs  →
                 //   local __tmp = ayt_reflect_get_field(self, "T", "f") <op> rhs
                 //   ayt_reflect_set_field(self, "T", "f", __tmp)
-                std::string cur = "ayt_reflect_get_field(self, \"";
+                std::string cur = "ayt_reflect_get_field(";
+                cur += selfLua();
+                cur += ", \"";
                 cur += _currentHostTypeName;
                 cur += "\", \"";
                 cur += singleHopSelfFieldName(*bin->left);
@@ -673,7 +810,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                 line1 += rhs;
                 writeLine(line1);
                 std::string line2;
-                line2 += "ayt_reflect_set_field(self, \"";
+                line2 += "ayt_reflect_set_field(";
+                line2 += selfLua();
+                line2 += ", \"";
                 line2 += _currentHostTypeName;
                 line2 += "\", \"";
                 line2 += singleHopSelfFieldName(*bin->left);
@@ -698,7 +837,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                 if (op == TokenType::Equal) {
                     std::string rhs = emitExpr(*bin->right);
                     std::string out;
-                    out += "ayt_reflect_set_field_chain(self, \"";
+                    out += "ayt_reflect_set_field_chain(";
+                    out += selfLua();
+                    out += ", \"";
                     out += _currentHostTypeName;
                     out += "\"";
                     for (const auto& n : chainNames) {
@@ -720,7 +861,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                     std::string line1;
                     line1 += "local ";
                     line1 += tmp;
-                    line1 += " = ayt_reflect_get_field_chain(self, \"";
+                    line1 += " = ayt_reflect_get_field_chain(";
+                    line1 += selfLua();
+                    line1 += ", \"";
                     line1 += _currentHostTypeName;
                     line1 += "\"";
                     for (const auto& n : chainNames) {
@@ -736,7 +879,9 @@ void LuaCodegen::emitExprStmt(const ExprStmt& stmt)
                     writeLine(line1);
                     // ayt_reflect_set_field_chain(self, "...", "f1", ..., "leaf", __tmp)
                     std::string line2;
-                    line2 += "ayt_reflect_set_field_chain(self, \"";
+                    line2 += "ayt_reflect_set_field_chain(";
+                    line2 += selfLua();
+                    line2 += ", \"";
                     line2 += _currentHostTypeName;
                     line2 += "\"";
                     for (const auto& n : chainNames) {
@@ -813,6 +958,85 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* c = dynamic_cast<const CallExpr*>(&expr)) {
+        // S4.1 (2026-07-15): ambient free-function calls `emit(...)`
+        // and `connect(...)` rewrite to `__ay_emit(self, ...)` /
+        // `__ay_connect(self, ..., handler)` — codegen inserts `self`
+        // as the receiver arg because Logia grammar has no colon-call
+        // (Q-1 forced this; see plan §14.5). D-2 handler self-bind is
+        // realized by `__ay_emit` stamping `__ay_bound_self` and
+        // helper-body codegen rewriting bare `self` to that slot
+        // (connect wrap alone cannot inject into a top-level helper).
+        // The analyzer has already validated signal-existence, arity,
+        // and arg-type compat by this point, so we don't re-check here.
+        if (c->ambientCall == CallExpr::AmbientCallKind::Emit) {
+            std::string out = "__ay_emit(self";
+            for (const auto& a : c->args) {
+                out += ", ";
+                out += emitExpr(*a);
+            }
+            out += ")";
+            return out;
+        }
+        if (c->ambientCall == CallExpr::AmbientCallKind::Connect) {
+            // emit("__ay_connect(self, \"<name>\", function(...) "
+            //      "return <handler>(...) end)")
+            // The wrapper is created inside the lifecycle body. D-2
+            // self-bind for the *handler body* is NOT done by
+            // capturing an upvalue here — a top-level `function
+            // on_tap()` cannot see that upvalue. Instead `__ay_emit`
+            // sets `__ay_bound_self` and helper codegen rewrites
+            // bare `self` to that slot. The wrap still exists so
+            // signal args forward via `...` unchanged.
+            if (c->args.size() != 2) {
+                // Defensive — analyzer should have caught this; if it
+                // didn't, fall through to bare Lua dispatch rather
+                // than segfault on bad indexing.
+                std::string out = emitExpr(*c->callee);
+                out += "(";
+                bool first = true;
+                for (const auto& a : c->args) {
+                    if (!first) out += ", ";
+                    out += emitExpr(*a);
+                    first = false;
+                }
+                out += ")";
+                return out;
+            }
+            std::string out = "__ay_connect(self, ";
+            out += emitExpr(*c->args[0]);
+            out += ", function(...) return ";
+            out += emitExpr(*c->args[1]);
+            out += "(...) end)";
+            return out;
+        }
+        // S4.1b (2026-07-18): disconnect lowering. The id arg is
+        // emitted verbatim (typically `h` from `var h: int = connect(...)`);
+        // the runtime helper does an O(1) tombstone scan across all
+        // signal-name lists on this instance. We don't validate the
+        // arg's Lua type here — analyzer already enforced `int` at
+        // the var-decl site, and the helper is a safe no-op on
+        // mismatched ids (it's just a linear search that finds
+        // nothing).
+        if (c->ambientCall == CallExpr::AmbientCallKind::Disconnect) {
+            if (c->args.size() != 1) {
+                // Defensive — analyzer should have caught this; fall
+                // back to bare Lua dispatch rather than mis-emitting.
+                std::string out = emitExpr(*c->callee);
+                out += "(";
+                bool first = true;
+                for (const auto& a : c->args) {
+                    if (!first) out += ", ";
+                    out += emitExpr(*a);
+                    first = false;
+                }
+                out += ")";
+                return out;
+            }
+            std::string out = "__ay_disconnect(self, ";
+            out += emitExpr(*c->args[0]);
+            out += ")";
+            return out;
+        }
         // S3.12 (track R2 §5.7.4): `self.method(args)` rewrites to
         // `ayt_reflect_call_method(self, "<Type>", "<method>", args...)`.
         // The analyzer stamps CallExpr::resolvedMethod only when the
@@ -823,7 +1047,9 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         // — they just won't actually invoke the C++ method).
         if (c->resolvedMethod != nullptr
             && c->resolvedMethodOwnerName != nullptr) {
-            std::string out = "ayt_reflect_call_method(self, \"";
+            std::string out = "ayt_reflect_call_method(";
+            out += selfLua();
+            out += ", \"";
             out += c->resolvedMethodOwnerName;
             out += "\", \"";
             out += c->resolvedMethod->getName();
@@ -860,7 +1086,9 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         if (!_currentHostTypeName.empty()
             && isSelfFieldChainExpr(*m, chainNames, hops)) {
             std::string out;
-            out += "ayt_reflect_get_field_chain(self, \"";
+            out += "ayt_reflect_get_field_chain(";
+            out += selfLua();
+            out += ", \"";
             out += _currentHostTypeName;
             out += "\"";
             for (const auto& n : chainNames) {
@@ -886,7 +1114,9 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
                 && m->resolvedType != nullptr
                 && m->resolvedType->getFieldCount() == 0) {
                 std::string out;
-                out += "ayt_reflect_get_field(self, \"";
+                out += "ayt_reflect_get_field(";
+                out += selfLua();
+                out += ", \"";
                 out += _currentHostTypeName;
                 out += "\", \"";
                 out += m->member;
@@ -912,6 +1142,7 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* id = dynamic_cast<const IdentifierExpr*>(&expr)) {
+        if (id->name == "self") return selfLua();
         return id->name;
     }
     if (auto* lit = dynamic_cast<const LiteralExpr*>(&expr)) {
@@ -1151,6 +1382,11 @@ std::string LuaCodegen::freshTmp(const std::string& hint)
     }
     name += std::to_string(_tmpCounter);
     return name;
+}
+
+const char* LuaCodegen::selfLua() const
+{
+    return _emittingScriptHelper ? "__ay_bound_self" : "self";
 }
 
 // ============================================================

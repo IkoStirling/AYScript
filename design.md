@@ -2,9 +2,9 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-15）**：**Phase S0–S3 + S3.12+R3 + R4.0 + R4.1 + R4.1b + R4.1c + R4.1d + R4.2 + R4.2b + R5.0 + R5.0.1 + R5.1 + R5.2-A + R5.2-B + R5.2-C + R5.2-D + R5.2-E + R5.2-H + S5 ED-02 + S5 ED-03 已交付**；`AYScript_Test` **1066/1066** 全绿；`kLogiaPipelineVersion = 23`。详见 §5.7.4.x+3 R5.2-A → R5.2-H 静态类型校验系列 + §5.7.4.x+4 S5 ED-02 source-location stamping + §5.7.4.x+5 S5 ED-03 Lua runtime panic → Logia source line translation。
-> **下一主阶段**：§14 剩余工作（引擎宿主接线 → 真实输入 → Reflect backlog → S4 语法）。R5.2 待选：R5.2-F (negative step) / R5.2-G (var step + runtime defense) / R5.2-I (multi-hop chain 收紧)。
-> **指挥入口**：§14 + §14.8（copy-paste prompts）。
+> **文档状态（2026-07-18）**：**Phase S0–S3 + R4/R5 + S5 ED-02/03 + INT-01/02/03 + M1 + S4.1 + S4.1b 已交付**；`AYScript_Test` **1435/1435** 全绿（1405 S4.1 ship baseline + 5 S4.1b new + 25 re-counted）；`kLogiaPipelineVersion = 27`。Editor + Application 注册 ScriptSubSystem；Logia input 完整表面真接 AYDevice；薄向量面 `vec2.length` / `vec2.normalized` ambient + `FVector2` reflect 注册；**per-component event surface** `signal NAME(params)?;` + `emit("name", ...)` + `connect("name", handler) → int id` + `disconnect(id)` 完整闭环（codegen helper block + closure-wrap self-bind + dense-mark tombstone）。
+> **下一主阶段**：§14.8 — **R1 `ScriptVisible/ScriptReadOnly` → R3.5 → S5.x handler-signature-v2**。S4.1b 已 ship（详见 §14.6+++ S4.1b delivery + §13 changelog）。R5.2-F/G/I 继续 defer 到 R5.3 expression-type。
+> **指挥入口**：§14.8（copy-paste prompts）；历史交接见 §14.0–14.5 + INT-01/02/03 + M1 完成记录。
 
 ## 1. 概述
 
@@ -1976,13 +1976,13 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | **P-R5.0** | **R5.0** | `while (cond) { body }` / `for (var i : N) { body }` 循环语句 | ✅ 2026-07-13 |
 | **P0** | **INT-01** | Editor/Game 注册 `ScriptSubSystem` + Play 加载 `.logia` | ✅ 2026-07-15 |
 | **P1** | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider` | ✅ 2026-07-15 |
-| **P2a** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
-| **P2b** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
-| **P2c** | **R4** | vector/array args、嵌套 struct、out-param | ⏳ 部分 (vector/array ship R4.1;nested ship R4.0;out-param int/float/struct ship R4.2;std::string out-param R4.2b 待) |
-| **P3** | **S4.x** | signal / await / source map | ⏳ |
-| opt | **INT-03** | `input.axis` / `input.is_just_released` (Logia 完整 input surface) | ✅ 2026-07-15 |
-| opt | **INT-04** | EventHandler host、`event.emit` | ⏳ |
-| opt | **R5.0.1** | `break` / `continue`、C-style `for`、range `for`、bound 类型校验 | ⏳ |
+| **P1b** | **INT-03** | `input.axis` / `input.is_just_released` (Logia 完整 input surface) | ✅ 2026-07-15 |
+| **P1c** | **M1** | 薄向量面：`input.vec2` + `vec2.length` / `vec2.normalized` + `FVector2` reflect | ✅ 2026-07-15 |
+| **P2a** | **S4.1** | `signal` / `connect` 事件机制 | ✅ 2026-07-15 |
+| **P2a.1** | **S4.1b** | `connect` 返 int id + `disconnect(id)` + dense-mark tombstone | ✅ 2026-07-18 |
+| **P2b** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
+| **P2c** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
+| opt | **INT-04** | EventHandler host、`event.emit`（依赖 S4.1） | ⏳ |
 | parallel | Foundation ED-01–04 | 引擎 north-star — 不阻塞 Logia | — |
 
 ---
@@ -2261,15 +2261,16 @@ Acceptance met — see §5.6 S3.11 完成记录. 604/604 green. Do not re-implem
 | 维度 | 模块内状态 | 产品化缺口 |
 |------|------------|------------|
 | Logia 编译器 | ✅ | — |
-| Component / System / Tool host | ✅ | Editor 未注册 SubSystem |
-| `self.field` 单跳 + 2-hop 链 | ✅ | 3+ hop、FQuaternion 未做 |
-| `self.method()` primitive + struct/enum/string | ✅ | vector/array (int/float) ship R4.1; out-param (int/float/struct) ship R4.2;std::string out-param R4.2b 待;vector<struct> R4.1b 待 |
-| 热重载 API + FileWatcher | ✅ | Editor Play 未默认开启 watch |
-| `ays-logia compile` | ✅ | Editor build 动作未接菜单 |
+| Component / System / Tool host | ✅ | —（INT-01：Editor + App 已注册） |
+| `self.field` 单跳 + 2-hop 链 | ✅ | 3+ hop、FQuaternion 链（INT-05b） |
+| `self.method()` + 容器 / out-param | ✅ R4 系列 | R3.5：`std::string` struct-field **write** |
+| 热重载 API + FileWatcher | ✅ | Editor Play **已**默认开启 watch（INT-01） |
+| `ays-logia compile` | ✅ | Editor build 菜单未接；CLI e2e 不 skip（`CliTestPaths.h`） |
 | `time.delta/total` | ✅ | — |
-| `input.*` | 🟡 Mock 可注入 | 未接 AYDevice `InputMapping`（Phase-2） |
-| `event.*` / `spawn_prefab` | ❌ | S4 或 INT-04 |
-| EventHandler host | ❌ | INT-04 |
+| `input.*` | ✅ INT-02/03/M1 | ✅ `input.vec2` 真接 `InputMapping::getAxis2D`；ax2D 完整 |
+| 脚本局部向量 / 薄数学面 | ✅ M1 | **`vec2.length` / `vec2.normalized`** ambient；**不做**全量 AYMath |
+| `event.*` / `spawn_prefab` | ✅ S4.1(`signal`/`connect`)/ ❌(`event.*` ambient / `spawn_prefab`) | **`signal NAME(params)?;` + `emit` / `connect`** 已 ship；`event.*` ambient + EventHandler host 推到 INT-04（依赖 S4.1 ✅）；`spawn_prefab` 不在 S4 系列计划内 |
+| EventHandler host | ❌ | INT-04（依赖 S4.1） |
 | `ScriptReadOnly` 强制 | ❌ | R1 |
 | Editor Inspector 脚本字段 | ❌ | 依赖 R1 + Editor UI |
 
@@ -2350,12 +2351,14 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 | ID | 内容 | 备注 |
 |----|------|------|
-| **S4.1** | `signal` / `connect` 语法 + codegen | 可桥接 `AYEventSystem` |
+| **M1** | 薄向量面：`vec2` / `FVector2` 值 + `input.vec2` | ✅ **2026-07-15** ship；详见 §14.6 M1 delivery；**非**全量 AYMath |
+| **S4.1** | `signal` / `connect` 语法 + codegen | ✅ **2026-07-15** ship；详见 §14.6++ S4.1 delivery + §13 changelog |
+| **S4.1b** | `connect` 返 int id + `disconnect(id)` + dense-mark tombstone；`var h: int` 强注解 | ✅ **2026-07-18** ship；详见 §14.6+++ S4.1b delivery + §13 changelog；handler signature validation 推后到未来 slice |
 | **S4.2** | `await delay` 协程糖 | Lua 5.5 coroutine 限制需文档化 |
-| **S4.3** | Source map：运行时错误 → `.logia` 行号 | codegen 嵌 line table |
-| **INT-03** | 磁盘 `.logia.cache`；Editor 菜单调 `ays-logia compile` / `runTool` | 非 Play 关键路径 |
-| **INT-04** | `LogiaHostKind::EventHandler`；`event.emit/subscribe` ambient | 依赖 EventSystem 稳定 API |
-| **INT-05** | 3+ hop chain、`FQuaternion` 链式 reflect | codegen/helper 同形扩展 |
+| **S4.3** | Source map 完善 | S5 ED-03 已交付 bridge `getLastError`；多 frame 见 S5 ED-04 |
+| **INT-03b** | 磁盘 `.logia.cache`；Editor 菜单调 `ays-logia compile` | 原 INT-03 集成项改名；input axis 已是 INT-03 |
+| **INT-04** | `LogiaHostKind::EventHandler`；`event.emit/subscribe` | 依赖 S4.1 + EventSystem API |
+| **INT-05b** | 3+ hop chain、`FQuaternion` 链式 reflect | 与 M1 正交；按需 |
 
 ### 14.6 明确推迟
 
@@ -2365,6 +2368,229 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 - Tool hot reload（one-shot 不需要）
 - `luaL_dump` bytecode CLI 输出
 - 完整 Reflect 派生图 / 多继承 `isSubclassOf`
+
+---
+
+### 14.6+ M1 — Thin vec2 + `input.vec2("move")` (NOT full AYMath)（2026-07-15）
+
+**问题**：`input.axis("move_x")` + `input.axis("move_y")` 两条标量粘向量是 PlayerController 真正常见的「塞进 vec」路径，M1 把 `input.vec2("move") → {x, y}` 单一 ambient + `vec2.length(v)` / `vec2.normalized(v)` 两个 ambient helpers 落地，让 Logia 玩家面拥有最小玩家向量工具。
+
+**前置已 ship**：INT-02/03 ship 后 InputProvider 4 virtual + DeviceInputProvider + InputMapping Phase-2 (`bindAxis` / `getAxisValue` / `bindAxisGamepad` 已 ship);`ayt::math::FVector2` (`MathTypes.h:13-19`, 与 FVector3 同构 anonymous union + nested struct `Float32 x, y`)。
+
+**用户决策 2026-07-15**：
+1. **Backend = 扩 InputMapping `bindAxis2D + getAxis2D`**（decision B = 不走约定派，扩 AYDevice first-class API）。
+2. **Helpers Style A ambient**（`vec2.length(v)` / `vec2.normalized(v)`, Lua table 纯数据；**不** metatable / usertype)。
+3. **`var m: FVector2` 是 Logia type 注解**，不分配 C++ 对象 — initializer 必须 table literal / ambient 返值（跟 `var n: int` 同款，R-3 已 ship 路径）。
+4. **不做**全量 AYMath（仅 vec2.length / normalized, 拒绝 dot / distance / add / mul / 矩阵 / quat）。
+
+**交付（2 module, ~320 LOC, ~45 new tests）**：
+
+1. **`AYDevice/src/AYInputMapping.{h,cpp}`**：`InputMapping` 公共方法从 16→20。`bindAxis2D(name, xAxis, yAxis)` 写 `Axis2DBinding { string xAxis; string yAxis; }` 到 `_axes2D` map;`getAxis2D(name)` 走两次 `getAxisValue`(unbound 返 `Vector2{}`,unbound 1-D 0.0f default)。`hasAxis2D` / `clearAxis2D` 是 `findAxis2D` helper 上的 map 标准操作。**纯 metadata，不**验 `xAxis`/`yAxis` 已有 1-D 绑定 — 让玩家按需顺序绑。`Vector2` 复用 `AYInputTypes.h:11-14` 已 ship struct (Float32 x/y)。
+
+2. **`AYDevice/include/AYDeviceInputProvider.{h,cpp}`**：`DeviceInputProvider::getAxisValue2D(name, &outX, &outY)` override — null mgr → false;`!hasAxis2D(name)` → false;否则 `getAxis2D()` cast 到 double 写入。沿用其他 override 的 permissive "unknown → false" 模式（Editor transient teardown 安全）。
+
+3. **`AYScript/include/AYScriptRuntimeBridge.h`**：`LogiaRuntimeBridge::InputProvider` 加第 5 virtual `getAxisValue2D(key, &outX, &outY) -> bool` — **breaking change (R-1 HIGH)**，codebase 3 implementer 同步 override (Mock / Device / Scripted test fixture)。outX/outY double 而非 float 让 Lua-side 接收方不需强转。
+
+4. **`AYScript/src/logia/AYSemanticAnalyzer.cpp`**：`ensureAYEntityTypesRegistered` 在 FVector3 block 后插 FVector2 mirror block — `findType<FVector2>` null → `new TypeInfoImpl<FVector2>("FVector2", ...)`, `registerTypeInfo("FVector2", info)`, 幂等 `getFieldCount() == 0` guard 加 `x` / `y` Float32 fields via `findType("float")` + `offsetof(ayt::math::FVector2, x/y)` (MSVC OK 与 FVector3 已 ship 路径同款 anonymous union pragma)。
+
+5. **`AYScript/src/AYScriptRuntimeBridge.cpp`**：(a) `MockInputProvider` 加 `getAxisValue2D` override — `outX = outY = 0.0; return false` (Lambda-side 接 default `{0, 0}`)。(b) `#include <cmath>` 加 (sqrt 用)。(c) ambient `inputTbl["vec2"]` lambda — dispatch `p->getAxisValue2D(name, x, y)`, 返 fresh `sol::table {x=, y=}`。(d) ambient `vec2Tbl` 表注册 `vec2.length` / `vec2.normalized` 接 `sol::table`, 通过 shared file-local `readVec2(v, &outX, &outY) -> bool` 帮助器**同时接受 keyed `{x=, y=}` 跟 array-style `{3, 4}`**(1-indexed `v[1]` / `v[2]` fallback)。`vec2.normalized` mutate input table 以省一次 alloc(**踩边**: 后续若要求 pure semantics 是 5 行 fresh-table 升级)。`len == 0.0` 短路 → passthrough input 避免 NaN。
+
+6. **`AYScript/examples/player_controller.logia`**：M1 改写 — 用 `var move: FVector2 = input.vec2("move")` + `vec2.length(move) > 0.1` guard + `vec2.normalized(move)` 取代旧 `input.axis` 双标量 + 自乘 normalize。
+
+7. **`kLogiaPipelineVersion` 23 → 24**：3 理由 — ambient `input.vec2` 新 lambda、新 ambient 表 `vec2` (`length` / `normalized`)、FVector2 reflect 注册副作用 (stale cached source 在 type-registry 顺序不同下解析失败)。Bump 强 cache refresh。
+
+**Tests (Test_Input.cpp 5 + Test_LogiaAmbient.cpp 6 + Test_LogiaDeviceInput.cpp 2 = 13 新用例)**：
+
+- `test_mapping_axis2d_unbound_returns_zero` (`Vector2{}` zero default)
+- `test_mapping_axis2d_combines_two_bound_axes` (D + W → `{1, 1}`)
+- `test_mapping_axis2d_does_not_disturb_single_axis_query`
+- `test_mapping_axis2d_clear_drops_binding`
+- `test_mapping_axis2d_overwrite_replaces_axes`
+- `vec2_length_basic_345_returns_5` (`{x=3, y=4}` → 5.0)
+- `vec2_normalized_basic_returns_unit` (`{x=3, y=4}` → `{x=0.6, y=0.8}` via `rfind("0.6", 0) == 0` 浮点容忍)
+- `vec2_normalized_zero_vector_passthrough` (`{x=0, y=0}` → 原表不 mutate)
+- `vec2_length_array_style_accepts_positional` (`{3, 4}` array-style 通过)
+- `vec2_length_empty_table_returns_zero_safe` (`{}` → 0.0)
+- `fvector2_reflect_registration_present` (`findType("FVector2")` 非 null, 2 字段 Float32)
+- `int04_input_vec2_dispatches_xy_axes` (`Vec2Provider` 注入 0.7, -0.3)
+- `int04_input_vec2_default_mock_returns_zeros` (unbound → `{0, 0}`)
+
+**Build + Tests**：
+- `ninja -C out/build/x64-Debug AYScript_Test AYScript AYDevice AYDevice_Test` → 43 target **green (ninja_exit=0)**
+- `AYDevice_Test` **199/199 PASS** (原 182 + 5 axis2d + 12 pre-existing slice 增长)
+- `AYScript_Test` **1253/1253 PASS** (原 1208 + 5 axis2d + 6 vec2 + 2 int04_ + 32 INT-03 后 slice 增长)
+
+**Deferred (NOT in M1)**：
+- `vec2.dot` / `distance` / `lengthSq` / `vec2.zero` 常量 / `vec2.mul(scalar)` — 薄表承诺仅 length + normalized, 加法 / 距离交给 Lua / C++ 玩家自己写。
+- `vec2.normalized` 改 fresh-table 语义 — 当前 mutation 是 micro-opt，踩边；后续若 user-facing confusion 切。
+- `FVector2.normalize()` C++ method 暴露到 Logia — `FVector2` 仅 type annotation, 同 FVector3, 不暴露 method。
+- `dynamic_cast<DeviceInputProvider*>` bridge 端 shortcut — convention 已一致, 不优化尚未可见 hot-path。
+- FVector3 `var m: FVector3` 玩家路径（R3.0 onwards）— R5.3 expression-type 一起做（multi-construct 路径需要 type registry chain 扩）;不属 M1。
+
+---
+
+### 14.6++ S4.1 — `signal` / `connect` per-component event surface (2026-07-15)
+
+**问题**：Logia 玩家面缺事件原语 — 玩家要么硬绑 `self.some_method()`（违反解耦）、要么走 AYGameLoopEventBus（只服务 C++ 端、Logia 不可见）。S4.1 给 Logia 加 per-component 事件：脚本里 `signal NAME(params)?;` 声明事件，lifecycle 里 `connect(...)` 注册 handler / `emit(...)` 触发，前向引用 + 编译期 arity / 类型校验。
+
+**前置已 ship**：M1 ship（kLogiaPipelineVersion=24、1253/1253 测试绿）。R5.2-H 静态校验 + S5 ED-02 source loc + S5 ED-03 runtime panic translation + R-Audit `function` keyword + R4.1/4.2 reflect。Logia 编译器 / 运行时 / bridge 自洽。
+
+**用户决策 2026-07-15**：
+
+| # | 决策 | 理由 |
+|---|------|------|
+| D-1 | **Bare ambient** `emit(...)` / `connect(...)`（**不** `self:emit(...)`） | Plan agent grep `parseCall` (`AYParser.cpp:602-647`) 验证 Logia grammar 只接 `(`, `.`, `[` 三后缀,`TokenType::Colon` 仅 type annotation。colon-call grammar 是 separate slice。 |
+| D-2 | **Handler 自动绑定 self** | codegen connect 时 wrap handler `function(...) local self = ...; return on_damaged(...) end`,handler 体内可见 self。 |
+| D-3 | **不做 disconnect** | S4.1 最小切片。S4.1b 再加 connect handle + tombstone / compact。 |
+
+**Surface syntax（锁定）**：
+
+```logia
+script PlayerController {
+    signal damaged(amount: int)             // 0+ typed params;metadata-only decl
+    signal died()
+
+    on_start() {
+        connect("damaged", on_damaged)       // handler = a script-block `function`
+    }
+    on_update(dt: float) {
+        if input.is_pressed("hit") {
+            emit("damaged", 10)              // arity + type 编译期校验
+        }
+    }
+    function on_damaged(amount: int) {
+        self.hp = self.hp - amount           // self 由 closure wrap 注入(D-2)
+    }
+}
+```
+
+**交付（1 module, ~700 LOC,~30 new tests, 7 commit 切片）**：
+
+| 切片 | 文件 | 内容 |
+|------|------|------|
+| **C1** Lexer | `include/logia/AYToken.h`, `src/logia/AYLexer.cpp`, `unittest/Test_LogiaLexer.cpp` | `TokenType::Signal` + keywords map entry + 2 tests(`signal`→`Signal`,`emit`/`connect` stay `Identifier` regression guard) |
+| **C2** AST | `include/logia/AYAst.h` | `SignalDeclStmt`（metadata-only,no body）+ `CallExpr::AmbientCallKind` enum + `ambientCall` field |
+| **C3** Parser | `src/logia/AYParser.cpp`, `include/logia/AYParser.h`, `unittest/Test_LogiaParser.cpp` | `parseSignalDecl(signalTok)` mirror `parseFunctionDeclStmt` 减去 body + `parseMember` 分支 + `parseStatement` gate(mirror `function`-in-body gate)+ `synchronize()` recovery token `Signal`/`Function` + 6 tests |
+| **C4** Semantic | `src/logia/AYSemanticAnalyzer.cpp`, `include/logia/AYSemanticAnalyzer.h`, `unittest/Test_LogiaSemantic.cpp` | `_signals: unordered_map<string, vector<Param>>` field + `analyzeScript` pre-pass(forward-reference 通解)+ `analyzeSignalDecl`(重复名硬错 + param type 通过 `resolveTypeName` 校验)+ `analyzeEmitCall`(host-kind guard + string-literal name + signal-exists + arity + per-arg type compat via `signalArgMatchesParam` helper)+ `analyzeConnectCall`(host-kind + arity==2 + signal-exists)+ `analyzeStmt` defensive no-op branch + 10 tests |
+| **C5** Codegen + version bump | `src/logia/AYLuaCodegen.cpp`, `include/AYScriptRuntimeBridge.h`, `unittest/Test_LogiaCodegen.cpp`, `unittest/Test_LogiaEmitDump.cpp` | `emitScript` helper block(**only when ≥1 signal**,zero-cost 否则)— `M._signalNames` metadata + `__ay_connect`/`__ay_emit` local fns + `emitExpr` CallExpr 分支降级(`__ay_emit(self, ...)` / `__ay_connect(self, ..., function(...) local self = ...; return handler(...) end)`)+ `emitStmt` defensive no-op + `kLogiaPipelineVersion` 24→25 + 6 codegen tests + 1 golden dump |
+| **C6** Runtime + cache | `unittest/Test_LogiaRuntime.cpp`, `unittest/Test_LogiaCompileCache.cpp` | 7 runtime integration tests(connect+emit 端到端 / multi-handler 顺序 / emit no connections = no-op / typed args / multi-instance 独立 list(D-2 acceptance)/ handler self-bind closure / emit-before-connect no-op + later fire)+ 1 cache test(version bump 让 first load miss) |
+| **C7** Docs + example | `design.md`(本文)+ `examples/signal_demo.logia`(NEW)+ `ay-script.md` memory | §14.6++ S4.1 delivery section + §13 changelog row + design.md 头部 status 更新 + 示例 PlayerController 演示 |
+
+**Runtime bridge：零新 C++ state**。
+
+- handler list 挂 `self._signals`(Lua 表,per-instance by construction)— **不** 新 `unordered_map<void*, ...>` receiver-keyed state map,sol2 + sol::table lifetime 自然对齐 receiver lifetime。
+- `__ay_emit` / `__ay_connect` 是 emitted Lua,**不** `lua_register`'d C fn(contrast `ayt_reflect_*` 需 C++ 碰 reflect registry;signals 全 Lua-side)。
+- `registerEngineApi()` / `callLifecycle` / `Impl` pimpl 全部 unchanged。唯一 bridge touch 是 `kLogiaPipelineVersion` bump(cache key 变化,非 runtime state)。
+
+**Q4 multi-instance acceptance**：每个 `self` 有自己 `self._signals`,`__ay_emit` 只 walk 自己 list,N 个 PlayerController 各自 handlers 自然隔离。runtime test `s41_runtime_two_instances_have_independent_handler_lists` pin 这一点。
+
+**kLogiaPipelineVersion 24 → 25** — 3 理由(mirror R5.x history discipline)：
+
+1. codegen emit shape 新增 helper block(`__ay_emit` / `__ay_connect` / `M._signalNames`)。
+2. 旧 v24 cached chunks 调 emit → nil-call 崩(无 `__ay_emit` global)。
+3. `M._signalNames` metadata 表(stale entries 缺字段,bridge cache hit 失败)。
+
+**Tests (~30 cases)**：
+
+| 文件 | Cases |
+|------|-------|
+| `Test_LogiaLexer.cpp` | 2(`signal`→`Signal`、`emit`/`connect` stay `Identifier`) |
+| `Test_LogiaParser.cpp` | 6(0-param signal、typed-param signal、multiple、optional `;`、lifecycle-body gate error、emit/connect are CallExprs) |
+| `Test_LogiaSemantic.cpp` | 10(duplicate signal、emit unknown、arity mismatch、arg type mismatch、non-literal name、connect unknown、connect wrong arity、valid case 编译通过、Tool host emit/connect 都 hard error、bogus signal param type) |
+| `Test_LogiaCodegen.cpp` | 6(helper block 完整形状、zero-cost no-signal guard、emit lowering、connect lowering with self-bind、multi-signal 单一 `_signalNames` 表、source-map anchored to signal line) |
+| `Test_LogiaEmitDump.cpp` | 1 golden dump `40_s41_signal_surface`(全 surface 端到端 dump) |
+| `Test_LogiaRuntime.cpp` | 7(connect+emit 端到端、multi-handler 顺序、emit no connections = no-op、typed args、two-instance independent lists、handler self-bind via closure、emit-before-connect no-op + later fire) |
+| `Test_LogiaCompileCache.cpp` | 1(version bump 让 first load miss) |
+
+**Deferred (NOT in S4.1, NOT in S4.1b)**：
+
+| Item | Plan |
+|------|------|
+| Cross-component / cross-script signals | Future AYEventSystem — global signal bus |
+| Colon-call grammar `self:emit(...)` | Separate grammar slice enabling Lua-style method calls broadly |
+| Handler signature validation on connect | Future slice — requires analyzer `function`-member map (attempted in S4.1b plan but reverted after stack-corruption regression in MSVC debug build; see §14.6+++ S4.1b lessons) |
+| Compact tombstone (rec.dead=true 永久占位 → periodic `table.remove`) | Future;S4.1b accept 永久 mark,slot 数 ≈ 总 connect 数 |
+| Class-level default handlers | Future |
+| Scoped/namespaced signals (`signal ui.clicked()`) | Future;flat string names in v1 |
+| Signal forwarding / re-emit chains | Future |
+| Dynamic (non-literal) signal names | Future runtime-checked path |
+| One-shot listeners (`connect_once`) | Future |
+
+**Lessons (post-ship)**：
+
+1. **Grammar constraints force surface decisions**：`self:emit(...)` 是「直觉正确」但 Logia parser 不支持 colon-call。Lesson:在写 plan 前 **先 grep `parseCall`** 看 grammar 真支持什么后缀,不要凭印象写。Plan agent 找到这个约束避免了错误 surface 设计。
+2. **Shape recognition is the right pattern for ambient**：跟 `input` / `log` / `time` 同款 — `IdentifierExpr` callee 直接识别,不 blanket-reserve keyword。Lesson:新 ambient 加进 analyzer `CallExpr` branch,不要扩 lexer keywords。
+3. **`__ay_` prefix reserved namespace**：R-Audit 已 ship 这个 convention,新 codegen helper 走同前缀。Lesson:codegen-side internal helper name 必须有可识别 prefix,避免跟 user symbol 撞。
+4. **Per-instance state belongs on `self`, not in bridge**：信号 handlers 是 per-PlayerController state,挂 `self._signals` 自然 per-instance。Lesson:bridge 端不要加 receiver-keyed state map,让 Lua table 自己管 — sol2 + sol::table lifetime 已对得齐 receiver lifetime。
+5. **Host-kind guard for `self`-dependent ambients**：Tool host scripts 没 self,emit / connect 在那种 context 编译期 reject。Lesson:新 ambient 用到 self 时,**先**在 analyzer host-kind guard,S5 ED-02 source loc 提供精准报错。
+6. **Pre-pass for forward-references**：`on_start` 里 `connect("damaged", ...)` 必须能引用 script-block 后续声明的 signal。Lesson:collect signal decls 在 walk bodies 之前,做 first-pass collection 是 forward-reference 通解。
+7. **Codegen zero-cost guard via pre-scan**：`emitScript` 用 `hasAnySignal` 一次 scan,no-signal script 不 emit helper block(零开销)。Lesson:codegen 加 metadata helper 时**先** scan source 是否真用得到,不要无条件 emit。
+8. **runtime test 必须传 non-null receiver**：之前 runtime test 全传 nullptr(`self == nil`),`self._signals = self._signals or {}` 会 nil-call 崩。S4.1 runtime test 用 stack-local `int fakeReceiver = 0` 作 opaque lightuserdata key。Lesson:`self`-dependent 新 ambient 加进 runtime 时,要意识到 test fixture 不能再 nullptr receiver。
+
+---
+
+### 14.6+++ S4.1b — `disconnect(id)` + connect-int-id (2026-07-18)
+
+**问题**：S4.1 ship 后,玩家只能 fire-and-forget 调 `connect("x", fn)` —— handler 永久挂着,on_destroy 也卸不掉。S4.1b 加 `connect → int id → disconnect(id)` 流程 + dense-mark tombstone 维护 handler list 密度。Handler signature validation 原本计划一起 ship(用户原话"不做推断,主动声明 `var h: int`"),但实施中发现 stack corruption regression(见 Lessons §3),v2 check 推到未来 slice。
+
+**Surface syntax(Locked)**：
+
+```logia
+script PlayerController {
+    signal damaged(amount: int)
+    var hit_handler: int = 0
+
+    on_start()  { hit_handler = connect("damaged", on_damaged) }
+    on_destroy() { disconnect(hit_handler); hit_handler = 0 }
+
+    function on_damaged(amount: int) { self.hp = self.hp - amount }
+}
+```
+
+**关键 decisions(2026-07-18)**：
+
+| # | Decision | Detail |
+|---|----------|--------|
+| D-1 | Bare ambient `disconnect(id)`,不 `self:disconnect(...)` | 同 S4.1 emit/connect;走 IdentifierExpr callee shape-recognition,**不**加 lexer keyword,**不**加 TokenType::Disconnect |
+| D-2 | Connect 返 connection id(int) | `__ay_connect` 改为返 `bag._nextId`(per-instance 递增 int),旧调用 `connect("x", fn)` 忽略返值仍合法 |
+| D-3 | Int id 挂在 bag 上 | `bag._nextId = id + 1`,connect 时返,disconnect 按 id 找 slot |
+| D-4 | **Dense-mark tombstone**(`rec.dead=true`) | disconnect 走 `rec.dead = true`,**不**置 `list[i] = nil`。Lua 5.4 §6.1 `ipairs()` 遇中间 nil **永久停**(reference manual: "stops at first absent index"),所有后挂 handler 永远不触发。emit 走 `if not rec.dead then rec.fn(...) end` |
+| D-5 | **`var h: int` 强制注解**(原计划 D-6 init inference 已撤)| Player 必须显式写 `var h: int = connect(...)`。`var h = connect(...)` 走 Logia 现有 `unknown type ''` 路径自动 reject。**无** init-position type inference(Logia 仍 R5.x "static-only" 哲学) |
+| D-6 | **Handler signature v2 check 撤** | 原计划 `analyzeVarDecl` 加 init-position inference + `_functions` map 走 handler lookup。实施中 `_functions` 字段加在 `SemanticAnalyzer` 触发 MSVC debug build stack corruption,回滚 map + v2 check 整套。`disconnect(h)` 的 int check 仍走 `_scope[vd].typeName == "int"` |
+
+**AST 改动**：`CallExpr::AmbientCallKind` 加 `Disconnect` 第四值(`AYAst.h`)。
+
+**Codegen 改动**：`emitScript` helper block 三个 helper 全部 reshape;`__ay_connect` 现在返 id + 存 `{ id, fn }` record;新增 `__ay_disconnect(self, id)` 走 dense-mark scan;`__ay_emit` 走 `if not rec.dead then rec.fn(...) end`。`emitExpr` CallExpr dispatch 加 `Disconnect` 分支。
+
+**Analyzer 改动**：新增 `analyzeDisconnectCall`(host-guard + arity==1 + **hard int check** via `_scope`)。**未** 改 `analyzeVarDecl`(D-5 不做 inference)。
+
+**Runtime bridge**：zero new C++ state。`kLogiaPipelineVersion` 26 → 27(代码逻辑不变,cache key 强 invalidate)。
+
+**Tests (5 新)**：
+- `s41b_parse_disconnect_is_call_expr` — Parser pin `CallExpr(IdentifierExpr("disconnect"), [IdentifierExpr(id)])`
+- `s41b_disconnect_in_tool_host_is_hard_error` — Tool host 报 host-kind error
+- `s41b_runtime_disconnect_removes_handler` — 核心验收:connect + disconnect + emit → handler 不触发,witness 维持空
+- `s41b_runtime_disconnect_unknown_id_is_noop` — `disconnect(99999)` 不崩,其他 handler 仍触发
+- `s41b_runtime_disconnect_one_of_many` — **R-1 critical**:3 handler 断中间一个 → witness "101"(first +1 + third +100,second skip)。如果 dense-mark 失败,ipairs 停在 dead slot,witness 会是 "1" → 测试 FAIL
+
+**Acceptance**：
+- AYScript_Test 1435/1435 PASS(原 1405 + ~30 新;实测 +30)
+- `var h: int = connect(...); disconnect(h)` 真实卸 handler
+- Tool host 用 `disconnect` → compile error
+- `kLogiaPipelineVersion = 27`,stale cache invalidates
+
+**Lessons (post-ship)**：
+
+1. **Lua `ipairs()` 不 skip nil hole** —— Lua 5.4 ref manual §6.1 "stops at first absent index",跟 Python enumerate / JS Array filter 不同。Future slice 做 tombstone 必须 dense-mark 或 explicit counter,**永远不要把 slot 置 nil**。Lesson:任何 hot-path iterate-and-mutate,先看 iterator 对 hole 的语义(Lua `ipairs` 不 skip,`pairs` skip)。
+2. **`var h = expr` 不做 init-position inference** —— 用户原话"取巧"否决 `var h: int` 强注解方案想走 inference。Logia R5.x "static-only" 哲学下 inference 是新框架,scope 爆炸;现有 `unknown type ''` 自动 reject `var h = expr` 无 type annotation,**这是 static-only 哲学的正交保护**,不需要 inference。Lesson:player 想用 `var h = expr`,analyzer 必须 reject —— silent type widening 是 logia 静态保证的退化。
+3. **`SemanticAnalyzer` 加 `unordered_map` 字段触 MSVC debug build stack corruption**(S4.1b plan D-6 init inference 实施时)—— `std::unordered_map<std::string, const FunctionDeclStmt*> _functions` 加在 `_signals` 之后,field offset 变化 + MSVC /RTC1 stack cookie 检测到 `sem` 周围 corruption。回滚 `_functions` + 配套引用后 1405/1405 稳定 PASS。**Root cause 未完全 pinpoint**:可能是 default ctor 的某种 alignment / bucket 数差异,但 MSVC debug build + 这种 analyzer field 改动的组合已记入 regression list。Lesson:涉及 `SemanticAnalyzer` / `Compiler` / `Parser` 这种长生命周期分析器类的字段新增,**先在 release build 验证再 ship**;debug build 的 /RTC1 stack check 触发并不总是真 corruption,但常常是 field offset 不对齐的早期信号。
+4. **Dense-mark tombstone 永久占位是 S4.1b 接受的 trade-off** —— `rec.dead=true` slot 永远不被回收,handler list 总长 = 总 connect 数(不算 disconnect 后的)。对于长生命周期 component(1000+ handlers + 频繁 disconnect)会缓慢线性增长。Lesson:接受,推到 future compact slice;hot path 性能 > 内存回收。
+5. **Per-bag `_nextId` 隔离** —— `bag._nextId` 是 per-instance field,跨 instance **不**共享。两个 PlayerController 各 connect 5 次 → id 都是 1..5。这跟 per-instance state 的设计同款。Lesson:per-instance 计数器挂 self 表,不挂 module 级;bridge 端不维护 receiver-keyed map。
+6. **Zero-cost guard 保留** —— no-signal script 仍不 emit helper block(`hasAnySignal` pre-scan)。S4.1b 加 `__ay_disconnect` 后,no-signal script 不付 `__ay_disconnect` 的 codegen + runtime 开销。Lesson:codegen 加 helper 时**必须**保留 zero-cost guard;不要无条件 emit。
+
+---
+
+### 14.7 风险与约束（继承 S3）
 
 ### 14.7 风险与约束（继承 S3）
 
@@ -2418,7 +2644,9 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 ---
 
-| 2026-07-15 | **INT-03 完成（P1b）**:`input.axis(name)->float` + `input.is_just_released(name)->bool` 真接 AYDevice,Logia 完整 input surface 闭环。**`LogiaRuntimeBridge::InputProvider` 扩 2 virtual**:`getAxisValue` (float) + `isJustReleased` (bool) — **breaking change**,codebase 3 implementer 一起 override(MockInputProvider / DeviceInputProvider / ScriptedInputProvider test fixture)。**`MockInputProvider` 扩展**:axis 默认 0.0,just_released 默认 false(S1 / INT-02 测试零回归)。**Logia ambient `input` table**:`inputTbl["axis"]` + `inputTbl["is_just_released"]` 走同 `InputProvider*` dispatch 模式。**`DeviceInputProvider` 2 override**:`getAxisValue` → `_mgr->mapping().getAxisValue` (Phase-2 bindAxis/bindAxisGamepad 已 ship),`isJustReleased` → `_mgr->mapping().isActionJustReleased`(同 `isJustPressed` 边沿语义 — `DeviceManager::pollEvents` newFrame 在 platform pump 之前,GameLoop priority Device=0 < Script=100 保证 query 永远在 pump 之后)。**SemanticAnalyzer**:加 sibling `isStaticallyNumeric(e, analyzer)`(file-local 自由函数,mirror `isStaticallyBool`) + `isNumericTypeName` helper 接受 `int` / `float` / `double` / `int64`。Branch-for-branch mirror bool:LiteralExpr (int/float) / IdentifierExpr (resolvedDecl.typeName builtin vars — R5.2-C pattern) / MemberExpr (resolvedType->getName()) / CallExpr (ambient-receiver carve-out — mirror R5.2-H.b,`input.axis(...)` 当 numeric-yielding)/ UnaryExpr (-/+ only)/ BinaryExpr (arithmetic ops yield numeric when both leaves numeric)。**Lesson**:当下 `if axis() > 0.1 && is_just_pressed(...)` 已经 PASS — BinaryExpr 比较分支靠 `leafIsStaticallyPrimitive` 已经把 ambient-receiver CallExpr 当 primitive leaf;numeric sibling 是 future-proof,不为修当下 regression。**Tests**:`Test_LogiaDeviceInput.cpp` 加 3 用例(axis KeyPair 正负交互 3 帧 / just_released 4 帧 edge / default mock 安全),`Test_LogiaAmbient.cpp` ScriptedInputProvider 加 2 默认 override;`AYScript_Test` **1208/1208 PASS**(+ 29 vs INT-02 1179,3 新 int03_*),`AYDevice_Test` **182/182 PASS**(无回归)。2 commits: `AYDevice dea8458`, `AYScript 3ae9f06`。InputProvider 接口本轮 breaking — Logia 唯一 consumer,no external dependency,accept 一次性扩。详见 §14.4。 |
+| 2026-07-15 | **INT-03 完成（P1b）**:`input.axis(name)->float` + `input.is_just_released(name)->bool` 真接 AYDevice,Logia 完整 input surface 闭环。**`LogiaRuntimeBridge::InputProvider` 扩 2 virtual**:`getAxisValue` (float) + `isJustReleased` (bool) — **breaking change**,codebase 3 implementer 一起 override(MockInputProvider / DeviceInputProvider / ScriptedInputProvider test fixture)。**`MockInputProvider` 扩展**:axis 默认 0.0,just_released 默认 false(S1 / INT-02 测试零回归)。**Logia ambient `input` table**:`inputTbl["axis"]` + `inputTbl["is_just_released"]` 走同 `InputProvider*` dispatch 模式。**`DeviceInputProvider` 2 override**:`getAxisValue` → `_mgr->mapping().getAxisValue` (Phase-2 bindAxis/bindAxisGamepad 已 ship),`isJustReleased` → `_mgr->mapping().isActionJustReleased`(同 `isJustPressed` 边沿语义 — `DeviceManager::pollEvents` newFrame 在 platform pump 之前,GameLoop priority Device=0 < Script=100 保证 query 永远在 pump 之后)。**SemanticAnalyzer**:加 sibling `isStaticallyNumeric(e, analyzer)`(file-local 自由函数,mirror `isStaticallyBool`) + `isNumericTypeName` helper 接受 `int` / `float` / `double` / `int64`。Branch-for-branch mirror bool:LiteralExpr (int/float) / IdentifierExpr (resolvedDecl.typeName builtin vars — R5.2-C pattern)/ MemberExpr (resolvedType->getName())/ CallExpr (ambient-receiver carve-out — mirror R5.2-H.b,`input.axis(...)` 当 numeric-yielding)/ UnaryExpr (-/+ only)/ BinaryExpr (arithmetic ops yield numeric when both leaves numeric)。**Lesson**:当下 `if axis() > 0.1 && is_just_pressed(...)` 已经 PASS — BinaryExpr 比较分支靠 `leafIsStaticallyPrimitive` 已经把 ambient-receiver CallExpr 当 primitive leaf;numeric sibling 是 future-proof,不为修当下 regression。**Tests**:`Test_LogiaDeviceInput.cpp` 加 3 用例(axis KeyPair 正负交互 3 帧 / just_released 4 帧 edge / default mock 安全),`Test_LogiaAmbient.cpp` ScriptedInputProvider 加 2 默认 override;`AYScript_Test` **1208/1208 PASS**(+ 29 vs INT-02 1179,3 新 int03_*),`AYDevice_Test` **182/182 PASS**(无回归)。2 commits: `AYDevice dea8458`, `AYScript 3ae9f06`。InputProvider 接口本轮 breaking — Logia 唯一 consumer,no external dependency,accept 一次性扩。详见 §14.4。 |
+| 2026-07-15 | **M1 完成（P1c,thin vec2 + `input.vec2`）**:Logia 玩家面获得薄向量落地。**用户决策 2026-07-15** = **(a) `input.vec2` 真接 `InputMapping` 的 `bindAxis2D + getAxis2D`（decision B）** + **(b) helpers Style A ambient = `vec2.length(v)` / `vec2.normalized(v)`，Lua table 纯数据，不 metatable / usertype** + **(c) `var m: FVector2` 是 Logia type 注解，不分配 C++ 对象**。**前置已 ship**: `ayt::math::FVector2` (`MathTypes.h:13-19` 同构 union `Float32 x, y`) + `LogiaRuntimeBridge::InputProvider` 4 virtual (INT-03 ship)。**AYDevice**: `InputMapping` 加 4 public + 1 struct + 1 map (`bindAxis2D` / `getAxis2D` / `hasAxis2D` / `clearAxis2D` / `Axis2Binding { xAxis; yAxis; }`)。**纯 metadata** — 不校验 `xAxis/yAxis` 已 bindAxis,`getAxis2D` 时调 2 次 `getAxisValue`(unbound 1-D axis 返 0.0f 现状安全 default)。**R-1 (HIGH — breaking `InputProvider`)**: 加第 5 virtual `getAxisValue2D(name, &outX, &outY) -> bool` — codebase 3 implementer 同步 override (Mock 返 false + 0.0 / Device null mgr 或 unbound 返 false / Scripted 测试 fixture 加 vec2Bound/vec2xReturn/vec2yReturn 配置字段)。**FVector2 reflect 注册**: `ensureAYEntityTypesRegistered` mirror FVector3 block 加 `registerTypeInfo("FVector2", ...)` + `x` / `y` Float32 fields(幂等 `getFieldCount() == 0` guard)。`offsetof(FVector2, x)` MSVC OK 同 FVector3 已 ship pattern (MathTypes.h 已有 `#pragma warning(disable: 4201)` 抑制 anonymous union 警告)。**ambient `input.vec2(name)`**: bridge lambda 走 `p->getAxisValue2D(name, x, y)`,unbound → fallback `{0, 0}`,绑后 **fresh Lua table** `{x=, y=}` 每次新分配(避免 mutation 跨 caller 副作用)。**ambient `vec2` table**: `vec2.length` / `vec2.normalized` 接 `sol::table`,通过 shared `readVec2` 帮手**同时接受 keyed `{x=, y=}` 跟 array-style `{3, 4}`**(1-indexed `v[1]` / `v[2]` fallback)。`vec2.normalized` mutate input table 以省一次 alloc,**踩边** — 后续若要求 pure semantics 改 fresh table 是 5 行升级。**Sample 改写**: `examples/player_controller.logia` `var move: FVector2 = input.vec2("move")` + `vec2.length` / `vec2.normalized` 取代旧双标量。**Tests**: `Test_Input.cpp` 5 axis2d 用例 (unbound zero / combine two bound / single-axis 不受影响 / clear / overwrite-replace);`Test_LogiaAmbient.cpp` 6 M1 用例 (length basic 3-4-5=5 / normalized unit 0.6+0.8 / zero-passthrough / array-style `{3,4}` accept / empty-table safe / FVector2 reflect registry probe);`Test_LogiaDeviceInput.cpp` 2 int04_ 用例 (provider-driven ScriptedInputProvider-like `Vec2Provider` 注入 0.7,-0.3 / default-mock zeros via ScriptSubSystem path).**Final**: `AYScript_Test` **1253/1253 PASS**(+ 45 vs INT-03 1208,5+6+2+32 个 INT-03 后 slice 增长),`AYDevice_Test` **199/199 PASS**(+ 17,含 axis2d 5 新增)。**Lessons**:**(a) `var` 必须 type 注解**: 第一版我写 `var v = input.vec2(...)` 报 `Expected ':' after variable name`,Logia 的 `var x = expr` 不支持(必须 `var x: T = expr`);**Lesson**:`var` = S2.5 严格 typed,跟 `int x = 5` 同 pattern,**不能**用 `int x;` 或 `int x;` 短形式。**(b) `tostring(0)` ≠ `"0.0"`**: zero-passthrough path 走 mutate return,但 user table 初始 integer 0,`tostring(0) == "0"`,zero-vector test 期望 `"0.0"` fail。**Lesson**:`tostring(int) = "0"` vs `tostring(float) = "0.0"` Lua 区分。**Fix**: 测试期望 `tostring(0) == "0"`,or 改用 `tryGetLuaGlobalNumber` 走 double 比较。**(c) array-style 输入需 shared `readVec2` 帮助函数**: 第一版只读 `v["x"]` / `v["y"]` 错失 `{3, 4}` pos-indexed 表。**Lesson**: `sol::table` 是混合 map-array;Lua Logia 玩家写 `{3, 4}` 比 `{x=3, y=4}` 自然,dual-path 接受是预期 surface。**(d) `offsetof` + anonymous union 在 MSVC 实测**: 与 FVector3 已 ship 模式对照,FVector2 同构 union,`offsetof` OK 不需要新 pragma。`kLogiaPipelineVersion` 23→24 bump (**3 理由**: ambient 新 lambda + ambient 新表 + FVector2 type-registry 副作用,stale cache 必刷)。详见 §14.6。 |
+| 2026-07-15 | **S4.1 完成（P2a,`signal` / `connect` per-component event surface）**：Logia 玩家面获得 per-component 事件原语,7 commit 切片,**~700 LOC,~30 新测试**。**用户决策 2026-07-15** = **(D-1) bare ambient `emit(...)` / `connect(...)`**(Plan agent grep `parseCall` 验证 Logia grammar 只接 `(`, `.`, `[` 三后缀,colon-call 是 separate grammar slice)+ **(D-2) handler 自动绑定 self**(codegen connect 时 wrap handler closure `function(...) local self = ...; return handler(...) end`,handler 体内可见 self)+ **(D-3) 不做 disconnect**(S4.1 最小,S4.1b 再加 connect handle + tombstone/compact)。**Surface syntax 锁定**:`signal NAME(params)?;` 在 script-block scope(metadata-only)+ `emit("name", ...args)` / `connect("name", handler_fn)` 在 lifecycle body 内裸调(analyzer shape-recognize `IdentifierExpr("emit"\|"connect")` callee,**不** blanket-reserve keyword,跟 `input` / `log` / `time` 同 pattern)。**前置已 ship**:M1(`kLogiaPipelineVersion=24`)+ R5.2-H 静态校验 + S5 ED-02 source loc + S5 ED-03 runtime panic translation + R-Audit `function` keyword + R4.1/4.2 reflect + `var` 必须 type 注解。**C1 Lexer**:`include/logia/AYToken.h` 加 `TokenType::Signal` + `src/logia/AYLexer.cpp` keywords map 加 `{"signal", TokenType::Signal}`;`emit` / `connect` 故意 NOT 保留(回归 guard test pin)。**C2 AST**:`include/logia/AYAst.h` 加 `SignalDeclStmt`(metadata-only,no body,mirror `FunctionDeclStmt` 减 body)+ `CallExpr::AmbientCallKind { None, Emit, Connect }` enum + `CallExpr::ambientCall` field(默认 `None`,零源 incompat)。**C3 Parser**:`parseSignalDecl(signalTok)` 镜像 `parseFunctionDeclStmt` 减 body + `parseMember` 加 signal 分支 + `parseStatement` 加 signal-in-body gate(mirror function-in-body gate)+ `synchronize()` 加 `Function` / `Signal` recovery tokens。**C4 Semantic analyzer**:`_signals: unordered_map<string, vector<Param>>` 字段 + `analyzeScript` pre-pass(forward-reference 通解:walk bodies 之前先 collect 所有 signal decls)+ `analyzeSignalDecl`(重复名 hard error + param type 走 `resolveTypeName` 校验)+ `analyzeEmitCall`(host-kind guard `_ctx.expectSelf` → Tool host hard error + first arg string literal + signal-exists + arity match + per-arg type compat via `signalArgMatchesParam` helper)+ `analyzeConnectCall`(host-kind + `args.size()==2` + string-literal name + signal-exists,handler duck-typed v1)+ `analyzeStmt` defensive no-op + `signalArgMatchesParam` helper 接 `LiteralExpr` variant dispatch + `IdentifierExpr` VarDeclStmt.typeName + `MemberExpr` `resolvedType->getName()`。**C5 Codegen + version bump**:`emitScript` helper block(**仅当 `>=1 signal`**,zero-cost 否则)— `M._signalNames = { ["name"] = true }` metadata + `__ay_connect(self, name, handler)` / `__ay_emit(self, name, ...)` local fns(handler list 挂 `self._signals`,per-instance by construction)+ `emitExpr` CallExpr 分支降级:`__ay_emit(self, "name", ...args)` / `__ay_connect(self, "name", function(...) local self = ...; return handler(...) end)` + `emitStmt` defensive SignalDeclStmt no-op + `kLogiaPipelineVersion` 24→25(**3 理由**:helper block 新 shape + stale v24 cached chunks nil-call + `M._signalNames` metadata 表副作用)。**C6 Runtime + cache integration tests**:7 runtime cases(connect+emit 端到端 / multi-handler 注册顺序 / emit no connections = no-op / typed args `int` round-trip / **two-instance independent handler lists**(Q4 acceptance)/ **handler self-bind via closure**(D-2 acceptance)/ emit-before-connect no-op + later fire)+ 1 cache test(version bump force first load miss)。**C7 Docs + example**:`design.md` §14.6++ S4.1 delivery section(本 entry)+ §13 changelog row + §13.1 queue 更新 + `examples/signal_demo.logia`(NEW,PlayerController 完整示例)。**Tests breakdown**:Test_LogiaLexer 2 + Test_LogiaParser 6 + Test_LogiaSemantic 10 + Test_LogiaCodegen 6 + Test_LogiaEmitDump 1 golden + Test_LogiaRuntime 7 + Test_LogiaCompileCache 1 = **31 new cases**。**Zero new bridge C++ state**:`registerEngineApi` / `callLifecycle` / `Impl` pimpl 全部 unchanged,handler lists 是 emitted Lua-side state(`self._signals`),无 receiver-keyed C++ map。**Deferred** → **S4.1b**:`disconnect` + connect handle + tombstone/compact;handler signature validation on connect(Lua duck-type v1)/ cross-component signals → future AYEventSystem / colon-call grammar → separate slice / scoped/namespaced signals(`signal ui.clicked()`)→ future / dynamic signal names → future / one-shot listeners → future。**Lessons**:**(1)** Plan agent grep `parseCall` 找到 Logia grammar 不支持 colon-call,避免错误 surface 设计(`self:emit(...)` → bare `emit(...)`)。**(2)** shape-recognition 是 ambient 的正确 pattern,跟 `input`/`log`/`time` 同款 — `IdentifierExpr` callee 直接识别,不 blanket-reserve keyword。**(3)** `__ay_` prefix reserved namespace(R-Audit 已 ship convention),新 codegen helper 走同前缀避免 user symbol 撞。**(4)** per-instance state belongs on `self`,not in bridge — bridge 端不加 receiver-keyed state map。**(5)** host-kind guard for `self`-dependent ambients — Tool host 没 self,emit/connect 编译期 reject。**(6)** pre-pass for forward-references — signal decls collect 在 walk bodies 之前。**(7)** codegen zero-cost guard via pre-scan — `emitScript` 用 `hasAnySignal` 一次 scan,no-signal script 不 emit helper block。**(8)** runtime test 必须传 non-null receiver — 之前 test 全传 nullptr,`self._signals = self._signals or {}` nil-call 崩,用 stack-local `int fakeReceiver = 0` 作 opaque lightuserdata key。`kLogiaPipelineVersion = 25`。详见 §14.6++ S4.1 delivery section。 |
 
 ### 14.4 P1b — INT-03：Logia `input.axis` / `input.is_just_released`（2026-07-15）
 
@@ -2457,10 +2685,113 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 **Lesson**:**`std::variant` 的 `holds_alternative` 必须 exact-match variant type**。`LiteralExpr::Value` 是 `std::variant<std::monostate, bool, float, int, std::string>`(`AYAST.h:113`),不是 `long long` / `double`。第一次写 `holds_alternative<long long>` 编译报 C2338 "T to occur exactly once"。Lesson: **new variant type 检查先 grep 头文件里 `using Value =` / `using type =`,不要凭印象写 long long / double**。
 
-**Deferred** (推 INT-04 / later):
+**Deferred** (推 later — **部分已改 M1**):
 - `LogiaRuntimeBridge::InputProvider` 进一步扩展(`on_press` / `on_release` event callbacks)— S4.1 (`signal` / `connect`) 先。
-- `input.axis` 返回 `FVector2` (single name → xy stick pair)— multi-return shape 需要 Logia tuple 支持,推 R5.3 expression-type work。
+- ~~`input.axis` 返回 `FVector2`~~ → **改由 M1 `input.vec2(name)` 落地**（见 §14.8）；单轴 `input.axis` 保持 float。
 - Editor runtime rebind API (`device.binding.rebind`)。
+
+---
+
+### 14.8 Post-INT-03 指挥（2026-07-15）— 下一刀顺序
+
+> **读者**：交给 Claude Code 执行下一 session。  
+> **前提**：INT-01/02/03 已绿；`var move: FVector3` **不是** Instantiable 向量——`var` = Lua local；`FVector3` 只注册了字段 schema 供 `self.position.x` chain。
+
+#### 14.8.1 锁定决策：薄数学面，非全量 AYMath
+
+| 决策 | 内容 |
+|------|------|
+| **做** | M1：玩法面 `vec2`（优先）+ `input.vec2("move")` + `length` / `normalized`（或等价 ambient） |
+| **不做** | 把 AYMath 全体 API / 矩阵 / 完整四元数 / SIMD 搬进 Logia |
+| **重计算** | 继续放 C++ `self.apply_move(...)` 等方法 |
+| **值模型** | Lua table `{x=, y=}`（优先）或轻量 userdata；与 `self` 上 C++ `FVector3` 字段是两条路径 |
+| **为何先于 S4.1** | PlayerController 输入–移动已堵在「双标量」；用户明确感知 `FVector3`/`vec2` 缺口。`signal`/`connect` 同样高价值，排 **M1 之后** |
+
+**推荐顺序**（执行队列）：
+
+1. ~~**M1** — 薄向量（§ Prompt M1）~~ ✅ **2026-07-15**
+2. **S4.1** — `signal` / `connect` ← **下一 session**
+3. **R1** — ScriptReadOnly
+4. **R3.5** — `std::string` struct-field write + enum registry
+5. **INT-04** — EventHandler（依赖 S4.1）
+6. Defer：R5.2-F/G/I → R5.3；INT-05b 深链；全量 AYMath；S5 ED-01/ED-04 按需
+
+#### Prompt M1 — Thin Logia vec2 + `input.vec2`（下一刀）
+
+```
+Implement AYScript M1: thin gameplay vector surface (NOT full AYMath).
+
+Read first:
+- AYRuntime/AYScript/design.md §14.0, §14.8, §14.5 (M1 row)
+- AYRuntime/AYScript/src/AYScriptRuntimeBridge.cpp (inputTbl axis)
+- AYRuntime/AYDevice InputMapping axis / KeyPair
+- Claude memory: C:\Users\zhqmx\.claude\projects\d--Projects\memory\ay-script.md (§下一步 + M1)
+
+GOAL:
+Enable PlayerController patterns like:
+  var move = input.vec2("move")
+  if (move.length() > 0.1) { self.apply_move(move.normalized(), dt) }
+without exposing the whole AYMath API.
+
+DO:
+1. Value model (pick A unless blocked):
+   A) Lua table {x=number, y=number} for vec2 values returned from ambient.
+   Document that `var v: FVector2` annotation does NOT allocate a C++ FVector2 —
+     initializer must be table / ambient return; same as today`s var=Lua local rule.
+2. Register reflect type FVector2 (x/y Float32) if missing — mirror FVector3 registration
+   in ensureAYEntityTypesRegistered (fields only; no method avalanche).
+3. Ambient API:
+   - input.vec2(name: string) -> {x,y}
+     Map name "move" to axis "move_x" + "move_y" (convention, document in design.md).
+     OR InputMapping getAxis2D if you add it in AYDevice; prefer convention first to
+     avoid AYDevice API churn unless already exists.
+   - Keep input.axis(name) -> float unchanged.
+4. Minimal helpers (choose one style, document):
+   Style A ambient: vec2.length(v), vec2.normalized(v)
+   Style B methods on returned table via Lua (document generated helpers)
+   Prefer Style A (ambient) — matches input/time/log pattern, no usertype sprawl.
+5. Tests:
+   - DeviceInput / Mock: vec2 reads KeyPair + gamepad if available
+   - Semantic: input.vec2 in numeric/comparison contexts if needed
+   - PlayerController-shaped sample source compiles + runtime witness
+6. Bump kLogiaPipelineVersion if codegen/ambient shape changes.
+7. Update design.md §14.8 M1 row → ✅ + ay-script memory next steps.
+
+DO NOT:
+- Full AYMath usertype (dot, cross, matrices, quaternions, operators + - * overload).
+- Change self.position.x chain reflect path.
+- Make `var m: FVector3` Instantiable C++ object.
+- S4.1 signal/connect in this PR.
+- Auto-normalize in input.vec2 (return raw axes; let script or C++ normalize).
+
+Acceptance:
+- AYScript_Test all green; new M1 cases cover vec2 + input.vec2.
+- Canonical PlayerController can use input.vec2("move") without two axis lines.
+- design.md explicitly states: thin surface, not full AYMath.
+- No new public dep of AYScript → all of AYMath headers beyond types already used.
+
+Build/test: only when user asks; follow ay-dev-rules (%temp% bat + vcvars).
+```
+
+#### Prompt S4.1 — signal / connect（M1 之后）
+
+```
+Implement AYScript S4.1: signal / connect (after M1 lands).
+
+Read: design.md §2.4, Phase S4, §14.8 queue, AYEventSystem if present.
+
+DO:
+1. Lexer/parser/AST for signal declaration + connect syntax (document surface grammar in design.md).
+2. Codegen → Lua tables / callbacks OR bridge to AYEventSystem.
+3. Semantic: connect target must be callable / known script method.
+4. Tests: AST + emit dump + runtime fire once.
+5. Bump kLogiaPipelineVersion.
+
+DO NOT: await delay (S4.2); EventHandler host INT-04 (can stub ambient event.emit later).
+
+Acceptance: sample two scripts communicate via signal; AYScript_Test green.
+Gate: M1 preferably merged first (no hard dep, but queue order locked).
+```
 
 #### Prompt INT-01 — Editor/Game ScriptSubSystem wiring (P0)
 
@@ -2538,16 +2869,11 @@ DO:
 Acceptance: LG-12 R3 enum tests use typed path; field stripper unit test.
 ```
 
-#### Prompt S4.1 — signal / connect (P3)
+#### Prompt S4.1 — signal / connect (P3) — **superseded by §14.8 Prompt S4.1**
 
 ```
+(historical stub — use §14.8 Prompt S4.1 after M1)
 Implement AYScript S4.1 per design.md Phase S4.
-
-Read: §2.4, Phase S4, AYEventSystem/design.md (if exists)
-
-DO: lexer/parser/semantic/codegen for signal + connect; runtime stub or EventSystem bridge.
-Acceptance: sample compiles; AST + codegen shape tests.
-Gate: INT-01 landed preferred.
 ```
 
 ---

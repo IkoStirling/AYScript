@@ -96,7 +96,18 @@ std::unique_ptr<Stmt> Parser::parseMember()
         return parseFunctionDeclStmt();
     }
 
-    error("Expected script member (var or lifecycle function)");
+    // S4.1 (2026-07-15): per-component signal declaration
+    // `signal NAME(params)?;`. Same script-block-only restriction as
+    // `function` — see the `function` comment above and the
+    // parseStatement gate for the rationale. Companion call sites
+    // `emit(...)` and `connect(...)` are NOT lexer-reserved; they
+    // parse as ordinary CallExprs and the analyzer shape-recognizes
+    // them as ambient free-function calls.
+    if (match(TokenType::Signal)) {
+        return parseSignalDecl(previous());
+    }
+
+    error("Expected script member (var, signal, or lifecycle function)");
     return nullptr;
 }
 
@@ -201,6 +212,35 @@ std::unique_ptr<Stmt> Parser::parseFunctionDeclStmt()
     return fn;
 }
 
+// S4.1 (2026-07-15): per-component signal declaration. Shaped after
+// `parseFunctionDeclStmt` minus the body — the signal is metadata
+// only (a named event with a typed parameter list). The `signalTok`
+// parameter threads the keyword token in (per S5 ED-02's rule that
+// keyword positions are the most useful diagnostic anchors for
+// statement-level constructs); we don't actually stamp from it
+// because the name position is more useful for "duplicate signal"
+// diagnostics (mirrors the FunctionDeclStmt convention).
+//
+// Grammar: `signal NAME ( paramList? ) ;?`
+//   - paramList is reused from `parseFunctionDeclStmt`'s path
+//   - trailing `;` is optional, matching `var` / lifecycle style
+std::unique_ptr<Stmt> Parser::parseSignalDecl(const Token& /*signalTok*/)
+{
+    const Token name = consumeIdentifier("Expected signal name");
+    consume(TokenType::LeftParen, "Expected '(' after signal name");
+    std::vector<Param> params;
+    if (!check(TokenType::RightParen)) {
+        params = parseParamList();
+    }
+    consume(TokenType::RightParen, "Expected ')' after signal parameter list");
+    match(TokenType::Semicolon);  // optional trailing ';'
+
+    auto sig = std::make_unique<SignalDeclStmt>(name.lexeme, std::move(params));
+    sig->sourceLoc.line = name.line;
+    sig->sourceLoc.column = name.column;
+    return sig;
+}
+
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
     if (match(TokenType::Return)) {
@@ -255,6 +295,15 @@ std::unique_ptr<Stmt> Parser::parseStatement()
     // helper-functions inside non-script scope).
     if (check(TokenType::Function)) {
         error("function declarations only allowed as script members");
+        return nullptr;
+    }
+    // S4.1 (2026-07-15): same gate for `signal NAME(...)` — it is
+    // also a metadata-only script-block member and must not appear
+    // inside a lifecycle body. Companion call sites `emit(...)`
+    // and `connect(...)` are unaffected (they're ordinary CallExprs
+    // and parse via the fall-through `parseExpression` path below).
+    if (check(TokenType::Signal)) {
+        error("signal declarations only allowed as script members");
         return nullptr;
     }
 
@@ -904,6 +953,8 @@ void Parser::synchronize()
         case TokenType::OnUpdate:
         case TokenType::OnDestroy:
         case TokenType::Run:
+        case TokenType::Function:  // 2026-07-11 audit fix: script-block helper.
+        case TokenType::Signal:    // S4.1 (2026-07-15): per-component signal decl.
         case TokenType::Return:
         case TokenType::If:
         case TokenType::While:   // R5.0 (2026-07-13): loop recovery.
