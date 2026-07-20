@@ -2,9 +2,10 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-07-18）**：**Phase S0–S3 + R4/R5 + S5 ED-02/03 + INT-01/02/03 + M1 + S4.1 + S4.1b 已交付**；`AYScript_Test` **1435/1435** 全绿（1405 S4.1 ship baseline + 5 S4.1b new + 25 re-counted）；`kLogiaPipelineVersion = 27`。Editor + Application 注册 ScriptSubSystem；Logia input 完整表面真接 AYDevice；薄向量面 `vec2.length` / `vec2.normalized` ambient + `FVector2` reflect 注册；**per-component event surface** `signal NAME(params)?;` + `emit("name", ...)` + `connect("name", handler) → int id` + `disconnect(id)` 完整闭环（codegen helper block + closure-wrap self-bind + dense-mark tombstone）。
+> **文档状态（2026-07-20）**：**Phase S0–S3 + R4/R5 + S5 ED-02/03 + INT-01/02/03 + M1 + S4.1 + S4.1b 已交付**；`AYScript_Test` **1435/1435** 全绿（1405 S4.1 ship baseline + 5 S4.1b new + 25 re-counted）；`kLogiaPipelineVersion = 27`。Editor + Application 注册 ScriptSubSystem；Logia input 完整表面真接 AYDevice；薄向量面 `vec2.length` / `vec2.normalized` ambient + `FVector2` reflect 注册；**per-component event surface** `signal NAME(params)?;` + `emit("name", ...)` + `connect("name", handler) → int id` + `disconnect(id)` 完整闭环（codegen helper block + closure-wrap self-bind + dense-mark tombstone）。
+> **事件系统边界（2026-07-20 锁定）**：S4.1 组件内信号 **不**进 EventBus；跨模块走 **INT-04** 全局 `event.*` → typed `AYEventSystem` + string alias（详见 **§14.5.1**）。INT-04 代码未开工。
 > **下一主阶段**：§14.8 — **R1 `ScriptVisible/ScriptReadOnly` → R3.5 → S5.x handler-signature-v2**。S4.1b 已 ship（详见 §14.6+++ S4.1b delivery + §13 changelog）。R5.2-F/G/I 继续 defer 到 R5.3 expression-type。
-> **指挥入口**：§14.8（copy-paste prompts）；历史交接见 §14.0–14.5 + INT-01/02/03 + M1 完成记录。
+> **指挥入口**：§14.8（copy-paste prompts）；事件接入规范见 §14.5.1；历史交接见 §14.0–14.5 + INT-01/02/03 + M1 完成记录。
 
 ## 1. 概述
 
@@ -134,7 +135,7 @@ Logia **语法层**与 **host 类型**解耦：作者始终写 `script Name { ..
 | 实体组件脚本（**S2.5 已落地**） | `class PlayerController : ScriptComponent` | `script PlayerController { on_update(dt) {...} }` | `ScriptComponent*` | `ScriptComponent` + `IScriptBridge` |
 | ECS System（S3 首选扩展） | `class MovementSystem : ISystem` | `script MovementSystem { on_update(dt) {...} }` | `ISystem*` 或无 | `AnimationSystem` 同类 tick |
 | 编辑器/CLI 工具（S3+） | `class BuildTool` | `script BuildTool { run() {...} }` | 无 | 一次性 `call("run")` |
-| 事件回调（S3+） | 已注册 Reflect 类型 | `script DamageHandler { on_damage(amount) {...} }` | host 实例 | EventBus 订阅 |
+| 事件回调（**INT-04**，未开工） | 已注册 Reflect 类型 / `EventHandler` host | `script DamageHandler { on_damage(amount) {...} }` 或 ambient `event.subscribe` | host 实例或无 | **AYEventSystem** typed bus（见 §14.5.1）；**不是** S4.1 `signal` |
 | 纯数据配置 | — | **不用 Logia** | — | 用 JSON / AYConfig |
 
 **语义分析规则（分阶段）**：
@@ -422,10 +423,17 @@ sol2 usertype 注册（**S3**）：`ScriptComponent` 子类用 `sol::usertype<T>
 |---|---|---|
 | `log.info/warn/error/debug` | `ayt::log::*` | S1 |
 | `input.is_pressed/is_just_pressed` | `InputProvider` mock（S1）；真实源 = **AYDevice** `InputMapping`（INT-02） | S1 / INT-02 |
-| `time.delta` | `ayt::time::delta()` | S3 |
-| `event.emit/subscribe` | AYEvent | S3+ |
+| `time.delta` / `time.total` | `ScriptSubSystem::tickAmbient` | S3.5 |
+| `event.emit` / `event.subscribe` / `event.unsubscribe` | **AYEventSystem** string-alias bridge | **INT-04**（§14.5.1；**未**把 S4.1 `emit`/`connect` 接到 bus） |
 
 `log` / `input` / `time` / `event` 是 ambient identifier——在 `self` 上下文外可以直接使用，**不**走 AYReflect。
+
+**事件两层（锁定，勿混用）**：
+
+| 表面 | 作用域 | 实现 | EventBus |
+|------|--------|------|----------|
+| `signal` / bare `emit` / `connect` / `disconnect` | **同一 script 实例**（`self._signals`） | S4.1 / S4.1b ✅ Lua helpers | **不进** |
+| `event.emit` / `event.subscribe` | **跨模块**（Device / Resource / Physics / Host…） | INT-04 → `emitByAlias` / `subscribeByAlias` | **进** |
 
 ### 5.5 与序列化的关系
 
@@ -1632,7 +1640,8 @@ public:
 | S1 | `log.info/warn/error/debug`，`input.is_pressed/is_just_pressed`（mock） |
 | **S3.5** | `time.delta`、`time.total`（真实，由 `ScriptSubSystem::tickAmbient(dt)` 注入）；`input.is_pressed/is_just_pressed` 改走 **可注入 `InputProvider*`**（默认 `MockInputProvider`，保留 S1 jump-only 行为） |
 | **INT-02** | 真实 **AYDevice** `InputMapping` → `InputProvider`（替换 `MockInputProvider`） | §14.3 P1 |
-| S4 / S3+ | `event.emit/subscribe`、`spawn_prefab(path)` | §14.5 |
+| **INT-04** | `event.emit` / `event.subscribe` → AYEventSystem alias bridge；可选 `EventHandler` host | §14.5.1（设计已锁；代码 ⏳） |
+| later | `spawn_prefab(path)` | 不在 S4 / INT-04 范围 |
 
 ---
 
@@ -1918,6 +1927,7 @@ AYScript/
 
 | 日期 | 变更 |
 |------|------|
+| 2026-07-20 | **§14.5.1 INT-04 EventBus 接入规范锁定**：确认要接入 AYEventSystem，但 **S4.1 组件内 `signal`/`emit`/`connect` 永不进 bus**；跨模块用全局 ambient `event.emit` / `event.subscribe` → `EventBus::{emit,post,subscribe}ByAlias`；可选 `LogiaHostKind::EventHandler`；线程 / 失败语义 / 反目标 / 实施步骤与 `AYEventSystem/design.md` §1–§6 / `docs/host_examples.md` §D 对齐。更新 §1.6、§5.4、§6.5、§14.5、S4.1 deferred 表。**代码未开工**。 |
 | 2026-07-06 | **路线 A 定型**：Logia DSL → Lua 后端 |
 | 2026-07-06 | S0 完成：Lexer/Parser/AST + 6 个单测 |
 | 2026-07-06 | S1 完成：LuaCodegen + LogiaRuntimeBridge（sol2 3.5.0 + Lua 5.5.0）；注意后端是 Lua **5.5**（vcpkg） |
@@ -1982,7 +1992,7 @@ Use **one prompt per new chat**. Read linked docs first. Do not run cmake/msbuil
 | **P2a.1** | **S4.1b** | `connect` 返 int id + `disconnect(id)` + dense-mark tombstone | ✅ 2026-07-18 |
 | **P2b** | **R1** | `ScriptVisible` / `ScriptReadOnly` 强制 | ⏳ |
 | **P2c** | **R3.5** | `registerEnum` + 字段名 stripper + struct 内 string | ⏳ |
-| opt | **INT-04** | EventHandler host、`event.emit`（依赖 S4.1） | ⏳ |
+| opt | **INT-04** | EventHandler host、`event.emit` → EventBus alias（§14.5.1 设计已锁） | ⏳ 代码 |
 | parallel | Foundation ED-01–04 | 引擎 north-star — 不阻塞 Logia | — |
 
 ---
@@ -2357,8 +2367,145 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 | **S4.2** | `await delay` 协程糖 | Lua 5.5 coroutine 限制需文档化 |
 | **S4.3** | Source map 完善 | S5 ED-03 已交付 bridge `getLastError`；多 frame 见 S5 ED-04 |
 | **INT-03b** | 磁盘 `.logia.cache`；Editor 菜单调 `ays-logia compile` | 原 INT-03 集成项改名；input axis 已是 INT-03 |
-| **INT-04** | `LogiaHostKind::EventHandler`；`event.emit/subscribe` | 依赖 S4.1 + EventSystem API |
+| **INT-04** | `event.*` ambient + optional `LogiaHostKind::EventHandler` → typed EventBus | ✅ **设计锁定 2026-07-20**（§14.5.1）；代码 ⏳；依赖 S4.1 ✅ + `AYEventSystem` alias API ✅ |
 | **INT-05b** | 3+ hop chain、`FQuaternion` 链式 reflect | 与 M1 正交；按需 |
+
+### 14.5.1 INT-04 — AYEventSystem 接入规范（设计锁定 2026-07-20）
+
+> **裁决**：AYScript **要**接入事件系统，但 **不是**把 S4.1 并进 EventBus。  
+> **权威对照**：[`AYEventSystem/design.md`](../AYEventSystem/design.md) §1.1 / §1.2 / §2.1 / §6；[`docs/host_examples.md`](../AYEventSystem/docs/host_examples.md) §D。  
+> **状态**：设计 ✅ 锁定；实现 ⏳ 未开工。S4.1 / S4.1b 代码 **零改动** 即可开 INT-04。
+
+#### 14.5.1.1 结论表
+
+| 问题 | 答案 |
+|------|------|
+| 要不要接 EventBus？ | **要**（跨模块）；**现在不要**把组件内信号接到 bus |
+| 组件内解耦用什么？ | 已 ship 的 `signal` / `emit` / `connect` / `disconnect`（S4.1 / S4.1b） |
+| 跨模块用什么？ | 全局 ambient `event.emit` / `event.subscribe` / `event.unsubscribe`（INT-04） |
+| C++ 桥怎么走？ | typed `EventBus` + **string alias**（`registerAlias` / `*ByAlias`；API 已在 `EventBus.h`） |
+| 何时开代码？ | 有真实跨模块脚本需求时；排在 R1 / R3.5 / S5.x 之后亦可（§14.8 队列 opt） |
+
+#### 14.5.1.2 两层事件（硬边界）
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Domain-local（不进 EventBus）                                 │
+│   Logia S4.1: signal / emit / connect / disconnect            │
+│   状态: self._signals（per-instance Lua table）               │
+│   同实例解耦、同脚本多 handler、on_destroy disconnect          │
+└──────────────────────────────────────────────────────────────┘
+                              │ 禁止转发 S4.1 emit → bus
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Engine-wide（AYEventSystem）                                  │
+│   Logia INT-04: event.emit / event.subscribe / unsubscribe    │
+│   C++: emitByAlias / postByAlias / subscribeByAlias           │
+│   类型: WindowResize / ResourceLoadComplete / Physics…        │
+└──────────────────────────────────────────────────────────────┘
+```
+
+与 UI / Physics 同构：**域内表面本地化 + 少量 typed 事件上 bus**（见 EventSystem §2.1 图中 `Logia_signal_connect` 在 Domain_local）。
+
+#### 14.5.1.3 反目标（禁止）
+
+| 禁止 | 原因 |
+|------|------|
+| 把 S4.1 `emit`/`connect` 路由到 EventBus | 热路径、同实例、无跨模块语义；EventSystem 明文 Non-Goal |
+| 用 string 作 EventBus **核心**调度键 | bus 核心保持 typed；alias 仅 Script 桥 |
+| 任意动态 payload 总线（无注册类型） | 失去类型安全；未知 alias 只允许软失败 |
+| 每帧鼠标 / UI hit-test bubble 走 bus | 与 UI 边界一致，域内保留 |
+| 在 worker 上 sync `emit` 调 Lua | 违反 EventBus 主线程契约 |
+
+#### 14.5.1.4 Logia 表面（目标语法）
+
+```logia
+// 跨模块 — INT-04（尚未实现）
+event.subscribe("window_resize", function(w, h)
+    self.on_resize(w, h)
+end)
+
+event.emit("window_resize", 1280, 720)   // 或有限 table 字段；由 alias 类型决定
+
+var id: int = event.subscribe("resource_ready", on_ready)
+event.unsubscribe(id)
+
+// 组件内 — S4.1（已实现；勿改成 event.*）
+signal damaged(amount: int)
+connect("damaged", on_hit)
+emit("damaged", 10)
+```
+
+- `event` = ambient table（同 `input` / `time` / `log`），**不是** lexer keyword。
+- Analyzer：字面量 alias 名可做软校验（对照 host 注册表可选）；未知 alias **编译期可不硬拒**，运行时软失败。
+- Tool host：允许 `event.*`（无 `self` 依赖）；S4.1 的 bare `emit`/`connect` 仍拒 Tool。
+
+#### 14.5.1.5 C++ 桥接步骤（实施清单）
+
+1. **Host bootstrap**（Application / Editor 启动，主线程）：
+   ```cpp
+   auto& bus = ayt::event::EventBus::instance();
+   bus.registerAlias<WindowResizeEvent>("window_resize");
+   bus.registerAlias<WindowCloseEvent>("window_close");
+   // Physics collision、ResourceLoadComplete 等按需追加
+   ```
+2. **`LogiaRuntimeBridge::registerEngineApi()`** 注册 ambient `event`：
+   - `event.emit(alias, ...)` → 组装 typed 事件 → `emitByAlias`（主线程）或文档约定下的 `postByAlias`
+   - `event.subscribe(alias, lua_fn) → int id` → `subscribeByAlias`；Lua 回调包一层，**仅在主线程**调用
+   - `event.unsubscribe(id)` → `unsubscribe(ConnectionId)`
+3. **载荷策略**：优先已注册 C++ 事件类型的有限字段映射到 Lua number/bool/string/小 table；**不做**任意 JSON 总线。
+4. **失败语义**：未注册 alias → `emitByAlias`/`postByAlias` 返回 false → **log + skip，不崩**（对齐 `host_examples.md` §D）。
+5. **线程**：
+   | API | 线程 |
+   |-----|------|
+   | `event.emit`（sync） | 仅主线程 |
+   | `event.emit` 若映射到 `post` | 任意线程可 post；listener 在 `pump` 主线程跑 |
+   | `event.subscribe` / `unsubscribe` | 主线程优先 |
+6. **可选 `LogiaHostKind::EventHandler`**：纯处理脚本（无 Component lifecycle）；调度方 = EventBus 订阅在 host 注册时挂上约定方法（如 `on_damage`）。可与 ambient 同 PR 或后置切片。
+7. **测试**：
+   - Null/Mock bus 或真实 `EventBus`：alias round-trip
+   - 未知 alias 软失败
+   - S4.1 suite **零回归**（证明未误接 bus）
+   - 主线程 assert（debug）
+8. **Shutdown**：会话结束可 `unsubscribeAll()`；勿在 `pump`/`emit` 飞行中调用。
+
+#### 14.5.1.6 与其它模块对照
+
+| 模块 | 域内 | Bus |
+|------|------|-----|
+| AYUI | `UIEvent` bubble | 少量 game-facing `post` |
+| AYPhysics | 求解内部 | E-3 `PhysicsEventBridge` → typed collision |
+| AYGameLoop | — | 已 typed emit / pump |
+| **AYScript** | S4.1 `signal`/* | **INT-04** `event.*` → alias |
+
+#### 14.5.1.7 Prompt INT-04（copy-paste，开工时用）
+
+```
+Implement AYScript INT-04: global event.* ambient → AYEventSystem string-alias bridge.
+
+Read first:
+- AYRuntime/AYScript/design.md §14.5.1 (this section) + §5.4 + §6.5
+- AYRuntime/AYEventSystem/design.md §1–§2, §6, §8 Phase 3
+- AYRuntime/AYEventSystem/docs/host_examples.md §D
+- AYRuntime/AYEventSystem/include/ayevent/EventBus.h (registerAlias / *ByAlias)
+
+DO:
+1. Ambient event.emit / event.subscribe / event.unsubscribe in registerEngineApi.
+2. Host bootstrap registerAlias for a minimal set (window_resize, window_close + 1 test type).
+3. Lua callback → main-thread listener; ConnectionId ↔ int id for unsubscribe.
+4. Unknown alias: log + soft fail (no crash).
+5. Optional LogiaHostKind::EventHandler stub OR defer to INT-04b — document choice.
+6. Tests: alias round-trip; soft fail; S4.1 signal suite still green.
+7. Update design.md §14.5.1 status → shipped + changelog; bump kLogiaPipelineVersion if ambient shape changes.
+
+DO NOT:
+- Route S4.1 emit/connect through EventBus.
+- String-keyed core bus dispatch.
+- Arbitrary untyped payload bags.
+- Change S4.1 codegen / self._signals layout.
+```
+
+---
 
 ### 14.6 明确推迟
 
@@ -2506,7 +2653,7 @@ script PlayerController {
 
 | Item | Plan |
 |------|------|
-| Cross-component / cross-script signals | Future AYEventSystem — global signal bus |
+| Cross-component / cross-script signals | **INT-04** — 全局 `event.*` → AYEventSystem（§14.5.1）；**不要**把 S4.1 并进 bus |
 | Colon-call grammar `self:emit(...)` | Separate grammar slice enabling Lua-style method calls broadly |
 | Handler signature validation on connect | Future slice — requires analyzer `function`-member map (attempted in S4.1b plan but reverted after stack-corruption regression in MSVC debug build; see §14.6+++ S4.1b lessons) |
 | Compact tombstone (rec.dead=true 永久占位 → periodic `table.remove`) | Future;S4.1b accept 永久 mark,slot 数 ≈ 总 connect 数 |
@@ -2713,7 +2860,7 @@ script PlayerController {
 2. **S4.1** — `signal` / `connect` ← **下一 session**
 3. **R1** — ScriptReadOnly
 4. **R3.5** — `std::string` struct-field write + enum registry
-5. **INT-04** — EventHandler（依赖 S4.1）
+5. **INT-04** — `event.*` → EventBus（依赖 S4.1 ✅；规范 §14.5.1；代码 ⏳）
 6. Defer：R5.2-F/G/I → R5.3；INT-05b 深链；全量 AYMath；S5 ED-01/ED-04 按需
 
 #### Prompt M1 — Thin Logia vec2 + `input.vec2`（下一刀）
