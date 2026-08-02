@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(AYScript VERSION 0.2.0 LANGUAGES CXX)
+project(AYScript
+    VERSION 0.2.0
+    DESCRIPTION "AYScript — Logia scripting subsystem (input.vec2 + per-component signals)"
+)
 
 # C++ standard follows the root CMakeLists (currently C++23; may move to C++26).
 # Do not pin a standard here.
@@ -61,3 +64,5 @@ add_subdirectory(cli)
 
 enable_testing()
 add_subdirectory(unittest)
+
+message(STATUS "AYScript v0.2.0 (Logia 1284 cases + S4.1 signal/connect/disconnect) — see ${CMAKE_CURRENT_SOURCE_DIR}/design.md")
