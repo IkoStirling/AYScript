@@ -1794,7 +1794,7 @@ script BuildTool {
 )";
     const CompileResult r = compileAsTool(source);
     CHECK_FALSE(r.success);
-    CHECK(hasErrorContaining(r, "Tool host scripts"));
+    CHECK(hasErrorContaining(r, "Tool / EventHandler host scripts"));
 }
 
 TEST_CASE(s41_connect_in_tool_host_is_hard_error) {
@@ -1808,7 +1808,7 @@ script BuildTool {
 )";
     const CompileResult r = compileAsTool(source);
     CHECK_FALSE(r.success);
-    CHECK(hasErrorContaining(r, "Tool host scripts"));
+    CHECK(hasErrorContaining(r, "Tool / EventHandler host scripts"));
 }
 
 TEST_CASE(s41_bogus_signal_param_type_is_hard_error) {
@@ -1840,7 +1840,7 @@ script BuildTool {
 )";
     const CompileResult r = compileAsTool(source);
     CHECK_FALSE(r.success);
-    CHECK(hasErrorContaining(r, "Tool host scripts"));
+    CHECK(hasErrorContaining(r, "Tool / EventHandler host scripts"));
 }
 
 TEST_SUITE_END

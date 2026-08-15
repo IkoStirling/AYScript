@@ -268,7 +268,7 @@ TEST_CASE(component_ctx_run_emits_soft_warning) {
     Compiler c;
     auto r = c.compile(kComponentWithRun, ctx);
     CHECK(r.success);
-    CHECK(hasWarningWithMessage(r, "run() is a Tool host lifecycle"));
+    CHECK(hasWarningWithMessage(r, "run() is a Tool / EventHandler lifecycle"));
     CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
 }
 
@@ -288,7 +288,7 @@ script MovementSystem {
     Compiler c;
     auto r = c.compile(src, ctx);
     CHECK(r.success);
-    CHECK(hasWarningWithMessage(r, "run() is a Tool host lifecycle"));
+    CHECK(hasWarningWithMessage(r, "run() is a Tool / EventHandler lifecycle"));
     CHECK_FALSE(hasWarningWithMessage(r, "is not invoked on Tool host scripts"));
 }
 

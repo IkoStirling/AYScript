@@ -97,6 +97,22 @@ inline LogiaHostContext toolLogiaHostContext()
     };
 }
 
+// INT-04b: EventHandler host — pure EventBus script, no Component tick.
+//   kind = EventHandler  → Component lifecycle (on_start/update/destroy)
+//                          soft-warns; `run()` is the one-shot bind entry
+//                          (typically event.subscribe wiring).
+//   expectSelf = false   → no ScriptComponent* receiver; codegen omits self.
+//   hostType / strictInheritance unused (no Reflect bind).
+inline LogiaHostContext eventHandlerLogiaHostContext()
+{
+    return LogiaHostContext{
+        LogiaHostKind::EventHandler,
+        nullptr,
+        false,
+        false,
+    };
+}
+
 struct CompileOptions {
     std::string fileName;
     bool useCompileTimeTypes = false;

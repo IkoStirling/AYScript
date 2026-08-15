@@ -1,9 +1,13 @@
-// AYLogiaEventBridge.cpp — INT-04 Logia event.* ambient
+// AYLogiaEventBridge.cpp — INT-04 / INT-04b Logia event.* ambient
 
 #include "AYLogiaEventBridge.h"
 
+#include <ayevent/Events/DeviceEvents.h>
+#include <ayevent/Events/PhysicsEvents.h>
 #include <ayevent/Events/ResourceEvents.h>
+#include <ayevent/Events/SceneEvents.h>
 #include <ayevent/Events/ScriptTestEvents.h>
+#include <ayevent/Events/TaskEvents.h>
 #include <ayevent/Events/WindowEvents.h>
 
 #include <AYLog.h>
@@ -27,6 +31,22 @@ bool readIntArg(const sol::object& o, int& out)
     }
     if (o.is<double>()) {
         out = static_cast<int>(o.as<double>());
+        return true;
+    }
+    return false;
+}
+
+bool readU64Arg(const sol::object& o, uint64_t& out)
+{
+    if (!o.valid()) {
+        return false;
+    }
+    if (o.is<double>()) {
+        out = static_cast<uint64_t>(o.as<double>());
+        return true;
+    }
+    if (o.is<int>()) {
+        out = static_cast<uint64_t>(o.as<int>());
         return true;
     }
     return false;
@@ -108,6 +128,76 @@ bool packResourceReady(sol::variadic_args args, ayt::event::ResourceLoadComplete
     return false;
 }
 
+bool packDeviceAction(sol::variadic_args args, ayt::event::DeviceActionEvent& out)
+{
+    // emit("device_action", actionId, pressed)
+    if (args.size() >= 2) {
+        int id = 0;
+        if (!readIntArg(args[0], id)) {
+            return false;
+        }
+        out.actionId = id;
+        if (args[1].is<bool>()) {
+            out.pressed = args[1].as<bool>();
+            return true;
+        }
+        int pressed = 0;
+        if (readIntArg(args[1], pressed)) {
+            out.pressed = (pressed != 0);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool packTaskComplete(sol::variadic_args args, ayt::event::TaskCompleteEvent& out)
+{
+    // emit("task_complete", taskId [, ok])
+    if (args.size() >= 1) {
+        uint64_t id = 0;
+        if (!readU64Arg(args[0], id)) {
+            return false;
+        }
+        out.taskId = id;
+        out.ok = true;
+        if (args.size() >= 2) {
+            if (args[1].is<bool>()) {
+                out.ok = args[1].as<bool>();
+            } else {
+                int v = 1;
+                if (readIntArg(args[1], v)) {
+                    out.ok = (v != 0);
+                }
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool packPhysicsCollision(sol::variadic_args args, ayt::event::PhysicsCollisionEvent& out)
+{
+    // emit("physics_collision", bodyA, bodyB [, kind])
+    if (args.size() >= 2) {
+        int a = 0;
+        int b = 0;
+        if (!readIntArg(args[0], a) || !readIntArg(args[1], b)) {
+            return false;
+        }
+        out.bodyA = static_cast<uint32_t>(a);
+        out.bodyB = static_cast<uint32_t>(b);
+        out.kind = 0;
+        if (args.size() >= 3) {
+            int k = 0;
+            if (readIntArg(args[2], k) && k >= 0 && k <= 2) {
+                out.kind = static_cast<uint8_t>(k);
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 void registerBuiltinEventAliases(ayt::event::EventBus& bus)
@@ -116,6 +206,12 @@ void registerBuiltinEventAliases(ayt::event::EventBus& bus)
     bus.registerAlias<ayt::event::WindowCloseEvent>("window_close");
     bus.registerAlias<ayt::event::ResourceLoadCompleteEvent>("resource_ready");
     bus.registerAlias<ayt::event::ScriptTestPingEvent>("script_test_ping");
+    bus.registerAlias<ayt::event::DeviceActionEvent>("device_action");
+    bus.registerAlias<ayt::event::TaskCompleteEvent>("task_complete");
+    bus.registerAlias<ayt::event::SceneCurrentChangedEvent>("scene_current_changed");
+    bus.registerAlias<ayt::event::SceneBeginPlayEvent>("scene_begin_play");
+    bus.registerAlias<ayt::event::SceneEndPlayEvent>("scene_end_play");
+    bus.registerAlias<ayt::event::PhysicsCollisionEvent>("physics_collision");
 }
 
 void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
@@ -168,6 +264,51 @@ void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
                 return false;
             }
             return true;
+        }
+        if (alias == "device_action") {
+            ayt::event::DeviceActionEvent ev{};
+            if (!packDeviceAction(args, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): bad args", alias.c_str());
+                return false;
+            }
+            if (!bus.emitByAlias<ayt::event::DeviceActionEvent>(alias, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): unknown alias", alias.c_str());
+                return false;
+            }
+            return true;
+        }
+        if (alias == "task_complete") {
+            ayt::event::TaskCompleteEvent ev{};
+            if (!packTaskComplete(args, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): bad args", alias.c_str());
+                return false;
+            }
+            if (!bus.emitByAlias<ayt::event::TaskCompleteEvent>(alias, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): unknown alias", alias.c_str());
+                return false;
+            }
+            return true;
+        }
+        if (alias == "physics_collision") {
+            ayt::event::PhysicsCollisionEvent ev{};
+            if (!packPhysicsCollision(args, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): bad args", alias.c_str());
+                return false;
+            }
+            if (!bus.emitByAlias<ayt::event::PhysicsCollisionEvent>(alias, ev)) {
+                ayt::log::warn("[INT-04] event.emit(\"%s\"): unknown alias", alias.c_str());
+                return false;
+            }
+            return true;
+        }
+        // Scene* payloads are opaque — Lua emit not supported (subscribe-only).
+        if (alias == "scene_current_changed" || alias == "scene_begin_play"
+            || alias == "scene_end_play") {
+            ayt::log::warn(
+                "[INT-04] event.emit(\"%s\"): Scene* payload is subscribe-only "
+                "(soft fail)",
+                alias.c_str());
+            return false;
         }
 
         ayt::log::warn("[INT-04] event.emit(\"%s\"): unknown alias (soft fail)", alias.c_str());
@@ -225,6 +366,75 @@ void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
                     if (!r.valid()) {
                         sol::error err = r;
                         ayt::log::error("[INT-04] script_test_ping handler: %s", err.what());
+                    }
+                });
+        } else if (alias == "device_action") {
+            id = bus.subscribeByAlias<ayt::event::DeviceActionEvent>(
+                alias,
+                [holder](const ayt::event::DeviceActionEvent& e) {
+                    sol::protected_function_result r = (*holder)(e.actionId, e.pressed);
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] device_action handler: %s", err.what());
+                    }
+                });
+        } else if (alias == "task_complete") {
+            id = bus.subscribeByAlias<ayt::event::TaskCompleteEvent>(
+                alias,
+                [holder](const ayt::event::TaskCompleteEvent& e) {
+                    sol::protected_function_result r =
+                        (*holder)(static_cast<double>(e.taskId), e.ok);
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] task_complete handler: %s", err.what());
+                    }
+                });
+        } else if (alias == "physics_collision") {
+            id = bus.subscribeByAlias<ayt::event::PhysicsCollisionEvent>(
+                alias,
+                [holder](const ayt::event::PhysicsCollisionEvent& e) {
+                    sol::protected_function_result r = (*holder)(
+                        static_cast<double>(e.bodyA),
+                        static_cast<double>(e.bodyB),
+                        static_cast<int>(e.kind));
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] physics_collision handler: %s", err.what());
+                    }
+                });
+        } else if (alias == "scene_current_changed") {
+            // Scene* → lightuserdata (opaque). No full Scene usertype.
+            id = bus.subscribeByAlias<ayt::event::SceneCurrentChangedEvent>(
+                alias,
+                [holder](const ayt::event::SceneCurrentChangedEvent& e) {
+                    sol::protected_function_result r =
+                        (*holder)(static_cast<void*>(e.current));
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] scene_current_changed handler: %s",
+                                        err.what());
+                    }
+                });
+        } else if (alias == "scene_begin_play") {
+            id = bus.subscribeByAlias<ayt::event::SceneBeginPlayEvent>(
+                alias,
+                [holder](const ayt::event::SceneBeginPlayEvent& e) {
+                    sol::protected_function_result r =
+                        (*holder)(static_cast<void*>(e.play));
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] scene_begin_play handler: %s", err.what());
+                    }
+                });
+        } else if (alias == "scene_end_play") {
+            id = bus.subscribeByAlias<ayt::event::SceneEndPlayEvent>(
+                alias,
+                [holder](const ayt::event::SceneEndPlayEvent& e) {
+                    sol::protected_function_result r =
+                        (*holder)(static_cast<void*>(e.edit));
+                    if (!r.valid()) {
+                        sol::error err = r;
+                        ayt::log::error("[INT-04] scene_end_play handler: %s", err.what());
                     }
                 });
         } else {

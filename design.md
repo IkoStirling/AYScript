@@ -2,8 +2,8 @@
 
 > **命名来源**：Logia — λογία（逻辑 / 理据），与 Phoskia（φῶς + σκιά，光与影）成对：GPU 用 Phoskia 写材质，CPU 用 Logia 写玩法。
 >
-> **文档状态（2026-08-15）**：**Phase S0–S3 + R4/R5 + S5 ED-02/03 + INT-01/02/03 + M1 + S4.1 + S4.1b + INT-04 已交付**；`kLogiaPipelineVersion = 28`。Editor + Application 注册 ScriptSubSystem；Logia input 完整表面真接 AYDevice；薄向量面 `vec2.length` / `vec2.normalized` ambient + `FVector2` reflect 注册；**per-component event surface** `signal NAME(params)?;` + `emit` / `connect` / `disconnect`（S4.1）；**跨模块** ambient `event.emit` / `event.subscribe` / `event.unsubscribe` → EventBus string alias（INT-04）。
-> **事件系统边界（2026-07-20 锁定 / INT-04 ship 2026-08-15）**：S4.1 组件内信号 **不**进 EventBus；跨模块走 **INT-04** 全局 `event.*` → typed `AYEventSystem` + string alias（详见 **§14.5.1**）。`LogiaHostKind::EventHandler` 推迟 **INT-04b**。生产侧 Device/Resource/Task 向 bus 发事件 **未接线**（仅 catalog + host 示例）。
+> **文档状态（2026-08-15）**：**Phase S0–S3 + R4/R5 + S5 ED-02/03 + INT-01/02/03 + M1 + S4.1 + S4.1b + INT-04 + INT-04b 已交付**；`kLogiaPipelineVersion = 29`。Editor + Application 注册 ScriptSubSystem；Logia input 完整表面真接 AYDevice；薄向量面 `vec2.length` / `vec2.normalized` ambient + `FVector2` reflect 注册；**per-component event surface** `signal NAME(params)?;` + `emit` / `connect` / `disconnect`（S4.1）；**跨模块** ambient `event.emit` / `event.subscribe` / `event.unsubscribe` → EventBus string alias（INT-04）；**EventHandler host**（INT-04b）+ alias 扩面 `device_action` / `task_complete` / `scene_*` / `physics_collision`。
+> **事件系统边界（2026-07-20 锁定 / INT-04+04b ship 2026-08-15）**：S4.1 组件内信号 **不**进 EventBus；跨模块走 **INT-04** 全局 `event.*` → typed `AYEventSystem` + string alias（详见 **§14.5.1**）。`LogiaHostKind::EventHandler` ✅ INT-04b。生产侧 Device/Resource/Task/Physics(E-3) 已接线发 bus。
 > **下一主阶段**：§14.8 — **R1 `ScriptVisible/ScriptReadOnly` → R3.5 → S5.x handler-signature-v2**。S4.1b / INT-04 已 ship。R5.2-F/G/I 继续 defer 到 R5.3 expression-type。
 > **指挥入口**：§14.8（copy-paste prompts）；事件接入规范见 §14.5.1；历史交接见 §14.0–14.5 + INT-01/02/03 + M1 + INT-04 完成记录。
 
@@ -1929,6 +1929,7 @@ AYScript/
 |------|------|
 | 2026-07-20 | **§14.5.1 INT-04 EventBus 接入规范锁定**：确认要接入 AYEventSystem，但 **S4.1 组件内 `signal`/`emit`/`connect` 永不进 bus**；跨模块用全局 ambient `event.emit` / `event.subscribe` → `EventBus::{emit,post,subscribe}ByAlias`；可选 `LogiaHostKind::EventHandler`；线程 / 失败语义 / 反目标 / 实施步骤与 `AYEventSystem/design.md` §1–§6 / `docs/host_examples.md` §D 对齐。更新 §1.6、§5.4、§6.5、§14.5、S4.1 deferred 表。**代码未开工**。 |
 | 2026-08-15 | **INT-04 ship**：`AYLogiaEventBridge` ambient `event.*` → EventBus aliases；builtin `window_resize` / `window_close` / `resource_ready` / `script_test_ping`；`ambientIdentifiers` += `event`/`vec2`；`kLogiaPipelineVersion` 27→28；`Test_LogiaEventBus`；共享 POD catalog（Device/Resource/Physics/ScriptTest）**无生产接线**；EventHandler → INT-04b。 |
+| 2026-08-15 | **INT-04b + E-3 + alias expand**：`eventHandlerLogiaHostContext` / `loadEventHandler`；CLI `--host eventhandler`；aliases `device_action` / `task_complete` / `scene_*` / `physics_collision`；Physics `PhysicsEventBridge`；`kLogiaPipelineVersion` 28→29。 |
 | 2026-07-06 | **路线 A 定型**：Logia DSL → Lua 后端 |
 | 2026-07-06 | S0 完成：Lexer/Parser/AST + 6 个单测 |
 | 2026-07-06 | S1 完成：LuaCodegen + LogiaRuntimeBridge（sol2 3.5.0 + Lua 5.5.0）；注意后端是 Lua **5.5**（vcpkg） |
@@ -2368,15 +2369,15 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 | **S4.2** | `await delay` 协程糖 | Lua 5.5 coroutine 限制需文档化 |
 | **S4.3** | Source map 完善 | S5 ED-03 已交付 bridge `getLastError`；多 frame 见 S5 ED-04 |
 | **INT-03b** | 磁盘 `.logia.cache`；Editor 菜单调 `ays-logia compile` | 原 INT-03 集成项改名；input axis 已是 INT-03 |
-| **INT-04** | `event.*` ambient → typed EventBus alias | ✅ **ship 2026-08-15**（§14.5.1）；`EventHandler` host → INT-04b |
-| **INT-04b** | optional `LogiaHostKind::EventHandler` | ⏳ |
+| **INT-04** | `event.*` ambient → typed EventBus alias | ✅ **ship 2026-08-15**（§14.5.1） |
+| **INT-04b** | optional `LogiaHostKind::EventHandler` | ✅ **ship 2026-08-15** |
 | **INT-05b** | 3+ hop chain、`FQuaternion` 链式 reflect | 与 M1 正交；按需 |
 
 ### 14.5.1 INT-04 — AYEventSystem 接入规范（设计锁定 2026-07-20 / ship 2026-08-15）
 
 > **裁决**：AYScript **要**接入事件系统，但 **不是**把 S4.1 并进 EventBus。  
 > **权威对照**：[`AYEventSystem/design.md`](../AYEventSystem/design.md) §1.1 / §1.2 / §2.1 / §6；[`docs/host_examples.md`](../AYEventSystem/docs/host_examples.md) §D。  
-> **状态**：设计 ✅ 锁定；**ambient bridge ✅ ship**（`AYLogiaEventBridge` + `registerEngineApi`；`kLogiaPipelineVersion = 28`）。`LogiaHostKind::EventHandler` → **INT-04b**。生产模块 Device/Resource/Task **未**接线发 bus（catalog POD only）。
+> **状态**：设计 ✅ 锁定；**ambient bridge ✅ ship**（`AYLogiaEventBridge`；`kLogiaPipelineVersion = 29`）。`LogiaHostKind::EventHandler` ✅ INT-04b（`eventHandlerLogiaHostContext` / `loadEventHandler`）。生产 Device/Resource/Task/Physics E-3 已接线；alias 含 `device_action` / `task_complete` / `scene_*` / `physics_collision`。
 
 #### 14.5.1.1 结论表
 
@@ -2469,11 +2470,12 @@ emit("damaged", 10)
 | 项 | 落地 |
 |----|------|
 | Ambient | `event.emit` / `subscribe` / `unsubscribe` in `registerEngineApi` via `AYLogiaEventBridge` |
-| Aliases | `window_resize`, `window_close`, `resource_ready`, `script_test_ping` |
-| Analyzer | `ambientIdentifiers` += `event`（+ `vec2` catch-up） |
-| Pipeline | `kLogiaPipelineVersion` 27 → **28** |
-| Catalog PODs | `DeviceEvents` / `ResourceEvents` / `PhysicsEvents` / `ScriptTestEvents`（**无**生产接线） |
-| Deferred | INT-04b EventHandler host；Device/Resource/Task production `post`/`emit` |
+| Aliases | + `device_action`, `task_complete`, `scene_current_changed`, `scene_begin_play`, `scene_end_play`, `physics_collision`（Scene* = subscribe-only lightuserdata） |
+| Analyzer | EventHandler soft-warns Component lifecycle；`run()` bind entry allowed |
+| Pipeline | `kLogiaPipelineVersion` 28 → **29** |
+| Host | `eventHandlerLogiaHostContext()` + `loadEventHandler()` + CLI `--host eventhandler` |
+| Production | Device / Resource / Task / Physics(E-3) post to bus |
+| Deferred | Scene usertype bind（keep lightuserdata） |
 
 #### 14.5.1.6 与其它模块对照
 

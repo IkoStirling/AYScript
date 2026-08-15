@@ -1629,6 +1629,7 @@ struct LogiaRuntimeBridge::Impl {
         // INT-04: ambient event.emit / subscribe / unsubscribe →
         // EventBus string aliases. Does NOT route S4.1 signal/emit/
         // connect through the bus (design §14.5.1). EventHandler host
+        // (INT-04b) uses the same ambient surface via loadEventHandler.
         // deferred to INT-04b.
         installLogiaEventAmbient(lua, ayt::event::EventBus::instance());
 
@@ -1960,6 +1961,19 @@ bool LogiaRuntimeBridge::runTool(const std::string& scriptName,
     // function (the no-self contract). We pass nullptr for both
     // receiver and arg2 for clarity; callLifecycle ignores them on
     // the `run` path.
+    return callLifecycle(scriptName, "run", nullptr, nullptr);
+}
+
+bool LogiaRuntimeBridge::loadEventHandler(const std::string& scriptName,
+                                          const std::string& logiaSource,
+                                          std::vector<logia::CompilerError>& errors)
+{
+    errors.clear();
+    if (!loadScript(scriptName, logiaSource,
+                    logia::eventHandlerLogiaHostContext(), errors)) {
+        return false;
+    }
+    // Bind entry: run() registers ambient event.subscribe handlers.
     return callLifecycle(scriptName, "run", nullptr, nullptr);
 }
 

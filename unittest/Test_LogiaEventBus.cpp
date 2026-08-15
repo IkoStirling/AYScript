@@ -13,6 +13,7 @@
 #include "AYTest.h"
 
 #include <ayevent/EventBus.h>
+#include <ayevent/Events/SceneEvents.h>
 #include <ayevent/Events/ScriptTestEvents.h>
 #include <ayevent/Events/WindowEvents.h>
 
@@ -222,6 +223,114 @@ script RoundTrip {
     double witness = -1.0;
     CHECK(bridge.tryGetLuaGlobalNumber("__witness_rt", witness));
     CHECK_INT_EQ(static_cast<int>(witness), 99);
+
+    resetSingletonBus();
+}
+
+TEST_CASE(int04_device_action_and_task_complete_aliases)
+{
+    resetSingletonBus();
+
+    LogiaRuntimeBridge bridge;
+    constexpr const char* kSrc = R"(
+script DeviceTask {
+    function on_action(id: int, pressed: bool) {
+        __witness_da = id
+        __witness_dp = pressed and 1 or 0
+    }
+    function on_task(tid: int, ok: bool) {
+        __witness_tid = tid
+        __witness_tok = ok and 1 or 0
+    }
+    on_start() {
+        event.subscribe("device_action", on_action)
+        event.subscribe("task_complete", on_task)
+        event.emit("device_action", 77, true)
+        event.emit("task_complete", 9001, false)
+    }
+}
+)";
+    CHECK(loadOk(bridge, "DeviceTask", kSrc));
+    CHECK(bridge.callLifecycle("DeviceTask", "on_start"));
+
+    double da = -1, dp = -1, tid = -1, tok = -1;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_da", da));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_dp", dp));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_tid", tid));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_tok", tok));
+    CHECK_INT_EQ(static_cast<int>(da), 77);
+    CHECK_INT_EQ(static_cast<int>(dp), 1);
+    CHECK_INT_EQ(static_cast<int>(tid), 9001);
+    CHECK_INT_EQ(static_cast<int>(tok), 0);
+
+    resetSingletonBus();
+}
+
+TEST_CASE(int04_scene_begin_play_subscribe_only)
+{
+    resetSingletonBus();
+
+    LogiaRuntimeBridge bridge;
+    constexpr const char* kSrc = R"(
+script SceneListener {
+    function on_begin() {
+        __witness_scene = 1
+    }
+    on_start() {
+        event.subscribe("scene_begin_play", on_begin)
+        __witness_emit = event.emit("scene_begin_play") and 1 or 0
+    }
+}
+)";
+    CHECK(loadOk(bridge, "SceneListener", kSrc));
+    CHECK(bridge.callLifecycle("SceneListener", "on_start"));
+
+    double emitOk = -1.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_emit", emitOk));
+    CHECK_INT_EQ(static_cast<int>(emitOk), 0);
+
+    // C++ producer posts SceneBeginPlayEvent → Lua lightuserdata callback.
+    int sentinel = 42;
+    CHECK(EventBus::instance().emitByAlias<ayt::event::SceneBeginPlayEvent>(
+        "scene_begin_play",
+        ayt::event::SceneBeginPlayEvent{
+            reinterpret_cast<ayt::scene::Scene*>(&sentinel)}));
+
+    double hit = -1.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_scene", hit));
+    CHECK_INT_EQ(static_cast<int>(hit), 1);
+
+    resetSingletonBus();
+}
+
+TEST_CASE(int04_physics_collision_alias)
+{
+    resetSingletonBus();
+
+    LogiaRuntimeBridge bridge;
+    constexpr const char* kSrc = R"(
+script PhysListener {
+    function on_hit(a: int, b: int, kind: int) {
+        __witness_pa = a
+        __witness_pb = b
+        __witness_pk = kind
+    }
+    on_start() {
+        event.subscribe("physics_collision", on_hit)
+        event.emit("physics_collision", 11, 22, 1)
+    }
+}
+)";
+    CHECK(loadOk(bridge, "PhysListener", kSrc));
+    CHECK(bridge.callLifecycle("PhysListener", "on_start"));
+
+    double a = -1, b = -1, k = -1;
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_pa", a));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_pb", b));
+    CHECK(bridge.tryGetLuaGlobalNumber("__witness_pk", k));
+    CHECK_INT_EQ(static_cast<int>(a), 11);
+    CHECK_INT_EQ(static_cast<int>(b), 22);
+    CHECK_INT_EQ(static_cast<int>(k), 1);
 
     resetSingletonBus();
 }

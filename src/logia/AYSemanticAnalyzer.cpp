@@ -1305,7 +1305,12 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
     // methods are never invoked by the ToolRunner — emit soft
     // warnings so refactors from Component / System hosts keep
     // parsing. The shape mirrors the S3.1 System-on_destroy policy.
-    if (_ctx.kind == LogiaHostKind::Tool) {
+    //
+    // INT-04b: EventHandler shares the same Component-lifecycle soft
+    // warn (no tick / no ScriptComponent), but keeps `run()` as the
+    // one-shot bind entry for ambient event.subscribe wiring.
+    if (_ctx.kind == LogiaHostKind::Tool
+        || _ctx.kind == LogiaHostKind::EventHandler) {
         const char* name = nullptr;
         if (fn.kind == LifecycleKind::OnStart) {
             name = "on_start";
@@ -1315,40 +1320,49 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
             name = "on_destroy";
         }
         if (name) {
+            const char* hostLabel =
+                (_ctx.kind == LogiaHostKind::Tool) ? "Tool" : "EventHandler";
             LogiaDiagnostic d;
             d.severity = DiagnosticSeverity::Warning;
             d.errorCode = ErrorCode::InvalidStatement;
             d.location = sourceLocFor(&fn);   // S5 ED-02
             d.message = std::string(name) +
-                        " is not invoked on Tool host scripts";
-            d.hint = "Tool host runs once via the run() entry point; "
-                     "use `run()` for the one-shot body, or move this "
-                     "script to a Component / System host if you need "
-                     "tick-driven lifecycle";
+                        " is not invoked on " + hostLabel + " host scripts";
+            if (_ctx.kind == LogiaHostKind::Tool) {
+                d.hint = "Tool host runs once via the run() entry point; "
+                         "use `run()` for the one-shot body, or move this "
+                         "script to a Component / System host if you need "
+                         "tick-driven lifecycle";
+            } else {
+                d.hint = "EventHandler uses `run()` to bind event.subscribe "
+                         "(or call handlers from C++); Component lifecycle "
+                         "is not dispatched for this host kind";
+            }
             report(d);
         }
     }
 
     // S3.8b (LG-07) — symmetric warning: `run()` is meaningful only
-    // under the Tool host. On Component / System hosts it would be a
-    // dead method (neither the dispatcher nor the runner ever calls
-    // it). Soft warn so a copy-paste from a Tool source still parses
-    // under a Component host but the user knows to drop it.
+    // under Tool / EventHandler hosts. On Component / System it would
+    // be a dead method (neither the dispatcher nor the runner ever
+    // calls it). Soft warn so a copy-paste from a Tool source still
+    // parses under a Component host but the user knows to drop it.
     if (_ctx.kind != LogiaHostKind::Tool
+        && _ctx.kind != LogiaHostKind::EventHandler
         && fn.kind == LifecycleKind::Run) {
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::InvalidStatement;
-        d.message = "run() is a Tool host lifecycle and is not invoked on "
+        d.message = "run() is a Tool / EventHandler lifecycle and is not "
+                    "invoked on "
                     + std::string(_ctx.kind == LogiaHostKind::Component
                                       ? "Component"
-                                      : (_ctx.kind == LogiaHostKind::System
-                                             ? "System"
-                                             : "EventHandler"))
+                                      : "System")
                     + " host scripts";
-        d.hint = "move this script to a Tool host (toolLogiaHostContext()) "
-                 "and bind it via runTool(), or replace `run()` with the "
-                 "appropriate lifecycle (on_start / on_update) for this "
+        d.hint = "move this script to a Tool host (toolLogiaHostContext() / "
+                 "runTool()) or EventHandler host "
+                 "(eventHandlerLogiaHostContext() / loadEventHandler()), "
+                 "or replace `run()` with on_start / on_update for this "
                  "host kind";
         report(d);
     }
@@ -1825,9 +1839,10 @@ void SemanticAnalyzer::analyzeEmitCall(CallExpr& c)
         d.errorCode = ErrorCode::InvalidStatement;
         d.location = sourceLocFor(&c);   // S5 ED-02: callee-name loc
         d.message = "emit() requires a self-receiver; "
-                    "Tool host scripts (run-only) are not supported";
+                    "Tool / EventHandler host scripts (no self) are not supported";
         d.hint = "emit/connect are per-component event calls; use them "
-                 "inside Component / System host scripts, not Tool hosts";
+                 "inside Component / System host scripts, or use ambient "
+                 "event.emit / event.subscribe for cross-module EventBus";
         report(d);
         return;
     }
@@ -1933,9 +1948,9 @@ void SemanticAnalyzer::analyzeConnectCall(CallExpr& c)
         d.errorCode = ErrorCode::InvalidStatement;
         d.location = sourceLocFor(&c);
         d.message = "connect() requires a self-receiver; "
-                    "Tool host scripts (run-only) are not supported";
-        d.hint = "connect is per-component event registration; use it "
-                 "inside Component / System host scripts";
+                    "Tool / EventHandler host scripts (no self) are not supported";
+        d.hint = "connect is per-component event registration; use ambient "
+                 "event.subscribe for cross-module EventBus handlers";
         report(d);
         return;
     }
@@ -2009,9 +2024,9 @@ void SemanticAnalyzer::analyzeDisconnectCall(CallExpr& c)
         d.errorCode = ErrorCode::InvalidStatement;
         d.location = sourceLocFor(&c);
         d.message = "disconnect() requires a self-receiver; "
-                    "Tool host scripts (run-only) are not supported";
-        d.hint = "disconnect is per-component event deregistration; use it "
-                 "inside Component / System host scripts";
+                    "Tool / EventHandler host scripts (no self) are not supported";
+        d.hint = "disconnect is per-component event deregistration; use "
+                 "ambient event.unsubscribe for cross-module EventBus";
         report(d);
         return;
     }

@@ -357,7 +357,11 @@ namespace ayt::script
 //       helpers is unchanged — bump forces cache refresh so scripts
 //       that previously warned on `event` as implicit global recompile
 //       cleanly against the new ambient whitelist.
-constexpr std::size_t kLogiaPipelineVersion = 28u;
+//       2026-08-15 INT-04b (EventHandler host + alias expand): bump
+//       28 → 29. Semantic soft-warns for EventHandler Component
+//       lifecycle; CLI `--host eventhandler`; builtin aliases add
+//       device_action / task_complete / scene_* / physics_collision.
+constexpr std::size_t kLogiaPipelineVersion = 29u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -474,6 +478,17 @@ public:
     bool runTool(const std::string& scriptName,
                  const std::string& logiaSource,
                  std::vector<logia::CompilerError>& errors);
+
+    // INT-04b — EventHandler one-shot bind entry.
+    //
+    // Loads under `eventHandlerLogiaHostContext()` (kind=EventHandler,
+    // expectSelf=false) and invokes `run()` once so the script can
+    // wire ambient `event.subscribe` handlers. No ScriptComponent
+    // receiver; no on_start/update/destroy dispatch. Soft-warns those
+    // lifecycles at compile time (see SemanticAnalyzer).
+    bool loadEventHandler(const std::string& scriptName,
+                          const std::string& logiaSource,
+                          std::vector<logia::CompilerError>& errors);
 
     // === S3.6 (LG-06a) — compile cache observability ===
 

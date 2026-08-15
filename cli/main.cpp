@@ -1,7 +1,7 @@
 // main.cpp - ays-logia CLI executable entry point.
 //
 // Usage:
-//   ays-logia compile <file.logia> [--host component|system|tool]
+//   ays-logia compile <file.logia> [--host component|system|tool|eventhandler]
 //                                [--strict-inheritance]
 //                                [-o out.lua]
 //
@@ -35,7 +35,7 @@ namespace
 {
 
 const char* kUsage =
-    "Usage: ays-logia compile <file.logia> [--host component|system|tool]\n"
+    "Usage: ays-logia compile <file.logia> [--host component|system|tool|eventhandler]\n"
     "                                [--strict-inheritance]\n"
     "                                [-o out.lua]\n"
     "\n"
@@ -67,7 +67,12 @@ bool parseHostKind(const std::string& s,
     if (s == "component") { out = LogiaHostKind::Component; return true; }
     if (s == "system")    { out = LogiaHostKind::System;    return true; }
     if (s == "tool")      { out = LogiaHostKind::Tool;      return true; }
-    err = "unknown --host kind '" + s + "' (expected component|system|tool)";
+    if (s == "eventhandler") {
+        out = LogiaHostKind::EventHandler;
+        return true;
+    }
+    err = "unknown --host kind '" + s
+          + "' (expected component|system|tool|eventhandler)";
     return false;
 }
 
@@ -188,8 +193,9 @@ int main(int argc, char** argv)
     req.outputPath = args.outputPath;
     req.ctx.kind = args.hostKind;
     req.ctx.strictInheritance = args.strictInheritance;
-    if (args.hostKind == ayt::script::logia::LogiaHostKind::Tool) {
-        // Tool host never binds a receiver.
+    if (args.hostKind == ayt::script::logia::LogiaHostKind::Tool
+        || args.hostKind == ayt::script::logia::LogiaHostKind::EventHandler) {
+        // Tool / EventHandler never bind a ScriptComponent receiver.
         req.ctx.expectSelf = false;
     }
 
