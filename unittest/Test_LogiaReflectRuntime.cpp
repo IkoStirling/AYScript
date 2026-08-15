@@ -63,31 +63,34 @@ namespace
 struct LG05ReflectFixture {
     LG05ReflectFixture() {
         auto& reg = ayt::reflect::TypeRegistryImpl::instance();
-        if (reg.findType("LG05ScoreHolder")) return;
-        auto* info = new ayt::reflect::TypeInfoImpl<LG05ScoreHolder>(
-            "LG05ScoreHolder",
-            ayt::reflect::detail::defaultCreate<LG05ScoreHolder>,
-            ayt::reflect::detail::defaultDestroy<LG05ScoreHolder>,
-            ayt::reflect::detail::defaultCopy<LG05ScoreHolder>);
-        reg.registerTypeInfo("LG05ScoreHolder", info);
-        // Hand-register fields. The AY_PROPERTY macros above only
-        // populated the *global* AYSerializer registrar chain
-        // (serializer detail); without AY_FINALIZE_REGISTRATION we
-        // have to addField() each one into the AYReflect's info.
+        ayt::reflect::ITypeInfo* info = reg.findType("LG05ScoreHolder");
+        if (!info) {
+            auto* typed = new ayt::reflect::TypeInfoImpl<LG05ScoreHolder>(
+                "LG05ScoreHolder",
+                ayt::reflect::detail::defaultCreate<LG05ScoreHolder>,
+                ayt::reflect::detail::defaultDestroy<LG05ScoreHolder>,
+                ayt::reflect::detail::defaultCopy<LG05ScoreHolder>);
+            reg.registerTypeInfo("LG05ScoreHolder", typed);
+            info = typed;
+        }
+        // Hand-register fields. Prefer AYReflect builtins (name
+        // "int32_t" / "float" / "bool" from AYReflect.cpp) — push/
+        // store accept those names. Also tolerate ensureBuiltin
+        // "int"/"Int32" aliases via findType<T>() hash lookup.
         auto* intInfo = reg.findType<int32_t>();
         auto* floatInfo = reg.findType<float>();
         auto* boolInfo = reg.findType<bool>();
-        if (intInfo) {
+        if (intInfo && info->findField("score") == nullptr) {
             info->addField(new ayt::reflect::FieldInfoImpl(
                 "score", intInfo, offsetof(LG05ScoreHolder, score),
                 ayt::reflect::FieldAttribute::Serialize));
         }
-        if (floatInfo) {
+        if (floatInfo && info->findField("speed") == nullptr) {
             info->addField(new ayt::reflect::FieldInfoImpl(
                 "speed", floatInfo, offsetof(LG05ScoreHolder, speed),
                 ayt::reflect::FieldAttribute::Serialize));
         }
-        if (boolInfo) {
+        if (boolInfo && info->findField("enabled") == nullptr) {
             info->addField(new ayt::reflect::FieldInfoImpl(
                 "enabled", boolInfo, offsetof(LG05ScoreHolder, enabled),
                 ayt::reflect::FieldAttribute::Serialize));

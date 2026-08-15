@@ -732,7 +732,10 @@ SourceLocation sourceLocFor(const ScriptDecl* s)
 const std::unordered_set<std::string>& ambientIdentifiers()
 {
     static const std::unordered_set<std::string> s = {
-        "input", "log", "time"
+        // Object-receiver ambients (codegen → bare Lua `name.method(...)`).
+        "input", "log", "time",
+        "vec2",   // M1 helpers: vec2.length / vec2.normalized
+        "event",  // INT-04: event.emit / subscribe / unsubscribe → EventBus
     };
     return s;
 }

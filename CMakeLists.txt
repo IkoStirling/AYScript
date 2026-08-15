@@ -43,8 +43,11 @@ target_include_directories(AYScript PUBLIC
 # and SemanticAnalyzer references ITypeInfo / TypeRegistry (from
 # AYReflect). sol2/lua stay PRIVATE so consumers don't accidentally
 # include sol.hpp.
+# AYEventSystem is already PUBLIC via AYGameLoop; keep an explicit
+# PUBLIC link so INT-04 (AYLogiaEventBridge.h → EventBus.h) stays
+# reachable even if GameLoop's dep surface changes.
 target_link_libraries(AYScript
-    PUBLIC  AYLog AYGameLoop AYEntity AYReflect
+    PUBLIC  AYLog AYGameLoop AYEntity AYReflect AYEventSystem
     PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO
 )
 

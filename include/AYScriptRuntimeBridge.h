@@ -350,7 +350,14 @@ namespace ayt::script
 //       for `_functions` pre-pass + v2 signature check +
 //       `analyzeDisconnectCall`, and `AYLuaCodegen.cpp` for the
 //       helper-block reshape + `__ay_disconnect` lowering.
-constexpr std::size_t kLogiaPipelineVersion = 27u;
+//       2026-08-15 INT-04 (event.* → EventBus alias bridge): bump
+//       27 → 28. Ambient surface gains `event.emit` / `event.subscribe`
+//       / `event.unsubscribe`; SemanticAnalyzer ambientIdentifiers
+//       adds `event` (+ `vec2` catch-up). Codegen for S4.1 signal
+//       helpers is unchanged — bump forces cache refresh so scripts
+//       that previously warned on `event` as implicit global recompile
+//       cleanly against the new ambient whitelist.
+constexpr std::size_t kLogiaPipelineVersion = 28u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

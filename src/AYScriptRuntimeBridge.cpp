@@ -9,6 +9,7 @@
 
 #include "AYScriptRuntimeBridge.h"
 
+#include "AYLogiaEventBridge.h"
 #include "logia/AYLogia.h"
 #include "logia/AYLogiaPipeline.h"
 
@@ -316,7 +317,7 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
     const char* tname = type->getName();
     if (!tname) return 0;
     auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
-    if (eq("int") || eq("Int32")) {
+    if (eq("int") || eq("Int32") || eq("int32_t")) {
         lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int32_t*>(fieldPtr)));
         return 1;
     }
@@ -332,7 +333,7 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
         lua_pushnumber(L, static_cast<lua_Number>(*static_cast<double*>(fieldPtr)));
         return 1;
     }
-    if (eq("Int64")) {
+    if (eq("Int64") || eq("int64_t")) {
         lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int64_t*>(fieldPtr)));
         return 1;
     }
@@ -459,7 +460,7 @@ int storeFieldPrimitive(lua_State* L,
     if (!tname) return 0;
     auto eq = [tname](const char* n) { return std::strcmp(tname, n) == 0; };
 
-    if (eq("int") || eq("Int32")) {
+    if (eq("int") || eq("Int32") || eq("int32_t")) {
         *static_cast<int32_t*>(fieldPtr) =
             static_cast<int32_t>(lua_tointeger(L, valueStackIdx));
         return 1;
@@ -478,7 +479,7 @@ int storeFieldPrimitive(lua_State* L,
             static_cast<double>(lua_tonumber(L, valueStackIdx));
         return 1;
     }
-    if (eq("Int64")) {
+    if (eq("Int64") || eq("int64_t")) {
         *static_cast<int64_t*>(fieldPtr) =
             static_cast<int64_t>(lua_tointeger(L, valueStackIdx));
         return 1;
@@ -1624,6 +1625,12 @@ struct LogiaRuntimeBridge::Impl {
             return v;
         };
         lua["vec2"] = vec2Tbl;
+
+        // INT-04: ambient event.emit / subscribe / unsubscribe →
+        // EventBus string aliases. Does NOT route S4.1 signal/emit/
+        // connect through the bus (design §14.5.1). EventHandler host
+        // deferred to INT-04b.
+        installLogiaEventAmbient(lua, ayt::event::EventBus::instance());
 
         // LG-05 / S3.3: AYReflect-backed self.field read/write.
         // Registered as plain lua_CFunction entries (raw
