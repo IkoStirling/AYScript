@@ -18,6 +18,7 @@
 #include "AYScript.h"
 #include "AYScriptRuntimeBridge.h"
 #include "logia/AYCompilerError.h"
+#include "logia/AYLogia.h"
 #include "logia/AYLogiaPipeline.h"
 #include "logia/AYMethodInfoImpl.h"  // S3.12: MethodInfoImpl<T,Ret,Args...> for fixture
 #include "logia/AYMethodRegistrarBridge.h"  // S3.12: AY_FINALIZE_METHODS + buildMethodInfo impl
@@ -33,6 +34,7 @@
 #include <array>   // R4.1 (2026-07-13): std::array<T, N> fixture
 
 using ayt::script::LogiaRuntimeBridge;
+using ayt::script::logia::Compiler;
 using ayt::script::logia::CompilerError;
 
 namespace {
@@ -3470,6 +3472,300 @@ script T {
     CHECK(bridge.callLifecycle("r52h_if_logical", "on_start",
                                nullptr, nullptr));
     CHECK(bridge.getLuaGlobalString("__test_witness") == "3");
+}
+
+// ============================================================================
+// R3.5 — registerEnum typed path + m_/b_ field strip + string field write
+// ============================================================================
+
+namespace
+{
+enum class R35Phase : int32_t { Idle = 0, Active = 1, Done = 2 };
+
+struct R35Player {
+    int32_t m_hp = 100;
+    std::string m_name = "hero";
+    R35Phase _phase = R35Phase::Idle;
+
+    void setPhase(R35Phase p) { _phase = p; }
+    R35Phase getPhase() const { return _phase; }
+};
+
+void ensureR35PlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R35Player") != nullptr) return;
+
+    // Register enum BEFORE MethodInfoImpl is constructed so
+    // getParamType / getReturnType static caches see EnumTypeInfo.
+    ayt::reflect::registerEnum<R35Phase>("R35Phase");
+
+    if (reg.findType("int") == nullptr) {
+        auto* p = new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int", ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>);
+        reg.registerTypeInfo("int", p);
+    }
+    if (reg.findType("std::string") == nullptr) {
+        reg.registerType("std::string", typeid(std::string).hash_code(),
+                         sizeof(std::string));
+    }
+
+    auto* intInfo = reg.findType("int");
+    auto* strInfo = reg.findType("std::string");
+    CHECK(reg.findType<R35Phase>() != nullptr);
+
+    auto* info = new ayt::reflect::TypeInfoImpl<R35Player>(
+        "R35Player",
+        ayt::reflect::detail::defaultCreate<R35Player>,
+        ayt::reflect::detail::defaultDestroy<R35Player>,
+        ayt::reflect::detail::defaultCopy<R35Player>);
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "m_hp", intInfo, offsetof(R35Player, m_hp),
+        ayt::reflect::FieldAttribute::Serialize));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "m_name", strInfo, offsetof(R35Player, m_name),
+        ayt::reflect::FieldAttribute::Serialize));
+
+    using MI = ayt::script::logia::reflect::MethodInfoImpl<R35Player, void, R35Phase>;
+    using MIC = ayt::script::logia::reflect::MethodInfoImplConst<R35Player, R35Phase>;
+    info->addMethod(new MI("setPhase", &R35Player::setPhase));
+    info->addMethod(new MIC("getPhase", &R35Player::getPhase));
+    reg.registerTypeInfo("R35Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_r35_enum_method_arg_return_typed_path) {
+    // Registered enum: getParamType / getReturnType are EnumTypeInfo
+    // (not nullptr / not bare underlying int). Bridge takes the
+    // IEnumTypeInfo typed marshal branch.
+    ensureR35PlayerRegistered();
+    auto* phaseType = ayt::reflect::TypeRegistryImpl::instance().findType<R35Phase>();
+    CHECK(phaseType != nullptr);
+    CHECK(dynamic_cast<ayt::reflect::IEnumTypeInfo*>(phaseType) != nullptr);
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R35Player");
+    CHECK(ti != nullptr);
+    auto* setM = ti->findMethod("setPhase");
+    auto* getM = ti->findMethod("getPhase");
+    CHECK(setM != nullptr);
+    CHECK(getM != nullptr);
+    CHECK(setM->getParamType(0) == phaseType);
+    CHECK(getM->getReturnType() == phaseType);
+
+    LogiaRuntimeBridge bridge;
+    R35Player obj;
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R35Player {
+    on_start() {
+        self.setPhase(1)
+        local p = self.getPhase()
+        __test_witness = tostring(p)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R35Player_enum_typed", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R35Player_enum_typed", "on_start", &obj, nullptr));
+    CHECK(obj.getPhase() == R35Phase::Active);
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "1");
+}
+
+TEST_CASE(lg12_r35_field_stripper_m_hp) {
+    // C++ field `m_hp`; Logia writes / reads `self.hp`.
+    ensureR35PlayerRegistered();
+    LogiaRuntimeBridge bridge;
+    R35Player obj;
+    obj.m_hp = 40;
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R35Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R35Player {
+    on_start() {
+        self.hp = self.hp + 7
+        __test_witness = tostring(self.hp)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R35Player_hp_strip", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R35Player_hp_strip", "on_start", &obj, nullptr));
+    CHECK(obj.m_hp == 47);
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "47");
+}
+
+TEST_CASE(lg12_r35_string_field_write_round_trip) {
+    // R3.5 leaf std::string storeFieldPrimitive assign path.
+    ensureR35PlayerRegistered();
+    LogiaRuntimeBridge bridge;
+    R35Player obj;
+    obj.m_name = "hero";
+
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R35Player");
+    ayt::script::logia::LogiaHostContext ctx;
+    ctx.kind = ayt::script::logia::LogiaHostKind::Component;
+    ctx.hostType = ti;
+    ctx.expectSelf = true;
+
+    const char* src = R"(
+script R35Player {
+    on_start() {
+        self.name = "villain"
+        __test_witness = self.name
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    bool loaded = bridge.loadScript("R35Player_name_write", src, ctx, errors);
+    CHECK(loaded);
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R35Player_name_write", "on_start", &obj, nullptr));
+    CHECK(obj.m_name == "villain");
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "villain");
+}
+
+// ===========================================================================
+// R1 (2026-08-15) — ScriptVisible / ScriptReadOnly enforcement
+// ===========================================================================
+
+namespace
+{
+struct R1Player {
+    int hp = 10;
+    int maxHp = 100;
+    int secret = 7;
+};
+
+void ensureR1PlayerRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R1Player") != nullptr) {
+        return;
+    }
+    if (reg.findType("int") == nullptr) {
+        reg.registerType("int", typeid(int).hash_code(), sizeof(int));
+    }
+    auto* intInfo = reg.findType("int");
+    auto* info = new ayt::reflect::TypeInfoImpl<R1Player>(
+        "R1Player",
+        ayt::reflect::detail::defaultCreate<R1Player>,
+        ayt::reflect::detail::defaultDestroy<R1Player>,
+        ayt::reflect::detail::defaultCopy<R1Player>);
+    using FA = ayt::reflect::FieldAttribute;
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "hp", intInfo, offsetof(R1Player, hp), FA::ScriptVisible));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "maxHp", intInfo, offsetof(R1Player, maxHp),
+        FA::ScriptVisible | FA::ScriptReadOnly));
+    info->addField(new ayt::reflect::FieldInfoImpl(
+        "secret", intInfo, offsetof(R1Player, secret), FA::Serialize));
+    reg.registerTypeInfo("R1Player", info);
+}
+} // namespace
+
+TEST_CASE(lg12_r1_readonly_assign_compile_error)
+{
+    ensureR1PlayerRegistered();
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R1Player");
+    ayt::script::logia::LogiaHostContext ctx =
+        ayt::script::logia::defaultLogiaHostContext();
+    ctx.hostType = ti;
+
+    Compiler c;
+    auto r = c.compile(R"(
+script R1Player {
+    on_start() {
+        self.maxHp = 50
+    }
+}
+)",
+                       ctx);
+    CHECK(!r.success);
+    bool found = false;
+    for (const auto& d : r.diagnostics) {
+        if (d.message.find("ScriptReadOnly") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE(lg12_r1_invisible_field_compile_error)
+{
+    ensureR1PlayerRegistered();
+    auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("R1Player");
+    ayt::script::logia::LogiaHostContext ctx =
+        ayt::script::logia::defaultLogiaHostContext();
+    ctx.hostType = ti;
+
+    ayt::script::logia::Compiler c;
+    auto r = c.compile(R"(
+script R1Player {
+    on_start() {
+        __test_witness = self.secret
+    }
+}
+)",
+                       ctx);
+    CHECK(!r.success);
+    bool found = false;
+    for (const auto& d : r.diagnostics) {
+        if (d.message.find("ScriptVisible") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE(lg12_r1_readonly_runtime_set_noop)
+{
+    ensureR1PlayerRegistered();
+    R1Player obj;
+    obj.maxHp = 100;
+    obj.hp = 10;
+
+    LogiaRuntimeBridge bridge;
+    ayt::script::logia::LogiaHostContext ctx =
+        ayt::script::logia::defaultLogiaHostContext();
+    ctx.hostType =
+        ayt::reflect::TypeRegistryImpl::instance().findType("R1Player");
+    ctx.expectSelf = true;
+
+    // Writable field via Logia; read-only poke via the same C helper
+    // codegen emits (bypasses semantic assign check, hits runtime).
+    const char* src = R"(
+script R1Player {
+    on_start() {
+        self.hp = 42
+        ayt_reflect_set_field(self, "R1Player", "maxHp", 1)
+        __test_witness = tostring(self.maxHp)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(bridge.loadScript("R1Player_ro_runtime", src, ctx, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle("R1Player_ro_runtime", "on_start", &obj, nullptr));
+    CHECK(obj.hp == 42);
+    CHECK(obj.maxHp == 100);
+    CHECK(bridge.getLuaGlobalString("__test_witness") == "100");
 }
 
 // ----------------------------------------------------------------------------

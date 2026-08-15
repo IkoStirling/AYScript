@@ -2354,8 +2354,8 @@ IGameLoop::instance().registerSubSystem(new ScriptSubSystem());
 
 | ID | 交付物 | 验收 |
 |----|--------|------|
-| **R1** | `FieldAttribute::ScriptVisible/ScriptReadOnly`（或复用 `BlueprintReadOnly`）；Semantic 拒绝不可见字段；`set_field` runtime enforce | 只读字段赋值 compile error 或 runtime log+no-op |
-| **R3.5** | `registerEnum<E>()`；bridge 不再 enum int fallback；`m_`/`b_` stripper；struct 内 `std::string` field marshal | enum 方法 round-trip 走 typed path |
+| **R1** | `FieldAttribute::ScriptVisible/ScriptReadOnly`（或复用 `BlueprintReadOnly`）；Semantic 拒绝不可见字段；`set_field` runtime enforce | ✅ **2026-08-15** |
+| **R3.5** | `registerEnum<E>()`；bridge 不再 enum int fallback；`m_`/`b_` stripper；struct 内 `std::string` field marshal | ✅ **2026-08-15** |
 | **R4** | `std::vector<T>`/`std::array` args（int/float ship R4.1）；嵌套 struct 字段（ship R4.0）；`T&` out-param（R4.2 待） | 新方法签名 unittest |
 | **R5/R6** | 智能指针、sol2 usertype | 仅在有性能/所有权需求时启动 |
 

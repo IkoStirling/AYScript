@@ -471,15 +471,18 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
     static ayt::reflect::ITypeInfo* paramTypeForIndex() {
         using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
         // Strip reference / pointer / const so findType<T> matches
-        // the registered ITypeInfo. Enum needs special handling —
-        // fall back to underlying type lookup via the SFINAE
-        // helper at namespace scope (detail::LookupType) so
-        // std::underlying_type_t is only instantiated for enums.
+        // the registered ITypeInfo. R3.5: prefer the stripped type
+        // itself (so a registered enum resolves to EnumTypeInfo);
+        // fall back to underlying integral for unregistered enums
+        // (R3.0 int path via detail::LookupType).
         using Stripped = std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<ArgT>>>;
         using LookupT = typename detail::LookupType<Stripped>::type;
         static ayt::reflect::ITypeInfo* cache = nullptr;
         if (!cache) {
-            cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+            cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Stripped>();
+            if (!cache) {
+                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+            }
         }
         return cache;
     }
@@ -720,11 +723,16 @@ private:
     template <std::size_t I>
     static ayt::reflect::ITypeInfo* paramTypeForIndex() {
         using ArgT = std::tuple_element_t<I, std::tuple<Args...>>;
+        // R3.5: prefer stripped type (registered EnumTypeInfo); fall
+        // back to underlying integral for unregistered enums.
         using Stripped = std::remove_cv_t<std::remove_pointer_t<std::remove_reference_t<ArgT>>>;
         using LookupT = typename detail::LookupType<Stripped>::type;
         static ayt::reflect::ITypeInfo* cache = nullptr;
         if (!cache) {
-            cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+            cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Stripped>();
+            if (!cache) {
+                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+            }
         }
         return cache;
     }

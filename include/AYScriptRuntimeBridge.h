@@ -361,7 +361,17 @@ namespace ayt::script
 //       28 → 29. Semantic soft-warns for EventHandler Component
 //       lifecycle; CLI `--host eventhandler`; builtin aliases add
 //       device_action / task_complete / scene_* / physics_collision.
-constexpr std::size_t kLogiaPipelineVersion = 29u;
+//       2026-08-15 R3.5 (registerEnum + m_/b_ field strip + string
+//       field write): bump 29 → 30. SemanticAnalyzer resolves
+//       `self.hp` against C++ `m_hp` via findFieldNormalized;
+//       bridge marshal gains IEnumTypeInfo typed path + leaf
+//       std::string storeFieldPrimitive. Cache must invalidate so
+//       scripts that previously warned on stripped field names
+//       recompile cleanly.
+//       2026-08-15 R1 (ScriptVisible / ScriptReadOnly): bump 30 → 31.
+//       Semantic rejects non-visible / read-only field access;
+//       runtime set_field no-ops ScriptReadOnly.
+constexpr std::size_t kLogiaPipelineVersion = 31u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

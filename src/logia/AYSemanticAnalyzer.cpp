@@ -2162,9 +2162,48 @@ void SemanticAnalyzer::analyzeExpr(Expr& e)
                 // (Lua-style implicit global).
             } else {
                 analyzeExpr(*b->left);
+                // R1: reject writes to ScriptReadOnly / BlueprintReadOnly.
+                if (auto* mem = dynamic_cast<MemberExpr*>(b->left.get())) {
+                    if (mem->resolvedField
+                        && !ayt::reflect::isScriptWritable(mem->resolvedField)) {
+                        LogiaDiagnostic d;
+                        d.severity = DiagnosticSeverity::Error;
+                        d.errorCode = ErrorCode::InvalidStatement;
+                        d.location = sourceLocFor(mem);
+                        d.message = "field '" + mem->member +
+                                    "' is ScriptReadOnly (cannot assign)";
+                        d.hint = "remove ScriptReadOnly / BlueprintReadOnly "
+                                 "from the Reflect registration, or read "
+                                 "the field without writing";
+                        report(d);
+                    }
+                }
             }
         } else if (b->left) {
             analyzeExpr(*b->left);
+            // Compound assigns (+= etc.) are also writes.
+            const bool isCompoundWrite =
+                b->op.type == TokenType::PlusEqual
+                || b->op.type == TokenType::MinusEqual
+                || b->op.type == TokenType::StarEqual
+                || b->op.type == TokenType::SlashEqual;
+            if (isCompoundWrite) {
+                if (auto* mem = dynamic_cast<MemberExpr*>(b->left.get())) {
+                    if (mem->resolvedField
+                        && !ayt::reflect::isScriptWritable(mem->resolvedField)) {
+                        LogiaDiagnostic d;
+                        d.severity = DiagnosticSeverity::Error;
+                        d.errorCode = ErrorCode::InvalidStatement;
+                        d.location = sourceLocFor(mem);
+                        d.message = "field '" + mem->member +
+                                    "' is ScriptReadOnly (cannot assign)";
+                        d.hint = "remove ScriptReadOnly / BlueprintReadOnly "
+                                 "from the Reflect registration, or read "
+                                 "the field without writing";
+                        report(d);
+                    }
+                }
+            }
         }
         if (b->right) analyzeExpr(*b->right);
     } else if (auto* u = dynamic_cast<UnaryExpr*>(&e)) {
@@ -2265,7 +2304,7 @@ void SemanticAnalyzer::analyzeMemberExpr(MemberExpr& m,
         // ambient (input.is_pressed → ok).
         return;
     }
-    auto* field = parent->findField(m.member.c_str());
+    auto* field = ayt::reflect::findFieldNormalized(parent, m.member.c_str());
     if (!field) {
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
@@ -2278,6 +2317,23 @@ void SemanticAnalyzer::analyzeMemberExpr(MemberExpr& m,
     }
     m.resolvedField = field;
     m.resolvedType = field->getType();
+
+    // R1: ScriptVisible opt-in — reject reads of non-visible fields.
+    if (!ayt::reflect::isScriptReadable(field, parent)) {
+        LogiaDiagnostic d;
+        d.severity = DiagnosticSeverity::Error;
+        d.errorCode = ErrorCode::InvalidStatement;
+        d.location = sourceLocFor(&m);
+        d.message = "field '" + m.member + "' on '" +
+                    std::string(parent->getName()) +
+                    "' is not ScriptVisible";
+        d.hint = "mark the field with FieldAttribute::ScriptVisible "
+                 "(or ScriptReadOnly), or remove ScriptVisible from "
+                 "sibling fields to exit opt-in mode";
+        report(d);
+        m.resolvedField = nullptr;
+        m.resolvedType = nullptr;
+    }
 }
 
 } // namespace ayt::script::logia

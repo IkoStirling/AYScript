@@ -248,7 +248,9 @@ const ayt::reflect::IFieldInfo* lookupField(const std::string& typeName,
     if (it != cache.end()) return it->second;
     auto* typeInfo = ayt::reflect::TypeRegistryImpl::instance().findType(typeName.c_str());
     if (!typeInfo) return nullptr;
-    auto* field = typeInfo->findField(fieldName.c_str());
+    // R3.5: exact match first, then m_/b_ prefix strip (Logia `self.hp`
+    // → C++ field `m_hp`).
+    auto* field = ayt::reflect::findFieldNormalized(typeInfo, fieldName.c_str());
     if (!field) return nullptr;
     cache[k] = field;
     return field;
@@ -355,11 +357,9 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
     // R4.0 — nested struct field: build a Lua sub-table with one
     // entry per primitive leaf (recursive for deeper nesting). The
     // same primitive dispatch above handles leaves at any depth.
-    // Limitations carried over from R3.0: std::string sub-fields
-    // (a string member of a struct field) still fail closed (nil)
-    // until R3.5+ — placement-new in storeFieldPrimitive is a
-    // separate design. Container (vector/array) sub-fields fail
-    // closed until R4.1+.
+    // R3.5: Lua table keys use normalizeFieldName so Logia reads
+    // `s.hp` when the C++ field is `m_hp`. Container (vector/array)
+    // sub-fields still fail closed until R4.1+.
     if (type->getFieldCount() > 0) {
         lua_newtable(L);
         int subTableIdx = lua_gettop(L);
@@ -371,7 +371,7 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
             if (!subName) continue;
             void* subPtr = static_cast<uint8_t*>(fieldPtr) + sub->getOffset();
             if (pushFieldPrimitive(L, sub, subPtr) == 1) {
-                lua_pushstring(L, subName);
+                lua_pushstring(L, ayt::reflect::normalizeFieldName(subName));
                 // Settable key+value into the captured `subTableIdx`
                 // (relative-to-absolute anchor) so deep nesting works
                 // regardless of how deep the call stack sits on the
@@ -403,6 +403,15 @@ int ayt_reflect_get_field_c(lua_State* L)
         lua_pushnil(L);
         return 1;
     }
+    // R1: ScriptVisible opt-in — invisible fields read as nil.
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    auto* ownerType = reg.findType(typeName.c_str());
+    if (!ayt::reflect::isScriptReadable(field, ownerType)) {
+        ayt::log::warn("ayt_reflect_get_field: %s.%s not ScriptVisible",
+                       typeName.c_str(), fieldName.c_str());
+        lua_pushnil(L);
+        return 1;
+    }
     void* fieldPtr = field->get(selfPtr);
     if (pushFieldPrimitive(L, field, fieldPtr) == 0) {
         lua_pushnil(L);
@@ -425,6 +434,19 @@ int ayt_reflect_set_field_c(lua_State* L)
                         typeName.c_str(), fieldName.c_str());
         return 0;
     }
+    // R1: ScriptReadOnly / BlueprintReadOnly — log + no-op.
+    if (!ayt::reflect::isScriptWritable(field)) {
+        ayt::log::warn("ayt_reflect_set_field: %s.%s is ScriptReadOnly (ignored)",
+                       typeName.c_str(), fieldName.c_str());
+        return 0;
+    }
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    auto* ownerType = reg.findType(typeName.c_str());
+    if (!ayt::reflect::isScriptReadable(field, ownerType)) {
+        ayt::log::warn("ayt_reflect_set_field: %s.%s not ScriptVisible (ignored)",
+                       typeName.c_str(), fieldName.c_str());
+        return 0;
+    }
     void* fieldPtr = field->get(selfPtr);
     if (storeFieldPrimitive(L, field, fieldPtr, 4) == 0) {
         ayt::log::error("ayt_reflect_set_field: %s.%s (unsupported or null type)",
@@ -442,13 +464,14 @@ int ayt_reflect_set_field_c(lua_State* L)
 // store. Callers must validate `valueStackIdx <= lua_gettop(L)` before
 // calling.
 //
-// R4.0 — nested struct field: when the field's type has its own
+// R4.0 / R3.5 — nested struct field: when the field's type has its own
 // fields (getFieldCount() > 0), `valueStackIdx` must point at a Lua
-// table. We build a temporary T in heap memory (memset 0), recursively
-// fill each sub-field from the Lua table, then memcpy into the
-// caller's fieldPtr (struct by value assignment). Returns 1 on
-// success; 0 on truly unknown type (std::string / container fields
-// fail closed until R3.5+ / R4.1).
+// table. Sub-fields are written **directly into fieldPtr** (a live
+// constructed object). The older memset+memcpy temp path is unsafe for
+// std::string sub-fields; R3.5 leaf std::string write uses assign into
+// an existing string*. Nested structs that appear only inside a
+// memset-zeroed struct-arg temp still skip string leaves (leaf-only
+// string write for R3.5 — see design.md §5.7.4 R3.5).
 int storeFieldPrimitive(lua_State* L,
                         const ayt::reflect::IFieldInfo* field,
                         void* fieldPtr,
@@ -484,36 +507,41 @@ int storeFieldPrimitive(lua_State* L,
             static_cast<int64_t>(lua_tointeger(L, valueStackIdx));
         return 1;
     }
-    // R4.0 — nested struct write. Lua-side value must be a table.
-    // We allocate a temp T, fill it recursively, then memcpy into
-    // the caller's fieldPtr. Used by `ayt_reflect_set_field_c` (single
-    // hop) and the chain helper `ayt_reflect_set_field_chain_c`.
+    // R3.5: leaf std::string write. fieldPtr must address a live
+    // constructed std::string (set_field / chain / nested direct-write
+    // into a host object). Struct-arg memset temps that contain string
+    // fields remain fail-closed at the call-method fill loop.
+    if (eq("std::string")) {
+        const char* s = lua_tostring(L, valueStackIdx);
+        *static_cast<std::string*>(fieldPtr) = (s ? s : "");
+        return 1;
+    }
+    // R4.0 / R3.5 — nested struct write. Lua-side value must be a table.
+    // Write each present key directly into the live fieldPtr (no
+    // memset+memcpy). Keys accept either the C++ field name or its
+    // normalizeFieldName form (`m_hp` / `hp`).
     if (type->getFieldCount() > 0) {
         if (!lua_istable(L, valueStackIdx)) {
             return 0;
         }
-        size_t typeSize = type->getSize();
-        if (typeSize == 0) typeSize = sizeof(uint64_t);  // safety
-        void* subMem = ::operator new(typeSize);
-        std::memset(subMem, 0, typeSize);
         size_t subCount = type->getFieldCount();
         for (size_t si = 0; si < subCount; ++si) {
             auto* sub = type->getField(si);
             if (!sub) continue;
             const char* subName = sub->getName();
             if (!subName) continue;
+            const char* normName = ayt::reflect::normalizeFieldName(subName);
             lua_getfield(L, valueStackIdx, subName);
+            if (lua_isnil(L, -1) && normName != subName) {
+                lua_pop(L, 1);
+                lua_getfield(L, valueStackIdx, normName);
+            }
             if (!lua_isnil(L, -1)) {
-                void* subPtr = static_cast<uint8_t*>(subMem) + sub->getOffset();
-                // Recurse. -1 is relative to current top of stack —
-                // the inner getfield above left the value there.
+                void* subPtr = static_cast<uint8_t*>(fieldPtr) + sub->getOffset();
                 storeFieldPrimitive(L, sub, subPtr, /*valueStackIdx=*/-1);
             }
             lua_pop(L, 1);
         }
-        // Struct by value copy into the caller's slot.
-        std::memcpy(fieldPtr, subMem, typeSize);
-        ::operator delete(subMem);
         return 1;
     }
     return 0;
@@ -637,6 +665,11 @@ int ayt_reflect_set_field_chain_c(lua_State* L)
     if (!leaf || ptr == nullptr) {
         ayt::log::error("ayt_reflect_set_field_chain: %s.%s (unknown leaf)",
                         typeName.c_str(), leafName.c_str());
+        return 0;
+    }
+    if (!ayt::reflect::isScriptWritable(leaf)) {
+        ayt::log::warn("ayt_reflect_set_field_chain: %s.%s is ScriptReadOnly (ignored)",
+                       typeName.c_str(), leafName.c_str());
         return 0;
     }
     void* leafPtr = leaf->get(ptr);
@@ -792,14 +825,23 @@ int ayt_reflect_call_method_c(lua_State* L)
             auto* sp = new std::string(s ? s : "");
             argPtrs[i] = sp;
             registerCleanup(sp, [](void* p) { delete static_cast<std::string*>(p); });
+        } else if (dynamic_cast<ayt::reflect::IEnumTypeInfo*>(paramType)) {
+            // R3.5: registered enum — typed path. Wire format is the
+            // underlying integer (same bytes MethodInfoImpl::readArg
+            // expects). Unregistered enums still hit the int fallback
+            // below when paramType is nullptr / underlying int.
+            int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
+            std::memcpy(&argSlots[i], &v, sizeof(int32_t));
+            argPtrs[i] = &argSlots[i];
         } else if (paramType && paramType->getFieldCount() > 0) {
             // S3.12+R3: struct arg. Default-construct T in heap
             // memory and fill field-by-field from the Lua table.
             // Lua table key = C++ field name (exact match, camelCase
             // both sides — see design.md §5.7.4 R3 conventions).
-            // std::string fields inside the struct fail closed
-            // (pushFieldPrimitive / storeFieldPrimitive reject them;
-            // they keep their zero-init from the memset below).
+            // R3.5: std::string fields inside the struct remain
+            // fail-closed here (leaf-only string write on live host
+            // objects via set_field); memset + ::operator delete
+            // cannot safely own string dtors.
             size_t typeSize = paramType->getSize();
             if (typeSize == 0) typeSize = sizeof(uint64_t);  // safety
             void* mem = ::operator new(typeSize);
@@ -808,6 +850,11 @@ int ayt_reflect_call_method_c(lua_State* L)
             for (size_t fi = 0; fi < fieldCount; ++fi) {
                 auto* field = paramType->getField(fi);
                 if (!field) continue;
+                auto* ftype = field->getType();
+                if (ftype && ftype->getName()
+                    && std::strcmp(ftype->getName(), "std::string") == 0) {
+                    continue;  // R3.5 leaf-only string write
+                }
                 lua_getfield(L, stackIdx, field->getName());
                 if (!lua_isnil(L, -1)) {
                     // storeFieldPrimitive reads from top of stack.
@@ -1252,12 +1299,12 @@ int ayt_reflect_call_method_c(lua_State* L)
     }
     if (retType == nullptr) {
         // R3.0: retType is null for return types that aren't
-        // registered as AYReflect types (e.g. C++ enum, which
-        // rides on the int path). The MethodInfoImpl stored the
+        // registered as AYReflect types (e.g. C++ enum before R3.5
+        // registerEnum). The MethodInfoImpl stored the
         // underlying-type int in retPtr; push it as a Lua integer.
-        // S3.12+R3.5+ will add a dedicated EnumTypeInfo<E> that
-        // returns the enum type name; the int fallback here is
-        // preserved.
+        // R3.5: when registerEnum<E>() ran, retType is EnumTypeInfo
+        // and the typed branch below handles it — this fallback
+        // remains for unregistered enums only.
         int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
         lua_pushinteger(L, static_cast<lua_Integer>(v));
         return 1;
@@ -1286,6 +1333,15 @@ int ayt_reflect_call_method_c(lua_State* L)
     } else if (std::strcmp(tname, "std::string") == 0) {
         const std::string* sp = static_cast<const std::string*>(retPtr);
         lua_pushlstring(L, sp->data(), sp->size());
+    } else if (dynamic_cast<ayt::reflect::IEnumTypeInfo*>(retType)) {
+        // R3.5: registered enum return — typed path. MethodInfoImpl
+        // storeReturn memcpy'd sizeof(E) into the TLS buffer; push
+        // as Lua integer (same wire as the R3.0 nullptr fallback).
+        int64_t v = 0;
+        size_t sz = retType->getSize();
+        if (sz > sizeof(v)) sz = sizeof(v);
+        std::memcpy(&v, retPtr, sz);
+        lua_pushinteger(L, static_cast<lua_Integer>(v));
     } else if (auto* containerType = dynamic_cast<ayt::reflect::IContainerTypeInfo*>(retType)) {
         // R4.1b (2026-07-13): container return (std::vector<T> or
         // std::array<T, N>). Walk getElementAt(i) and push each element
@@ -1394,10 +1450,11 @@ int ayt_reflect_call_method_c(lua_State* L)
             lua_settable(L, outerIdx);
         }
     } else {
-        // Unknown return type — most commonly an enum (R3.0 ships
-        // enum args/return on the int path but doesn't register a
-        // dedicated EnumTypeInfo for them). The MethodInfoImpl
-        // stores the underlying-type int in retPtr; push it.
+        // Unknown return type — most commonly an unregistered enum
+        // that somehow got a non-null retType, or a future type.
+        // MethodInfoImpl stores the underlying-type int in retPtr;
+        // push it. Registered enums take the IEnumTypeInfo branch
+        // above (R3.5).
         int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
         lua_pushinteger(L, static_cast<lua_Integer>(v));
     }
