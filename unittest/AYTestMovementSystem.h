@@ -18,7 +18,7 @@
 // AYReflect metadata macros for the test fixture's C++ field. Putting
 // the finalize macro here (not in AYEntity) keeps AYEntity's public
 // header surface clean — MovementSystem is test-only.
-#include <ayserializer/PropertyMacros.h>
+#include <AYSerializer/PropertyMacros.h>
 
 #include <cstdint>
 

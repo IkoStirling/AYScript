@@ -31,7 +31,7 @@
 //   }
 // ============================================================
 
-#include "ayserializer/PropertyMacros.h"
+#include "AYSerializer/PropertyMacros.h"
 #include "AYMethodInfoImpl.h"
 
 namespace ayt::serializer::detail

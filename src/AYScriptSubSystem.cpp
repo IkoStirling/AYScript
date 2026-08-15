@@ -3,7 +3,7 @@
 #include "AYScriptSubSystem.h"
 
 #include "AYScriptBridgeAdapter.h"
-#include "aylog/Logger.h"
+#include "AYLog/Logger.h"
 
 #include <AYSubSystemRegistry.h>
 

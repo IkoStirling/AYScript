@@ -16,7 +16,7 @@
 #include "logia/AYSemanticAnalyzer.h"
 #include "AYTest.h"
 
-#include "ayreflect/IReflect.h"
+#include "AYReflect/IReflect.h"
 #include "AYReflect.h"
 #include "AYReflectMacros.h"
 

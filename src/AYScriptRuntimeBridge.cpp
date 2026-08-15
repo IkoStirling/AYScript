@@ -19,14 +19,14 @@
 
 #include <functional>
 
-#include "aylog/Channel.h"
-#include "aylog/Logger.h"
+#include "AYLog/Channel.h"
+#include "AYLog/Logger.h"
 
 // LG-05 / S3.3: AYReflect introspection for `self.field` runtime
 // reads/writes. lua_State* comes from sol2 via its bundled
 // compat layer, so the lua_pushinteger/pop helpers below are
 // visible without an extra `<lua.h>` include.
-#include "ayreflect/IReflect.h"
+#include "AYReflect/IReflect.h"
 #include "AYReflect.h"  // full TypeRegistryImpl definition
 
 #include <unordered_map>

@@ -12,7 +12,7 @@
 // getFieldCount() on the resolved leaf type of `self.<field>`
 // and decide between the reflect-call rewrite and the legacy
 // bare-member codegen.
-#include "ayreflect/IReflect.h"
+#include "AYReflect/IReflect.h"
 
 #include <cstdio>
 #include <sstream>

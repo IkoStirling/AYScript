@@ -13,11 +13,11 @@
 
 #include "logia/AYSemanticAnalyzer.h"
 
-#include "aylog/Logger.h"
+#include "AYLog/Logger.h"
 
 // AYReflect surface
-#include "ayreflect/IReflect.h"
-#include "ayreflect/ReflectRegistry.h"
+#include "AYReflect/IReflect.h"
+#include "AYReflect/ReflectRegistry.h"
 #include "AYReflect.h"  // full TypeRegistryImpl definition (linkable)
 
 // S3.2 (LG-04b, B-min): isDerivedFrom is a free function defined in
@@ -32,7 +32,7 @@ bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
 #include "AYEntityModule.h"
 #include "components/AYHealthComponent.h"
 #include "AYReflectMacros.h"  // ayt::reflect::detail::defaultCreate/Destroy/Copy
-#include <aymath/MathTypes.h>
+#include <AYMath/MathTypes.h>
 
 #include <algorithm>
 #include <cstring>

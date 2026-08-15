@@ -24,7 +24,7 @@
 #include "logia/AYCompilerError.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
-#include "aylog/Logger.h"
+#include "AYLog/Logger.h"
 
 // M1: FVector2 reflect registration probe pulls the registry directly
 // rather than relying on SemanticAnalyzer ctor side-effect.

@@ -31,7 +31,7 @@
 // under the explicit name "MovementSystem" (must match the Logia
 // script name and ISystem::getName()). Done once per process via a
 // static-init guard.
-#include <ayreflect/IReflect.h>
+#include <AYReflect/IReflect.h>
 #include <AYReflect.h>
 #include <AYReflectMacros.h>
 
