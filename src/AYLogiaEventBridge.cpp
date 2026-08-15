@@ -1,14 +1,14 @@
 // AYLogiaEventBridge.cpp — INT-04 / INT-04b Logia event.* ambient
 
-#include "AYLogiaEventBridge.h"
+#include "AYScript/LogiaEventBridge.h"
 
-#include <ayevent/Events/DeviceEvents.h>
-#include <ayevent/Events/PhysicsEvents.h>
-#include <ayevent/Events/ResourceEvents.h>
-#include <ayevent/Events/SceneEvents.h>
-#include <ayevent/Events/ScriptTestEvents.h>
-#include <ayevent/Events/TaskEvents.h>
-#include <ayevent/Events/WindowEvents.h>
+#include <AYEventSystem/Events/DeviceEvents.h>
+#include <AYEventSystem/Events/PhysicsEvents.h>
+#include <AYEventSystem/Events/ResourceEvents.h>
+#include <AYEventSystem/Events/SceneEvents.h>
+#include <AYEventSystem/Events/ScriptTestEvents.h>
+#include <AYEventSystem/Events/TaskEvents.h>
+#include <AYEventSystem/Events/WindowEvents.h>
 
 #include <AYLog.h>
 

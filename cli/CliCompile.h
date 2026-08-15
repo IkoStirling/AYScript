@@ -8,8 +8,8 @@
 // thin wrapper that translates argv into a CliCompileRequest and the
 // result into stdout / stderr / exit code.
 
-#include "logia/AYLogia.h"
-#include "logia/AYLogiaPipeline.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/LogiaPipeline.h"
 
 #include <string>
 #include <vector>

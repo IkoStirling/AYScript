@@ -6,7 +6,7 @@
 // member syntax (`self.field`) for now — S3 will route it through
 // AYReflect-backed accessors.
 
-#include "logia/AYLuaCodegen.h"
+#include "AYScript/logia/LuaCodegen.h"
 
 // LG-05 / S3.3: full ITypeInfo definition so we can call
 // getFieldCount() on the resolved leaf type of `self.<field>`

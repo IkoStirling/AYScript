@@ -8,8 +8,8 @@
 //   - handle missing methods and unknown scripts gracefully
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
 #include "AYTest.h"
 
 #include <string>

@@ -7,7 +7,7 @@
 #include "AYScript.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
-#include "logia/AYSemanticAnalyzer.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
 
 #include "AYReflect/IReflect.h"
 #include "AYReflect.h"

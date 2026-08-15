@@ -32,11 +32,11 @@
 // Headless, no HWND, no filesystem. Picked up by the unittest glob.
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"
-#include "logia/AYSemanticAnalyzer.h"
-#include "logia/AYToken.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
+#include "AYScript/logia/Token.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 

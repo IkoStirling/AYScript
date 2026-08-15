@@ -1,6 +1,6 @@
 // AYLogiaPipeline.cpp - heap-backed compile + Lua codegen pipeline
 
-#include "logia/AYLogiaPipeline.h"
+#include "AYScript/logia/LogiaPipeline.h"
 
 #include <memory>
 #include <utility>

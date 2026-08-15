@@ -34,6 +34,7 @@ file(GLOB AYSCRIPT_SOURCES CONFIGURE_DEPENDS
 add_library(AYScript STATIC ${AYSCRIPT_SOURCES})
 
 target_include_directories(AYScript PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
@@ -44,7 +45,7 @@ target_include_directories(AYScript PUBLIC
 # AYReflect). sol2/lua stay PRIVATE so consumers don't accidentally
 # include sol.hpp.
 # AYEventSystem is already PUBLIC via AYGameLoop; keep an explicit
-# PUBLIC link so INT-04 (AYLogiaEventBridge.h → EventBus.h) stays
+# PUBLIC link so INT-04 (AYScript/LogiaEventBridge.h → AYEventSystem/EventBus.h) stays
 # reachable even if GameLoop's dep surface changes.
 target_link_libraries(AYScript
     PUBLIC  AYLog AYGameLoop AYEntity AYReflect AYEventSystem

@@ -1,5 +1,5 @@
 #pragma once
-// AYCompilerError.h - Compiler error definitions for Logia
+// AYShader\CompilerError.h - Compiler error definitions for Logia
 
 #include <string>
 #include <vector>

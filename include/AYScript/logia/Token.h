@@ -1,5 +1,5 @@
 #pragma once
-// AYToken.h - Token definitions for Logia lexer
+// AYShader\Token.h - Token definitions for Logia lexer
 
 #include <cstdint>
 #include <string>

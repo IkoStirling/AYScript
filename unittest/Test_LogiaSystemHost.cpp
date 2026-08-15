@@ -16,14 +16,14 @@
 //      on_destroy is not invoked on System host.
 
 #include "AYScript.h"
-#include "logia/AYSemanticAnalyzer.h"
-#include "AYScriptRuntimeBridge.h"
-#include "AYScriptSubSystem.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/ScriptSubSystem.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
-#include <IAYEntity.h>
-#include <AYWorld.h>
+#include <AYEntity/IEntity.h>
+#include <AYEntity/World.h>
 
 #include "AYTestMovementSystem.h"
 

@@ -1,17 +1,17 @@
 // AYScriptRuntimeBridge.cpp - sol2-backed runtime for compiled Logia
 
-// Windows headers (transitively included via AYScriptComponent.h →
+// Windows headers (transitively included via AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h →
 // AYCore.h) pollute `min` / `max` macros via <windows.h>. Define
 // NOMINMAX before any system header is processed.
 #ifndef NOMINMAX
 #define NOMINMAX 1
 #endif
 
-#include "AYScriptRuntimeBridge.h"
+#include "AYScript/ScriptRuntimeBridge.h"
 
-#include "AYLogiaEventBridge.h"
-#include "logia/AYLogia.h"
-#include "logia/AYLogiaPipeline.h"
+#include "AYScript/LogiaEventBridge.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/LogiaPipeline.h"
 
 #define SOL_ALL_SAFETIES_ON 1
 #define SOL_SAFE_NUMERICS   1
@@ -787,7 +787,7 @@ int ayt_reflect_call_method_c(lua_State* L)
     // Marshal each Lua arg into its slot. Dispatch is by ITypeInfo
     // tag. Note: MethodInfoImpl's readArg dereferences args[I] as
     // the appropriate PMF parameter type — see
-    // AYMethodInfoImpl.h file-level comment.
+    // AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h file-level comment.
     for (size_t i = 0; i < expected; ++i) {
         int stackIdx = static_cast<int>(i) + 4;
         auto* paramType = method->getParamType(i);
@@ -1149,7 +1149,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                     //
                     // The PMF gets a writable reference/pointer via
                     // readOutArg's std::string overloads (see
-                    // AYMethodInfoImpl.h:303-329 / 589-615); both
+                    // AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h:303-329 / 589-615); both
                     // already work once the bridge stores a heap
                     // std::string* in argPtrs[i]. After invoke, the
                     // post-invoke write-back loop pushes the new
@@ -1859,7 +1859,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         }
     } else {
         // Cache miss — run the full pipeline (heap-backed; see
-        // compileLogiaToLua in AYLogiaPipeline.h).
+        // compileLogiaToLua in AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h).
         logia::LuaCodegenOptions opts;
         opts.scriptName = scriptName;
         logia::LogiaToLuaResult pipeline =

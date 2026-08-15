@@ -1,5 +1,5 @@
 #pragma once
-// AYLogia.h - Logia compiler entry (S0: tokenize + parse)
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/Logia.h - Logia compiler entry (S0: tokenize + parse)
 //
 // S3.0 (LG-03): `LogiaHostContext` is the public handle that tells the
 // compiler which C++ host kind a `script Foo { ... }` is being bound to
@@ -11,8 +11,8 @@
 // constructs an implicit Component-host context (matching the S2.5
 // semantics described in design.md §1.6 / §5.6).
 
-#include "AYAst.h"
-#include "AYCompilerError.h"
+#include "AYScript/logia/Ast.h"
+#include "AYScript/logia/CompilerError.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -133,7 +133,7 @@ public:
     explicit Compiler(CompileOptions options);
 
     // Compile-only entry points. When you also need Lua source, call
-    // compileLogiaToLua() (AYLogiaPipeline.h) instead of stacking
+    // compileLogiaToLua() (AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h) instead of stacking
     // Compiler + LuaCodegen in the same frame.
 
     // S2.5 entry — equivalent to `compile(source, defaultLogiaHostContext())`.

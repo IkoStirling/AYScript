@@ -1,5 +1,5 @@
 #pragma once
-// AYScriptBridgeAdapter.h - AYEntity IScriptBridge adapter for Logia (S3.4)
+// AYScript/ScriptBridgeAdapter.h - AYEntity IScriptBridge adapter for Logia (S3.4)
 //
 // Bridges AYEntity's `IScriptBridge::call(method, arg1, arg2)` calling
 // convention to AYScript's `LogiaRuntimeBridge::callLifecycle(scriptName,
@@ -16,16 +16,16 @@
 // IScriptBridge and LogiaRuntimeBridge only — no AYEntity or
 // AYScriptComponent full include — to keep AYScript's compiled
 // surface free of those recompilation triggers). The cpp file
-// pulls in <components/AYScriptComponent.h> + <AYWorld.h> and
+// pulls in <components/AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h> + <AYEntity/World.h> and
 // instantiates the inheritance there via the concrete bridge
 // declaration. Consumers wanting `LogiaScriptBridgeAdapter*` to
 // outlive the include of this header (e.g. for setBridge()) must
-// already have AYScriptComponent.h visible transitively.
+// already have AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h visible transitively.
 //
 // Why this split: the previous S2 layout dropped IScriptBridge
 // inheritance entirely; the new S3.4 layout forwards the interface
 // shape but defers the inheritance to the .cpp. Tests and consumers
-// that include AYScriptComponent.h + AYWorld.h can use the
+// that include AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h + AYEntity/World.h can use the
 // adapter directly. The S2 manual "AdapterCall" forwarding struct
 // in Test_LogiaAdapter.cpp is now unnecessary for new code paths.
 

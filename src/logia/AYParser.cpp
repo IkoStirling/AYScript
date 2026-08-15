@@ -4,7 +4,7 @@
 // lifecycle functions take no parameters, `get_component(...)` is no
 // longer parsed (it was an S0-S2 path that S2.5 replaces with `self`).
 
-#include "logia/AYParser.h"
+#include "AYScript/logia/Parser.h"
 #include <stdexcept>
 
 namespace ayt::script::logia

@@ -1,20 +1,20 @@
 // AYScriptSubSystem.cpp - AYGameLoop subsystem for the Logia runtime
 
-#include "AYScriptSubSystem.h"
+#include "AYScript/ScriptSubSystem.h"
 
-#include "AYScriptBridgeAdapter.h"
+#include "AYScript/ScriptBridgeAdapter.h"
 #include "AYLog/Logger.h"
 
-#include <AYSubSystemRegistry.h>
+#include <AYGameLoop/SubSystemRegistry.h>
 
 #include "AYIO.h"
 
 // S3.1 (LG-04) and S3.4: drive Logia scripts (System + Component hosts)
 // from the per-tick subsystem. World owns ISystem and Entity lists; we
 // dispatch.
-#include <AYWorld.h>
-#include <AYEntityImpl.h>
-#include <components/AYScriptComponent.h>
+#include <AYEntity/World.h>
+#include <AYEntity/EntityImpl.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <chrono>
 #include <cstdint>

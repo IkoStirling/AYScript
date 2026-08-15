@@ -30,15 +30,15 @@
 //      production Editor + Application host path).
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "AYScriptSubSystem.h"
-#include "AYDeviceInputProvider.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/ScriptSubSystem.h"
+#include "AYDevice/DeviceInputProvider.h"
+#include "AYScript/logia/CompilerError.h"
 #include "AYTest.h"
 
-#include "AYDeviceManager.h"
-#include "AYInputMapping.h"
-#include "AYKeyboardDevice.h"
+#include "AYDevice/DeviceManager.h"
+#include "AYDevice/InputMapping.h"
+#include "AYDevice/KeyboardDevice.h"
 
 #include <memory>
 #include <string>

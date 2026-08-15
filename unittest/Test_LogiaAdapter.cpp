@@ -6,18 +6,18 @@
 //     forwards to the runtime bridge
 //   - forwards hasScript correctly
 //
-// S2 limitation: AYEntity's AYScriptComponent.h triggers a static-init
+// S2 limitation: AYEntity's AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h triggers a static-init
 // registrar (AY_COMPONENT macro) that requires a fully-defined
 // World class. Including the full ScriptComponent definition in
 // AYScript's translation units is fragile (the class is in
-// AYScriptComponent.h, the registrar needs AYWorld.h, and including
+// AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h, the registrar needs AYEntity/World.h, and including
 // both produces forward-declaration conflicts). LogiaScriptBridgeAdapter
 // is therefore NOT a subclass of IScriptBridge in S2 — instead it
 // exposes the same call/hasScript surface as a regular class. The
 // caller is expected to forward from AYEntity's ScriptComponent
 // lifecycle (onAttach/onUpdate/onDetach) to `adapter.call()` with
 // the appropriate `method` and `arg1` (ScriptComponent*) values.
-// When S3 splits AYScriptComponent.h into class-only and registrar
+// When S3 splits AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h into class-only and registrar
 // headers, the adapter will derive from IScriptBridge directly and
 // this shim layer goes away.
 
@@ -29,15 +29,15 @@ bool nearEqual(double a, double b, double eps = 1e-5) {
 }
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "AYScriptBridgeAdapter.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/ScriptBridgeAdapter.h"
 #include "AYTest.h"
 
 // Full ScriptComponent + AYWorld definitions. The adapter cpp needs
 // these to read getScriptName() and pass ScriptComponent* as receiver;
 // the test mirrors that.
-#include <AYWorld.h>
-#include <components/AYScriptComponent.h>
+#include <AYEntity/World.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <string>
 #include <vector>

@@ -1,5 +1,5 @@
 #pragma once
-// AYLogiaPipeline.h - compile + Lua codegen entry (S3.8+)
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h - compile + Lua codegen entry (S3.8+)
 //
 // Prefer compileLogiaToLua() whenever both Compiler and LuaCodegen are
 // needed. On MSVC Debug (/GS), stack-allocating Compiler + LuaCodegen
@@ -7,8 +7,8 @@
 // corrupt stack cookies in deep test or bridge frames. This pipeline
 // keeps the heavy pipeline objects on the heap in one .cpp TU.
 
-#include "AYLogia.h"
-#include "AYLuaCodegen.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/LuaCodegen.h"
 
 #include <string>
 #include <vector>

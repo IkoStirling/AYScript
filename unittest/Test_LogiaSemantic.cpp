@@ -13,7 +13,7 @@
 //   - accepts the canonical player_controller.logia example
 
 #include "AYScript.h"
-#include "logia/AYSemanticAnalyzer.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
 #include "AYTest.h"
 
 #include "AYReflect/IReflect.h"
@@ -1468,7 +1468,7 @@ script T {
 //      out-of-range Lua lines.
 //
 // All tests use `compileLogiaToLua()` (the heap-backed pipeline
-// wrapper in `AYLogiaPipeline.h`) so the full front-end + codegen
+// wrapper in `AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h`) so the full front-end + codegen
 // path is exercised.
 // =====================================================================
 

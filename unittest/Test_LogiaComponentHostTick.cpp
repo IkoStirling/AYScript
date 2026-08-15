@@ -6,15 +6,15 @@
 //   ScriptSubSystem::update → tickComponentHosts (must skip when
 //   "Entity" is registered).
 
-#include "AYScriptSubSystem.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptSubSystem.h"
+#include "AYScript/logia/CompilerError.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
 #include <AYEntity.h>
-#include <AYSubSystemRegistry.h>
-#include <AYWorld.h>
-#include <components/AYScriptComponent.h>
+#include <AYGameLoop/SubSystemRegistry.h>
+#include <AYEntity/World.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <memory>
 #include <string>

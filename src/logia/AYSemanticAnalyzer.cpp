@@ -11,7 +11,7 @@
 // read `_ctx.hostKind` / `_ctx.hostType` / `_ctx.expectSelf`; LG-03
 // keeps the existing call signature stable for that future work.
 
-#include "logia/AYSemanticAnalyzer.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
 
 #include "AYLog/Logger.h"
 
@@ -28,9 +28,9 @@ bool isDerivedFrom(const ITypeInfo* type, const ITypeInfo* base);
 } // namespace ayt::reflect
 
 // Force AYEntity's Transform component to be registered with AYReflect.
-#include "components/AYTransformComponent.h"
-#include "AYEntityModule.h"
-#include "components/AYHealthComponent.h"
+#include "AYEntity/components/TransformComponent.h"
+#include "AYEntity/EntityModule.h"
+#include "AYEntity/components/HealthComponent.h"
 #include "AYReflectMacros.h"  // ayt::reflect::detail::defaultCreate/Destroy/Copy
 #include <AYMath/MathTypes.h>
 
@@ -629,7 +629,7 @@ bool leafIsStaticallyPrimitive(const Expr* e, const SemanticAnalyzer* analyzer)
 //
 // `op` is a Token (TokenType-tagged). Only TokenType::Plus / Minus
 // / Star / Slash / Percent are valid int binary ops in Logia;
-// no `^`/pow, no shift, no bitwise — see AYToken.h:46-50.
+// no `^`/pow, no shift, no bitwise — see AYShader\Token.h:46-50.
 // Modulo/division-by-zero returns nullopt (no value to attribute;
 // in practice step wouldn't have a zero divisor anyway).
 std::optional<int> evaluateAsInt(const Expr* e)
@@ -712,7 +712,7 @@ SourceLocation sourceLocFor(const Expr* e)
 // ReturnStmt, ExprStmt, FunctionDeclStmt, LifecycleFuncDecl)
 // inherit the field from `Stmt` and get it stamped by their
 // respective `parseXxx` parser methods. See `Stmt::sourceLoc`
-// in AYAst.h for the design rationale.
+// in AYShader\Ast.h for the design rationale.
 SourceLocation sourceLocFor(const Stmt* s)
 {
     if (!s) return {};

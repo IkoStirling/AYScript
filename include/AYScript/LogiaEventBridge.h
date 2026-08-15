@@ -1,11 +1,11 @@
 #pragma once
-// AYLogiaEventBridge.h — INT-04 / INT-04b: Logia ambient event.* → EventBus
+// AYScript/LogiaEventBridge.h — INT-04 / INT-04b: Logia ambient event.* → EventBus
 //
 // Does NOT route S4.1 signal/emit/connect through the bus (design §14.5.1).
 // LogiaHostKind::EventHandler: see eventHandlerLogiaHostContext() +
 // LogiaRuntimeBridge::loadEventHandler().
 
-#include <ayevent/EventBus.h>
+#include <AYEventSystem/EventBus.h>
 
 #include <sol/sol.hpp>
 

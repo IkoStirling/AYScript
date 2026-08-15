@@ -19,9 +19,9 @@
 // real input devices.
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "AYScriptSubSystem.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/ScriptSubSystem.h"
+#include "AYScript/logia/CompilerError.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 #include "AYLog/Logger.h"
@@ -30,8 +30,8 @@
 // rather than relying on SemanticAnalyzer ctor side-effect.
 #include "AYReflect.h"
 
-#include <IAYEntity.h>
-#include <AYWorld.h>
+#include <AYEntity/IEntity.h>
+#include <AYEntity/World.h>
 
 #include <cmath>
 #include <memory>

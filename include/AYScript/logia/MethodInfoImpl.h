@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================
-// AYMethodInfoImpl.h - AYScript-private MethodInfoImpl<T,Ret,Args...>
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h - AYScript-private MethodInfoImpl<T,Ret,Args...>
 //
 // S3.12 + S3.12+R3 (track R2 §5.7.4): variadic member-function-pointer
 // → IMethodInfo adapter. Lives in AYScript (not AYReflect) so that

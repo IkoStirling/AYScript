@@ -1,5 +1,5 @@
 #pragma once
-// AYSemanticAnalyzer.h - Logia semantic analyzer (S2.5 + S3.0 LG-03)
+// AYShader\SemanticAnalyzer.h - Logia semantic analyzer (S2.5 + S3.0 LG-03)
 //
 // S2.5: `self` is the canonical way to access the bound ScriptComponent.
 // S3.0 (LG-03): the analyzer additionally takes a `LogiaHostContext`
@@ -26,9 +26,9 @@
 //   - Member access where the field doesn't exist on a registered type
 //   - Undeclared identifier read (Lua-style implicit global)
 
-#include "AYAst.h"
-#include "AYCompilerError.h"
-#include "AYLogia.h"  // S3.0 (LG-03): LogiaHostContext
+#include "AYScript/logia/Ast.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"  // S3.0 (LG-03): LogiaHostContext
 
 #include <memory>
 #include <string>

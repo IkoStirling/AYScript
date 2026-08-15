@@ -1,9 +1,9 @@
 #pragma once
-// AYParser.h - Parser for Logia
+// AYShader\Parser.h - Parser for Logia
 
-#include "AYAst.h"
-#include "AYCompilerError.h"
-#include "AYToken.h"
+#include "AYScript/logia/Ast.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Token.h"
 #include <initializer_list>
 #include <memory>
 #include <vector>

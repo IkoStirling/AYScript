@@ -16,12 +16,12 @@
 // across engine refactors.
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"
-#include "logia/AYLogiaPipeline.h"
-#include "logia/AYMethodInfoImpl.h"  // S3.12: MethodInfoImpl<T,Ret,Args...> for fixture
-#include "logia/AYMethodRegistrarBridge.h"  // S3.12: AY_FINALIZE_METHODS + buildMethodInfo impl
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/LogiaPipeline.h"
+#include "AYScript/logia/MethodInfoImpl.h"  // S3.12: MethodInfoImpl<T,Ret,Args...> for fixture
+#include "AYScript/logia/MethodRegistrarBridge.h"  // S3.12: AY_FINALIZE_METHODS + buildMethodInfo impl
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
@@ -2034,7 +2034,7 @@ void ensureR4_2PlayerRegistered()
         "mutatePoint", &R4_2Player::mutatePoint));
     // R4.2b (2026-07-13): std::string& / std::string* out-param
     // methods. Bridge treats both shapes identically per the
-    // is_out_param_v trait at AYMethodInfoImpl.h:163-176.
+    // is_out_param_v trait at AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h:163-176.
     info->addMethod(new MethodInfoImpl<R4_2Player, void, std::string&>(
         "fillString", &R4_2Player::fillString));
     info->addMethod(new MethodInfoImpl<R4_2Player, void, std::string*>(
@@ -2217,7 +2217,7 @@ script R4_2Player {
 // (matches R3.0's input path at runtime bridge L737-744), seeds from
 // Lua if user passed a string (input + output idiom), the PMF writes
 // through readOutArg's std::string& / std::string* overloads
-// (AYMethodInfoImpl.h:303-329 / 589-615 — already work). After invoke,
+// (AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h:303-329 / 589-615 — already work). After invoke,
 // the bridge pushes the new contents via lua_pushlstring + lua_replace
 // on the original arg slot. Logia users read self.* to observe the new
 // value (Lua locals cannot be C-rebound per R4.2 lesson 22).
@@ -2266,7 +2266,7 @@ script R4_2Player {
 TEST_CASE(lg15_r42b_string_ptr_out_param) {
     // R4.2b: std::string* (non-const) out-param. Bridge treats
     // std::string* identically to std::string& per the is_out_param_v
-    // trait at AYMethodInfoImpl.h:163-176 — C++ writes "viaPtr"
+    // trait at AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h:163-176 — C++ writes "viaPtr"
     // through the pointer. Self.* side-effect verifies the heap
     // std::string slot was written.
     LogiaRuntimeBridge bridge;

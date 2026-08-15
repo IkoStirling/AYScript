@@ -1,5 +1,5 @@
 #pragma once
-// AYAst.h - AST node definitions for Logia (S0/S1/S2) + S2.5 redesign
+// AYShader\Ast.h - AST node definitions for Logia (S0/S1/S2) + S2.5 redesign
 //
 // S2.5 redesign (2026-07-07): `component` keyword renamed to `script`,
 // `export` keyword removed, `ComponentDecl` renamed to `ScriptDecl`,
@@ -7,8 +7,8 @@
 // pure Lua local; C++ fields are declared on the ScriptComponent
 // subclass via AY_PROPERTY and accessed through `self.field`.
 
-#include "AYToken.h"
-#include "AYCompilerError.h"   // S5 ED-02 (2026-07-14): SourceLocation for sourceLoc
+#include "AYScript/logia/Token.h"
+#include "AYScript/logia/CompilerError.h"   // S5 ED-02 (2026-07-14): SourceLocation for sourceLoc
 #include <memory>
 #include <string>
 #include <variant>

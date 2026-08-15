@@ -12,8 +12,8 @@
 
 #pragma once
 
-#include <IAYEntity.h>
-#include <AYWorld.h>
+#include <AYEntity/IEntity.h>
+#include <AYEntity/World.h>
 
 // AYReflect metadata macros for the test fixture's C++ field. Putting
 // the finalize macro here (not in AYEntity) keeps AYEntity's public

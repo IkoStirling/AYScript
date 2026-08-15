@@ -5,8 +5,8 @@
 // functions with no parameters, `self.field` member access.
 
 #include "AYScript.h"
-#include "logia/AYParser.h"
-#include "logia/AYLexer.h"
+#include "AYScript/logia/Parser.h"
+#include "AYScript/logia/Lexer.h"
 #include "AYTest.h"
 
 using namespace ayt::script::logia;

@@ -23,18 +23,18 @@
 // the ScriptSubSystem correctly so the per-tick Lua-on_update path
 // runs"; the simplest assertion is `__int01_witness` round-trip.
 
-#include "AYScriptSubSystem.h"
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptSubSystem.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 #include "AYIO.h"
-#include "AYSubSystemRegistry.h"
+#include "AYGameLoop/SubSystemRegistry.h"
 
-#include <IAYEntity.h>
+#include <AYEntity/IEntity.h>
 #include <AYEntity.h>
-#include <AYWorld.h>
-#include <components/AYScriptComponent.h>
+#include <AYEntity/World.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <chrono>
 #include <cstdio>

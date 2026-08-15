@@ -1,5 +1,5 @@
 #pragma once
-// AYLuaCodegen.h - AST → Lua source generator for Logia (S1) + S2.5
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LuaCodegen.h - AST → Lua source generator for Logia (S1) + S2.5
 //
 // S2.5 redesign: `component` → `script`, `export var` removed, all `var`
 // are local Lua variables. The generated Lua module exposes `M.on_*`
@@ -7,9 +7,9 @@
 // Field access on `self` is left as bare Lua member syntax — S3 will
 // route it through AYReflect-backed accessors.
 
-#include "AYAst.h"
-#include "AYCompilerError.h"
-#include "AYLogia.h"  // S3.8b: LogiaHostContext for expectSelf-aware codegen.
+#include "AYScript/logia/Ast.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"  // S3.8b: LogiaHostContext for expectSelf-aware codegen.
 #include <string>
 #include <vector>
 
@@ -69,7 +69,7 @@ struct LuaCodegenResult {
 };
 
 // For compile + codegen together, prefer compileLogiaToLua() in
-// AYLogiaPipeline.h instead of stack-allocating Compiler + LuaCodegen
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h instead of stack-allocating Compiler + LuaCodegen
 // in the same frame (MSVC Debug /GS stack-cookie issues).
 class LuaCodegen {
 public:

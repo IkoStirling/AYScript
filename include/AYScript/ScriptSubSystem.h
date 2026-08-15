@@ -1,9 +1,9 @@
 #pragma once
-// AYScriptSubSystem.h - AYGameLoop subsystem for the Logia runtime (S3.4)
+// AYScript/ScriptSubSystem.h - AYGameLoop subsystem for the Logia runtime (S3.4)
 
-#include <IAYGameLoop.h>
+#include <AYGameLoop/IGameLoop.h>
 
-#include "AYScriptRuntimeBridge.h"
+#include "AYScript/ScriptRuntimeBridge.h"
 
 #include <memory>
 #include <string>

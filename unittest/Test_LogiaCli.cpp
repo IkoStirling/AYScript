@@ -18,8 +18,8 @@
 
 #include "CliCompile.h"
 #include "CliTestPaths.h"
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"
 
 #include <cstdio>
 #include <cstdlib>

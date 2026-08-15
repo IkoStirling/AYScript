@@ -1,13 +1,13 @@
 // Test_LogiaEventHandler.cpp — INT-04b: LogiaHostKind::EventHandler
 
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"
 #include "LogiaTestHelpers.h"
 #include "AYTest.h"
 
-#include <ayevent/EventBus.h>
-#include <ayevent/Events/DeviceEvents.h>
+#include <AYEventSystem/EventBus.h>
+#include <AYEventSystem/Events/DeviceEvents.h>
 
 #include <string>
 #include <vector>

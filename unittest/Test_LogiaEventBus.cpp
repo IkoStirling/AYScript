@@ -7,15 +7,15 @@
 // Does NOT route S4.1 signal/emit/connect through the bus (those stay
 // in Test_LogiaRuntime / Test_LogiaSemantic).
 
-#include "AYScriptRuntimeBridge.h"
-#include "AYLogiaEventBridge.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/LogiaEventBridge.h"
+#include "AYScript/logia/CompilerError.h"
 #include "AYTest.h"
 
-#include <ayevent/EventBus.h>
-#include <ayevent/Events/SceneEvents.h>
-#include <ayevent/Events/ScriptTestEvents.h>
-#include <ayevent/Events/WindowEvents.h>
+#include <AYEventSystem/EventBus.h>
+#include <AYEventSystem/Events/SceneEvents.h>
+#include <AYEventSystem/Events/ScriptTestEvents.h>
+#include <AYEventSystem/Events/WindowEvents.h>
 
 #include <string>
 #include <vector>

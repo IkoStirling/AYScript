@@ -1,7 +1,7 @@
 #pragma once
-// AYLexer.h - Lexer for Logia
+// AYShader\Lexer.h - Lexer for Logia
 
-#include "AYToken.h"
+#include "AYScript/logia/Token.h"
 #include <string>
 #include <vector>
 

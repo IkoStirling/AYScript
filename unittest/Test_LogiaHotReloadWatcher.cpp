@@ -1,7 +1,7 @@
 // Test_LogiaHotReloadWatcher.cpp — S3.7b FileWatcher integration
 
-#include "AYScriptSubSystem.h"
-#include "logia/AYCompilerError.h"
+#include "AYScript/ScriptSubSystem.h"
+#include "AYScript/logia/CompilerError.h"
 #include "AYTest.h"
 #include "AYIO.h"
 

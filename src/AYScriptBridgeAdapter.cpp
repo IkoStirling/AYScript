@@ -4,14 +4,14 @@
 #define NOMINMAX 1
 #endif
 
-#include "AYScriptBridgeAdapter.h"
-#include "AYScriptRuntimeBridge.h"
+#include "AYScript/ScriptBridgeAdapter.h"
+#include "AYScript/ScriptRuntimeBridge.h"
 
 // AYScriptBridgeAdapter.cpp - pimpl IScriptBridge implementation (S3.4)
 //
-// The public AYScriptBridgeAdapter.h forward-declares the class
+// The public AYScript/ScriptBridgeAdapter.h forward-declares the class
 // and an opaque `Impl`. The concrete `Impl` here derives from
-// AYEntity's IScriptBridge (defined in AYScriptComponent.h) and
+// AYEntity's IScriptBridge (defined in AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h) and
 // lives entirely in this TU so the AYEntity header doesn't leak
 // through AYScript's public include surface.
 //
@@ -22,8 +22,8 @@
 //      Lua `self` and `ayt_reflect_*_field` (S3.3) see the real
 //      ScriptComponent instance).
 
-#include <AYWorld.h>
-#include <components/AYScriptComponent.h>
+#include <AYEntity/World.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <cstring>
 

@@ -10,12 +10,12 @@
 // Prior tests may leave ScriptComponents whose _bridge points at a
 // destroyed adapter — World::shutdown() then crashes in onDetach().
 
-#include "logia/AYLogiaPipeline.h"
-#include "AYScriptSubSystem.h"
+#include "AYScript/logia/LogiaPipeline.h"
+#include "AYScript/ScriptSubSystem.h"
 
 #include <AYEntity.h>
-#include <AYWorld.h>
-#include <components/AYScriptComponent.h>
+#include <AYEntity/World.h>
+#include <AYEntity/components/ScriptComponent.h>
 
 #include <string>
 #include <vector>

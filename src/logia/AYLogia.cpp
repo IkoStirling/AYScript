@@ -1,9 +1,9 @@
 // AYLogia.cpp
 
-#include "logia/AYLogia.h"
-#include "logia/AYLexer.h"
-#include "logia/AYParser.h"
-#include "logia/AYSemanticAnalyzer.h"
+#include "AYScript/logia/Logia.h"
+#include "AYScript/logia/Lexer.h"
+#include "AYScript/logia/Parser.h"
+#include "AYScript/logia/SemanticAnalyzer.h"
 
 #include <algorithm>
 #include <memory>

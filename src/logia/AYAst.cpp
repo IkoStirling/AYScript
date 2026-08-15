@@ -1,6 +1,6 @@
 // AYAst.cpp
 
-#include "logia/AYAst.h"
+#include "AYScript/logia/Ast.h"
 
 namespace ayt::script::logia
 {

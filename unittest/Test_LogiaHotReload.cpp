@@ -32,9 +32,9 @@
 // is not defined here.
 
 #include "AYScript.h"
-#include "AYScriptRuntimeBridge.h"
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"
+#include "AYScript/ScriptRuntimeBridge.h"
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"
 #include "AYTest.h"
 
 #include <string>

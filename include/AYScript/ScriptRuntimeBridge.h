@@ -1,12 +1,12 @@
 #pragma once
-// AYScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1+)
+// AYScript/ScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1+)
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "logia/AYCompilerError.h"
-#include "logia/AYLogia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
+#include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Logia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
 namespace ayt::script
 {
@@ -35,7 +35,7 @@ namespace ayt::script
 //   4 — S3.12 (track R2 §5.7.4): IMethodInfo + self.method(args)
 //       reflect call path. Adds `ayt_reflect_call_method` C entry
 //       and stamps CallExpr::resolvedMethod. MethodInfoImpl lives
-//       in AYScript-private `logia/AYMethodInfoImpl.h` to keep the
+//       in AYScript-private `logia/AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h` to keep the
 //       variadic pack out of the foundation TU.
 //   5 — S3.12+R3 (track R2 §5.7.4): extend self.method(args) to
 //       support struct args (const T& / const T*), struct return,
@@ -104,7 +104,7 @@ namespace ayt::script
 //       (input + output idiom, mirrors R4.2 struct out-param at
 //       L1042-1066); default-initialises to "" otherwise. The PMF
 //       writes through readOutArg's std::string& / std::string*
-//       overloads (AYMethodInfoImpl.h:303-329 / 589-615 — both
+//       overloads (AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodInfoImpl.h:303-329 / 589-615 — both
 //       already work with std::string once a heap std::string* is
 //       stored in the slot). After invoke, the bridge pushes the
 //       new std::string contents via lua_pushlstring + lua_replace
@@ -273,7 +273,7 @@ namespace ayt::script
 //       threaded through parser constructor sites (~30 sites).
 //       Stale cached diagnostics would otherwise silently flip
 //       from `0:0` to real line numbers on recompile — bump
-//       forces cache invalidation. See `AYAst.h` for the AST
+//       forces cache invalidation. See `AYShader\Ast.h` for the AST
 //       field declarations and `AYSemanticAnalyzer.cpp` for the
 //       `sourceLocFor(Expr|Stmt|ScriptDecl)` helpers + the 7
 //       newly-populated `d.location = sourceLocFor(...)` sites.
@@ -287,7 +287,7 @@ namespace ayt::script
 //       `LogiaSourceMap sourceMap` so a cache-hit path reuses
 //       the previously-cached map without re-running the front
 //       end; bump forces every existing cache entry to refresh
-//       and pick up the new field. See `AYLuaCodegen.h` for
+//       and pick up the new field. See `AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LuaCodegen.h` for
 //       `LogiaSourceMap` and `LuaCodegenResult.sourceMap`; see
 //       `AYScriptRuntimeBridge.cpp` for
 //       `Impl::sourceMaps` and `translateLuaErrorToLogia()`.
@@ -305,7 +305,7 @@ namespace ayt::script
 //       side-effect ordering, which means a stale cached entry
 //       compiled before FVector2 was registered would see a
 //       different ITypeInfo* lookup at runtime. Bump forces full
-//       cache refresh. See `AYInputMapping.h` for
+//       cache refresh. See `AYDevice/InputMapping.h` for
 //       `bindAxis2D` / `getAxis2D` / `Axis2Binding`,
 //       `AYScriptRuntimeBridge.cpp` for the new ambient lambdas
 //       and `MockInputProvider`'s default override, and
@@ -321,7 +321,7 @@ namespace ayt::script
 //       changes (new helpers, new metadata table, lowered
 //       emit/connect call exprs); a v24-cached chunk that
 //       references emit / connect would nil-call at runtime.
-//       Bump forces full cache refresh. See `AYAst.h` for
+//       Bump forces full cache refresh. See `AYShader\Ast.h` for
 //       `SignalDeclStmt` + `CallExpr::AmbientCallKind`,
 //       `AYLexer.cpp` for the `signal` keyword entry,
 //       `AYParser.cpp` for `parseSignalDecl` + the `parseStatement`
@@ -345,7 +345,7 @@ namespace ayt::script
 //       signature match (handler `function` params must equal the
 //       signal's param count + types) — programs that compiled
 //       under v26 with mismatched handlers must recompile and now
-//       error at compile time. See `AYAst.h` for the new
+//       error at compile time. See `AYShader\Ast.h` for the new
 //       `AmbientCallKind::Disconnect` value, `AYSemanticAnalyzer.cpp`
 //       for `_functions` pre-pass + v2 signature check +
 //       `analyzeDisconnectCall`, and `AYLuaCodegen.cpp` for the
@@ -563,7 +563,7 @@ public:
     //   the actual component (was: a placeholder scriptName string in
     //   S1). Pass nullptr in tests that don't care about the receiver.
     //   Typed as void* so AYScript doesn't need to include
-    //   AYScriptComponent.h (which has a static-init side effect that
+    //   AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h (which has a static-init side effect that
     //   requires World to be fully defined). The adapter casts.
     //
     //   arg2 — for "on_start", points to the owning Entity*; for

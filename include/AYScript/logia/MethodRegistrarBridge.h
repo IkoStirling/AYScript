@@ -1,6 +1,6 @@
 #pragma once
 // ============================================================
-// AYMethodRegistrarBridge.h - AYScript-side bridge between
+// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodRegistrarBridge.h - AYScript-side bridge between
 // AY_PROPERTY/AY_METHOD registrars and the AYScript-private
 // variadic MethodInfoImpl<T,Ret,Args...>.
 //
@@ -18,7 +18,7 @@
 // AYScript code includes this header, the variadic `MethodInfoImpl`
 // becomes available and the registrar's builder resolves cleanly.
 // User code that uses `AY_METHOD` must include this header (or a
-// facade that includes it, like AYScriptComponent.h's reflect
+// facade that includes it, like AYEntity/components/AYEntity/components/AYEntity/components/AYEntity/components/ScriptComponent.h's reflect
 // aggregator) before `AY_FINALIZE_REGISTRATION_METADATA` runs.
 //
 // Usage in a finalizer walk:
@@ -32,7 +32,7 @@
 // ============================================================
 
 #include "AYSerializer/PropertyMacros.h"
-#include "AYMethodInfoImpl.h"
+#include "AYScript/logia/MethodInfoImpl.h"
 
 namespace ayt::serializer::detail
 {
@@ -75,7 +75,7 @@ void* AY_MethodRegistrarOf<T, Ret, AY_MethodArgs<Args...>, Pmf, Index>
 // list and call `addMethod()` on the ITypeInfo for each method entry.
 //
 // Usage:
-//   // In a TU that includes logia/AYMethodRegistrarBridge.h:
+//   // In a TU that includes logia/AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/MethodRegistrarBridge.h:
 //   AY_FINALIZE_REGISTRATION_METADATA(MyPlayer)
 //   AY_FINALIZE_METHODS(MyPlayer)
 //

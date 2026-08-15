@@ -1,6 +1,6 @@
 // AYCompilerError.cpp
 
-#include "logia/AYCompilerError.h"
+#include "AYScript/logia/CompilerError.h"
 #include <sstream>
 
 namespace ayt::script::logia
