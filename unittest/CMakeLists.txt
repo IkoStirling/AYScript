@@ -35,11 +35,10 @@ target_link_libraries(${TEST_NAME} PRIVATE
     # DeviceManager + DeviceInputProvider and feeds KeyboardDevice
     # events through InputMapping. Link AYDevice (for DeviceManager,
     # KeyboardDevice, InputMapping) + AYDeviceSubSystem (for
-    # DeviceInputProvider â€?lives in SubSystem target because core
+    # DeviceInputProvider ï¿½?lives in SubSystem target because core
     # AYDevice is AYScript-dep-free by design).
     AYDevice
     AYDeviceSubSystem
 )
 
-ay_configure_test_tmpdir(${TEST_NAME})
-add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+ay_add_test(${TEST_NAME})
