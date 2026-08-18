@@ -49,7 +49,7 @@ target_include_directories(AYScript PUBLIC
 # reachable even if GameLoop's dep surface changes.
 target_link_libraries(AYScript
     PUBLIC  AYLog AYGameLoop AYEntity AYReflect AYEventSystem
-    PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO
+    PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO AYTime
 )
 
 # Enable sol2 type & numeric safety checks.

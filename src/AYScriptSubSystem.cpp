@@ -8,6 +8,7 @@
 #include <AYGameLoop/SubSystemRegistry.h>
 
 #include "AYIO.h"
+#include <AYTime/Clock.h>
 
 // S3.1 (LG-04) and S3.4: drive Logia scripts (System + Component hosts)
 // from the per-tick subsystem. World owns ISystem and Entity lists; we
@@ -16,7 +17,6 @@
 #include <AYEntity/EntityImpl.h>
 #include <AYEntity/components/ScriptComponent.h>
 
-#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
@@ -31,10 +31,7 @@ constexpr int64_t kHotReloadDebounceMs = 100;
 
 int64_t steadyClockMs()
 {
-    using clock = std::chrono::steady_clock;
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               clock::now().time_since_epoch())
-        .count();
+    return static_cast<int64_t>(ayt::time::Clock::performanceNowUs() / 1000u);
 }
 
 // S3.1 (LG-04): walk the world's systems and invoke the Logia
@@ -88,6 +85,8 @@ ScriptSubSystem::ScriptSubSystem()
                        | ayt::game::phaseBit(ayt::game::FramePhase::Gameplay);
     _descriptor.clock = ayt::game::ClockDomain::Game;
     _descriptor.phasePriority = 100;
+    _descriptor.reads = {"Input.TickFrame"};
+    _descriptor.writes = {"Simulation.World"};
 }
 
 ScriptSubSystem::~ScriptSubSystem()
