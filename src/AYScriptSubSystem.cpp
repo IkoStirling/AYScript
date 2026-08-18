@@ -84,6 +84,10 @@ ScriptSubSystem::ScriptSubSystem()
     _descriptor.dependencies = {"ayt.log", "Entity", "Device"};
     _descriptor.basePriority = 100;
     _descriptor.timeType = ayt::game::SubSystemDescriptor::TimeType::Scaled;
+    _descriptor.phases = ayt::game::phaseBit(ayt::game::FramePhase::FixedPrePhysics)
+                       | ayt::game::phaseBit(ayt::game::FramePhase::Gameplay);
+    _descriptor.clock = ayt::game::ClockDomain::Game;
+    _descriptor.phasePriority = 100;
 }
 
 ScriptSubSystem::~ScriptSubSystem()
@@ -126,6 +130,24 @@ void ScriptSubSystem::fixedUpdate(float fixedDeltaTime)
     _bridge.tickAmbient(fixedDeltaTime);
     tickLogiaSystems(_bridge, fixedDeltaTime);
     tickComponentHosts(fixedDeltaTime);
+}
+
+void ScriptSubSystem::tick(ayt::game::FramePhase phase,
+                           const ayt::game::FrameContext& context)
+{
+    if (phase == ayt::game::FramePhase::FixedPrePhysics) {
+        // Deterministic System hosts run exactly once per simulation tick.
+        tickLogiaSystems(_bridge, context.fixedDeltaTime);
+        return;
+    }
+
+    if (phase == ayt::game::FramePhase::Gameplay) {
+        // File IO and ambient/visual scripts are variable-rate work. In a
+        // headless host without Entity, this also supplies the component path.
+        pollAndApplyReloads();
+        _bridge.tickAmbient(context.deltaTime);
+        tickComponentHosts(context.deltaTime);
+    }
 }
 
 void ScriptSubSystem::shutdown()
