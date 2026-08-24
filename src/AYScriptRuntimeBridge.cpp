@@ -369,7 +369,7 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
             if (!sub) continue;
             const char* subName = sub->getName();
             if (!subName) continue;
-            void* subPtr = static_cast<uint8_t*>(fieldPtr) + sub->getOffset();
+            void* subPtr = sub->get(fieldPtr);
             if (pushFieldPrimitive(L, sub, subPtr) == 1) {
                 lua_pushstring(L, ayt::reflect::normalizeFieldName(subName));
                 // Settable key+value into the captured `subTableIdx`
@@ -537,7 +537,7 @@ int storeFieldPrimitive(lua_State* L,
                 lua_getfield(L, valueStackIdx, normName);
             }
             if (!lua_isnil(L, -1)) {
-                void* subPtr = static_cast<uint8_t*>(fieldPtr) + sub->getOffset();
+                void* subPtr = sub->get(fieldPtr);
                 storeFieldPrimitive(L, sub, subPtr, /*valueStackIdx=*/-1);
             }
             lua_pop(L, 1);
@@ -797,7 +797,8 @@ int ayt_reflect_call_method_c(lua_State* L)
         // stack slot and set argPtrs[i] = &argSlots[i].
         // R3 dispatch: heap-allocate std::string or struct, fill
         // from the Lua table, and set argPtrs[i] = heap pointer.
-        if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0) {
+        if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0
+            || std::strcmp(tname, "int32_t") == 0) {
             int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
             std::memcpy(&argSlots[i], &v, sizeof(int32_t));
             argPtrs[i] = &argSlots[i];
@@ -858,7 +859,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                 lua_getfield(L, stackIdx, field->getName());
                 if (!lua_isnil(L, -1)) {
                     // storeFieldPrimitive reads from top of stack.
-                    void* fieldPtr = static_cast<uint8_t*>(mem) + field->getOffset();
+                    void* fieldPtr = field->get(mem);
                     storeFieldPrimitive(L, field, fieldPtr, /*valueStackIdx=*/-1);
                 }
                 lua_pop(L, 1);
@@ -896,7 +897,8 @@ int ayt_reflect_call_method_c(lua_State* L)
                 argPtrs[i] = &argSlots[i];
             } else {
                 const char* ename = elementType->getName();
-                const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+                const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0
+                    || std::strcmp(ename, "Int32") == 0 || std::strcmp(ename, "int32_t") == 0));
                 const bool elemIsFloat  = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
                 const bool elemIsString = (ename && std::strcmp(ename, "std::string") == 0);
                 const bool elemIsStruct = (elementType->getFieldCount() > 0);
@@ -962,8 +964,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                                 if (!field) continue;
                                 lua_getfield(L, -1, field->getName());
                                 if (!lua_isnil(L, -1)) {
-                                    void* fieldPtr = static_cast<uint8_t*>(elemSlot)
-                                                     + field->getOffset();
+                                    void* fieldPtr = field->get(elemSlot);
                                     storeFieldPrimitive(L, field, fieldPtr, -1);
                                 }
                                 lua_pop(L, 1);
@@ -1050,8 +1051,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                                 if (!field) continue;
                                 lua_getfield(L, -1, field->getName());
                                 if (!lua_isnil(L, -1)) {
-                                    void* fieldPtr = static_cast<uint8_t*>(elemSlot)
-                                                     + field->getOffset();
+                                    void* fieldPtr = field->get(elemSlot);
                                     storeFieldPrimitive(L, field, fieldPtr, -1);
                                 }
                                 lua_pop(L, 1);
@@ -1121,7 +1121,8 @@ int ayt_reflect_call_method_c(lua_State* L)
             // pattern as R3.0's std::string input path).
             if (method->getParamIsOut(i) && paramType) {
                 const char* outTname = paramType->getName();
-                const bool outIsInt    = (outTname && (std::strcmp(outTname, "int") == 0 || std::strcmp(outTname, "Int32") == 0));
+                const bool outIsInt    = (outTname && (std::strcmp(outTname, "int") == 0
+                    || std::strcmp(outTname, "Int32") == 0 || std::strcmp(outTname, "int32_t") == 0));
                 const bool outIsFloat  = (outTname && (std::strcmp(outTname, "float") == 0 || std::strcmp(outTname, "Float32") == 0));
                 const bool outIsString = (outTname && std::strcmp(outTname, "std::string") == 0);
                 const bool outIsStruct = paramType->getFieldCount() > 0;
@@ -1181,7 +1182,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                             if (!field) continue;
                             lua_getfield(L, stackIdx, field->getName());
                             if (!lua_isnil(L, -1)) {
-                                void* fieldPtr = static_cast<uint8_t*>(mem) + field->getOffset();
+                                void* fieldPtr = field->get(mem);
                                 storeFieldPrimitive(L, field, fieldPtr, /*valueStackIdx=*/-1);
                             }
                             lua_pop(L, 1);
@@ -1260,8 +1261,7 @@ int ayt_reflect_call_method_c(lua_State* L)
             for (size_t fi = 0; fi < fieldCount; ++fi) {
                 auto* field = ptype->getField(fi);
                 if (!field) continue;
-                void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(slotPtr))
-                                 + field->getOffset();
+                void* fieldPtr = const_cast<void*>(field->get(slotPtr));
                 lua_pushstring(L, field->getName());
                 pushFieldPrimitive(L, field, fieldPtr);
                 lua_settable(L, newTblIdx);
@@ -1315,7 +1315,8 @@ int ayt_reflect_call_method_c(lua_State* L)
     // — valid until the next invoke() call. We read it into a Lua
     // value before any further script execution.
     const char* tname = retType->getName();
-    if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0) {
+    if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0
+        || std::strcmp(tname, "int32_t") == 0) {
         int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
         lua_pushinteger(L, static_cast<lua_Integer>(v));
     } else if (std::strcmp(tname, "float") == 0 || std::strcmp(tname, "Float32") == 0) {
@@ -1360,7 +1361,8 @@ int ayt_reflect_call_method_c(lua_State* L)
             // Empty table — caller observes #t == 0.
         } else {
             const char* ename = elementType->getName();
-            const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0 || std::strcmp(ename, "Int32") == 0));
+            const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0
+                || std::strcmp(ename, "Int32") == 0 || std::strcmp(ename, "int32_t") == 0));
             const bool elemIsFloat  = (ename && (std::strcmp(ename, "float") == 0 || std::strcmp(ename, "Float32") == 0));
             const bool elemIsString = (ename && std::strcmp(ename, "std::string") == 0);
             const bool elemIsStruct = (elementType->getFieldCount() > 0);
@@ -1403,9 +1405,7 @@ int ayt_reflect_call_method_c(lua_State* L)
                         for (size_t fi = 0; fi < fieldCount; ++fi) {
                             auto* field = elementType->getField(fi);
                             if (!field) continue;
-                            void* fieldPtr = static_cast<uint8_t*>(
-                                                 const_cast<void*>(elemPtr))
-                                             + field->getOffset();
+                            void* fieldPtr = const_cast<void*>(field->get(elemPtr));
                             // pushFieldPrimitive pushes the value at
                             // fieldPtr; capture its top-of-stack slot for
                             // the lua_settable below.
@@ -1443,8 +1443,7 @@ int ayt_reflect_call_method_c(lua_State* L)
         for (size_t fi = 0; fi < fieldCount; ++fi) {
             auto* field = retType->getField(fi);
             if (!field) continue;
-            void* fieldPtr = static_cast<uint8_t*>(const_cast<void*>(retPtr))
-                             + field->getOffset();
+            void* fieldPtr = const_cast<void*>(field->get(retPtr));
             lua_pushstring(L, field->getName());
             pushFieldPrimitive(L, field, fieldPtr);
             lua_settable(L, outerIdx);

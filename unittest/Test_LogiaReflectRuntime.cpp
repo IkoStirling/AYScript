@@ -1336,7 +1336,7 @@ void ensureR4PlayerRegistered()
 
     // Register DamageInfo — has a Vector2 sub-field (the R4.0 case).
     auto* dmgInfo = new ayt::reflect::TypeInfoImpl<R4Player::DamageInfo>(
-        "DamageInfo",
+        "R4DamageInfo",
         ayt::reflect::detail::defaultCreate<R4Player::DamageInfo>,
         ayt::reflect::detail::defaultDestroy<R4Player::DamageInfo>,
         ayt::reflect::detail::defaultCopy<R4Player::DamageInfo>);
@@ -1349,7 +1349,7 @@ void ensureR4PlayerRegistered()
     dmgInfo->addField(new ayt::reflect::FieldInfoImpl(
         "damageType", intInfo, offsetof(R4Player::DamageInfo, damageType),
         ayt::reflect::FieldAttribute::Serialize));
-    reg.registerTypeInfo("DamageInfo", dmgInfo);
+    reg.registerTypeInfo("R4DamageInfo", dmgInfo);
 
     // Register Stats — also has a Vector2 sub-field.
     auto* statsInfo = new ayt::reflect::TypeInfoImpl<R4Player::Stats>(
