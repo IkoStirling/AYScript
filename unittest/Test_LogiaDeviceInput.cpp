@@ -97,6 +97,29 @@ struct HeadlessDeviceRig {
 
 TEST_SUITE(LogiaDeviceInputTests)
 
+TEST_CASE(int02_script_uses_optional_input_resource_ordering)
+{
+    ScriptSubSystem subsystem;
+    const auto& descriptor = subsystem.getDescriptor();
+    bool foundLegacyDeviceDependency = false;
+    for (const char* dependency : descriptor.dependencies) {
+        if (dependency && std::string(dependency) == "Device") {
+            foundLegacyDeviceDependency = true;
+            break;
+        }
+    }
+    bool readsInputFrame = false;
+    for (const char* resource : descriptor.reads) {
+        if (resource && std::string(resource) == "Input.TickFrame") {
+            readsInputFrame = true;
+            break;
+        }
+    }
+    CHECK(foundLegacyDeviceDependency);
+    CHECK(descriptor.runsAfter.empty());
+    CHECK(readsInputFrame);
+}
+
 TEST_CASE(int02_is_pressed_reads_KeyboardDevice_via_InputMapping)
 {
     HeadlessDeviceRig rig;

@@ -71,13 +71,17 @@ struct ScriptSubSystem::HotReloadState {
 ScriptSubSystem::ScriptSubSystem()
 {
     _descriptor.name = "ayt.script.runtime";
-    // INT-02 (2026-07-15): add "Device" dep so Logia input reads
-    // AYDevice InputMapping via DeviceInputProvider. Also fix
+    // INT-02 (2026-07-15): keep the legacy, lenient "Device" lifecycle dep
+    // so normal clients initialize after AYDevice. Also fix
     // INT-01 R3 silent dep mismatch — "Entity" name matches
     // EntitySubSystem::getName() (no "ayt." prefix). Topo-sort
     // silently ignores unmatched deps today, so this is purely a
-    // documentation / future-proofing fix; ordering is still
-    // governed by basePriority (Script=100 > Device=0 > Entity=0).
+    // documentation / future-proofing fix. Explicit phase ordering below
+    // Device writes Input.TickFrame at a higher phase priority while Script
+    // declares the matching read below, so the phase hazard planner orders
+    // Device before Script whenever Device is registered. Do not add a strict
+    // runsAfter edge here: editor hosts intentionally supply input through an
+    // externally-owned DeviceManager and have no window-owning DeviceSubSystem.
     _descriptor.dependencies = {"ayt.log", "Entity", "Device"};
     _descriptor.basePriority = 100;
     _descriptor.timeType = ayt::game::SubSystemDescriptor::TimeType::Scaled;
