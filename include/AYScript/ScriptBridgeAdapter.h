@@ -29,6 +29,8 @@
 // adapter directly. The S2 manual "AdapterCall" forwarding struct
 // in Test_LogiaAdapter.cpp is now unnecessary for new code paths.
 
+#include <memory>
+
 namespace ayt::entity
 {
 class IScriptBridge;
@@ -70,6 +72,16 @@ public:
     // bridge without keeping a separate handle.
     LogiaRuntimeBridge* bridgePtr() const;
 
+    // Shared AYEntity-facing handle used by ScriptComponent's owning bridge
+    // binding. The Impl remains alive until the last bound component releases
+    // it, even if ScriptSubSystem has already been destroyed.
+    std::shared_ptr<ayt::entity::IScriptBridge> sharedScriptBridge() const;
+
+    // Sever the non-owning LogiaRuntimeBridge pointer before subsystem
+    // teardown. Existing component-held handles then fail closed instead of
+    // dereferencing a destroyed runtime.
+    void detachRuntime();
+
     // AYEntity integration — return the IScriptBridge view so
     // ScriptComponent::setBridge(IScriptBridge*) accepts the
     // adapter without exposing the inheritance in this header.
@@ -80,7 +92,7 @@ private:
     // indirection lets us keep AYEntity's IScriptBridge header
     // out of this public surface.
     struct Impl;
-    Impl* _impl;
+    std::shared_ptr<Impl> _impl;
 };
 
 LogiaScriptBridgeAdapter* makeLogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge);

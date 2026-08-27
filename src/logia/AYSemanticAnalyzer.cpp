@@ -77,6 +77,37 @@ bool isIntegerTypeName(const std::string& name)
         || name == "Int64";
 }
 
+bool isBridgeMethodParamSupported(const ayt::reflect::ITypeInfo* type)
+{
+    if (!type || !type->getName()) return false;
+    const char* name = type->getName();
+    const auto named = [name](const char* candidate) {
+        return std::strcmp(name, candidate) == 0;
+    };
+    if (named("int") || named("Int32") || named("int32_t")
+        || named("float") || named("Float32")
+        || named("bool") || named("Bool")
+        || named("double") || named("Float64")
+        || named("Int64") || named("int64_t")
+        || named("std::string")) {
+        return true;
+    }
+    if (dynamic_cast<const ayt::reflect::IEnumTypeInfo*>(type)) return true;
+    if (auto* container = dynamic_cast<const ayt::reflect::IContainerTypeInfo*>(type)) {
+        auto* element = container->getElementType();
+        if (!element || !element->getName()) return false;
+        const char* elementName = element->getName();
+        return std::strcmp(elementName, "int") == 0
+            || std::strcmp(elementName, "Int32") == 0
+            || std::strcmp(elementName, "int32_t") == 0
+            || std::strcmp(elementName, "float") == 0
+            || std::strcmp(elementName, "Float32") == 0
+            || std::strcmp(elementName, "std::string") == 0
+            || element->getFieldCount() > 0;
+    }
+    return type->getFieldCount() > 0;
+}
+
 // R5.2-C (2026-07-14): pure-tree-shape predicate. Returns true
 // iff `e` is statically an int given current analyzer state
 // (resolvedType / literal value / constant-folded binary form).
@@ -2225,9 +2256,39 @@ void SemanticAnalyzer::analyzeExpr(Expr& e)
                 if (selfId && selfId->name == "self" && _ctx.hostType != nullptr) {
                     auto* m = _ctx.hostType->findMethod(mem->member.c_str());
                     if (m) {
-                        c->resolvedMethod = m;
-                        c->resolvedMethodOwnerName = _ctx.hostType->getName();
-                        c->resolvedType = m->getReturnType();
+                        bool callable = true;
+                        if (m->getParamCount() != c->args.size()) {
+                            LogiaDiagnostic d;
+                            d.severity = DiagnosticSeverity::Error;
+                            d.errorCode = ErrorCode::TypeMismatch;
+                            d.location = sourceLocFor(c);
+                            d.message = "method '" + mem->member + "' expects "
+                                + std::to_string(m->getParamCount()) + " argument(s), got "
+                                + std::to_string(c->args.size());
+                            d.hint = "pass exactly the reflected method parameter count";
+                            report(d);
+                            callable = false;
+                        }
+                        for (size_t i = 0; i < m->getParamCount(); ++i) {
+                            auto* paramType = m->getParamType(i);
+                            if (!isBridgeMethodParamSupported(paramType)) {
+                                LogiaDiagnostic d;
+                                d.severity = DiagnosticSeverity::Error;
+                                d.errorCode = ErrorCode::TypeMismatch;
+                                d.location = sourceLocFor(c);
+                                d.message = "method '" + mem->member + "' parameter "
+                                    + std::to_string(i + 1)
+                                    + " has a type unsupported by the Logia reflection bridge";
+                                d.hint = "register and expose a supported primitive, enum, struct, vector, or array parameter type";
+                                report(d);
+                                callable = false;
+                            }
+                        }
+                        if (callable) {
+                            c->resolvedMethod = m;
+                            c->resolvedMethodOwnerName = _ctx.hostType->getName();
+                            c->resolvedType = m->getReturnType();
+                        }
                     }
                 }
             }

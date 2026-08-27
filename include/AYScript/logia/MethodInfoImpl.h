@@ -53,14 +53,16 @@
 //     - enum E (slot = underlying*, cast → E)
 //   Cost: one extra pointer indirection per call. Acceptable.
 //
-// Thread-local return buffer for non-void returns — see
-// detail::TlsReturnSlot below.
+// Non-void returns are kept in a typed thread-local slot until the
+// bridge has copied them to Lua.
 // ============================================================
 
 #include "AYReflect/IReflect.h"
 #include "AYReflect.h"
 
 #include <cstring>
+#include <memory>
+#include <optional>
 #include <type_traits>
 #include <tuple>
 #include <utility>
@@ -71,40 +73,19 @@
 namespace ayt::script::logia::reflect
 {
 
-// ===== Thread-local return slot =====
-//
-// invoke() returns `const void*` to a thread-local slot holding the
-// return value (or nullptr for void). The slot type is `std::string`
-// for two reasons:
-//   1. std::string is a "fat" container that supports placement-new
-//      of a new std::string onto the same address (the allocator
-//      is heap, the buffer is inlined SSO). When we destroy the
-//      previous occupant and placement-new a new one, std::string's
-//      internal _Container_base12 is properly reset.
-//   2. We can memcpy trivially-copyable types into the string's
-//      internal buffer (after resize), read bytes back out at the
-//      bridge. The data() pointer is stable for the lifetime of the
-//      string (no SSO realloc unless we resize).
-//
-// We always resize to max(sizeof(void*), sizeof(Ret)) rounded up to
-// 8-byte alignment. placement-new on an under-sized buffer is
-// undefined behavior.
-//
-// The slot is per-thread so concurrent bridge calls do not race.
 namespace detail
 {
-    // Use a single std::string as the underlying storage. We resize
-    // it to the actual size we need; placement-new operates on
-    // data() which is stable across the lifetime of the string.
-    // destroy + placement-new re-initializes the string's internal
-    // iterators (the _Container_base12 subobject within the SSO
-    // buffer) cleanly. A raw std::vector<uint8_t> doesn't do this
-    // — placing a std::string onto a vector's data() corrupts the
-    // string's iterator tracking and crashes on next dtor.
-    inline std::string& tlsReturnBuffer()
+    template <typename R>
+    const void* storeReturnValue(R&& value)
     {
-        thread_local std::string buf;
-        return buf;
+        using Stored = std::remove_cv_t<std::remove_reference_t<R>>;
+        // A typed optional provides correct alignment and runs the previous
+        // value's destructor before replacement. This avoids constructing
+        // arbitrary objects inside std::string::data(), which is undefined
+        // for over-aligned and non-trivial return types.
+        thread_local std::optional<Stored> slot;
+        slot.emplace(std::forward<R>(value));
+        return std::addressof(*slot);
     }
 
     // SFINAE helper: if X is an enum, ::type is std::underlying_type_t<X>.
@@ -218,69 +199,7 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
             return nullptr;
         } else {
             Ret r = (self->*_pmf)(read<I>(args)...);
-            return storeReturn(std::move(r));
-        }
-    }
-
-    // Store the return value into the thread-local buffer and return
-    // a pointer to it. Trivially-copyable types (including enum) are
-    // memcpy'd; std::string and structs are placement-new'd so their
-    // destructor runs cleanly on the next invoke.
-    //
-    // The underlying buffer is a `std::string` (see detail::tlsReturnBuffer
-    // above). For trivial types we resize the string to sizeof(R),
-    // fill with memcpy, and read data() at the bridge. The std::string
-    // is NOT treated as a string by us — we never call any of its
-    // methods that inspect contents (other than data()/resize()).
-    // The resize + memcpy pattern is safe because std::string is
-    // a thin wrapper around a byte buffer; data() is stable for the
-    // lifetime of the string. The string's own _Container_base12
-    // subobject (which is what caused the original segfault) tracks
-    // iterators for invalidation; since we never hold iterators
-    // across resize, the subobject stays in a clean state.
-    //
-    // Implementation note: this function is a no-op template — the
-    // call site (invokeImpl) already short-circuits the void case
-    // with `if constexpr (std::is_same_v<Ret, void>)`. We use
-    // `std::conditional_t<...>` to pick the parameter type so the
-    // template itself is well-formed for Ret = void (where the
-    // parameter type collapses to `int` — a placeholder that's
-    // never bound to anything in the void instantiation).
-    template <typename R = Ret>
-    static const void* storeReturn(
-        typename std::conditional_t<std::is_void_v<R>, int, R&&> r) {
-        if constexpr (std::is_void_v<R>) {
-            (void)r;
-            return nullptr;
-        } else {
-            std::string& buf = detail::tlsReturnBuffer();
-            // First, destroy any previous occupant. This resets
-            // the std::string's _Container_base12 to a clean state
-            // (length 0, no iterators, no heap buffer if SSO).
-            // Important: we use the std::string's own destructor
-            // path via `buf.clear()` + length-zero, not raw
-            // ~basic_string(), because the latter is UB on an
-            // already-destroyed object.
-            buf.clear();
-            buf.resize(sizeof(R), '\0');
-            if constexpr (std::is_trivially_copyable_v<R>) {
-                std::memcpy(&buf[0], &r, sizeof(R));
-                return &buf[0];
-            } else if constexpr (std::is_same_v<R, std::string>) {
-                // For std::string return, we placement-new a new
-                // std::string in the buffer. The std::string's
-                // allocator pointer (in the SSO buffer) now points
-                // to a fresh heap allocation, or stays in SSO if
-                // the value fits. This is safe because buf is
-                // currently in a "no string is alive" state
-                // (we just cleared it).
-                return new (&buf[0]) std::string(std::move(r));
-            } else {
-                // Non-trivially-copyable struct by-value: placement-
-                // new T into the buffer. Safe for the same reason
-                // (buf has no live T after the clear).
-                return new (&buf[0]) R(std::move(r));
-            }
+            return detail::storeReturnValue(std::move(r));
         }
     }
 
@@ -447,9 +366,14 @@ struct MethodInfoImpl : public ayt::reflect::IMethodInfo {
         if constexpr (std::is_same_v<Ret, void>) {
             return nullptr;
         } else {
+            using Stripped = std::remove_cv_t<std::remove_reference_t<Ret>>;
+            using LookupT = typename detail::LookupType<Stripped>::type;
             static ayt::reflect::ITypeInfo* cache = nullptr;
             if (!cache) {
-                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Ret>();
+                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Stripped>();
+                if (!cache) {
+                    cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+                }
             }
             return cache;
         }
@@ -556,26 +480,7 @@ private:
             return nullptr;
         } else {
             Ret r = (self->*_pmf)(read<I>(args)...);
-            return storeReturn(std::move(r));
-        }
-    }
-
-    static const void* storeReturn(Ret&& r) {
-        if constexpr (std::is_same_v<Ret, void>) {
-            (void)r;
-            return nullptr;
-        } else {
-            std::string& buf = detail::tlsReturnBuffer();
-            buf.clear();
-            buf.resize(sizeof(Ret), '\0');
-            if constexpr (std::is_trivially_copyable_v<Ret>) {
-                std::memcpy(&buf[0], &r, sizeof(Ret));
-                return &buf[0];
-            } else if constexpr (std::is_same_v<Ret, std::string>) {
-                return new (&buf[0]) std::string(std::move(r));
-            } else {
-                return new (&buf[0]) Ret(std::move(r));
-            }
+            return detail::storeReturnValue(std::move(r));
         }
     }
 
@@ -700,9 +605,14 @@ private:
         if constexpr (std::is_same_v<Ret, void>) {
             return nullptr;
         } else {
+            using Stripped = std::remove_cv_t<std::remove_reference_t<Ret>>;
+            using LookupT = typename detail::LookupType<Stripped>::type;
             static ayt::reflect::ITypeInfo* cache = nullptr;
             if (!cache) {
-                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Ret>();
+                cache = ayt::reflect::TypeRegistryImpl::instance().template findType<Stripped>();
+                if (!cache) {
+                    cache = ayt::reflect::TypeRegistryImpl::instance().template findType<LookupT>();
+                }
             }
             return cache;
         }

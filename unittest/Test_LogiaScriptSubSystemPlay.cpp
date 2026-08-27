@@ -271,4 +271,38 @@ TEST_CASE(int01_r1_presence_guard_well_known) {
     reg.clearAll();
 }
 
+TEST_CASE(runtime_shutdown_before_world_teardown_keeps_component_bridge_safe) {
+    // Production GameLoop teardown is reverse dependency order: Script shuts
+    // down before Entity destroys World components. Bound components therefore
+    // deliberately outlive ScriptSubSystem in this regression.
+    auto& world = ayt::entity::World::instance();
+    logia_test::resetWorldForTest(world);
+
+    auto sub = std::make_unique<ScriptSubSystem>();
+    CHECK(sub->initialize());
+
+    auto* ent = world.createEntity();
+    CHECK(ent != nullptr);
+    auto* comp = ent->addComponent<ayt::entity::ScriptComponent>();
+    CHECK(comp != nullptr);
+    comp->setScriptName("INT01Counter");
+
+    std::vector<CompilerError> errors;
+    CHECK(sub->bindAndLoad(*comp, kCounterV1, errors));
+    CHECK(errors.empty());
+    sub->update(0.016f);
+    CHECK(sub->bridge().getLuaGlobalString("__int01_witness") == "1");
+
+    // Destroy the runtime owner first. ScriptComponent retains a shared adapter
+    // implementation, but detachRuntime has made it a safe no-op.
+    sub.reset();
+    CHECK(comp->getBridge() != nullptr);
+    CHECK_FALSE(comp->callScriptMethod("onUpdate"));
+
+    // onDetach() executes while destroying the component. Before the fix this
+    // called a freed adapter and could access-violate.
+    world.shutdown();
+    CHECK_FALSE(world.isInitialized());
+}
+
 TEST_SUITE_END

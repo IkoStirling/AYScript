@@ -3651,6 +3651,15 @@ struct R1Player {
     int secret = 7;
 };
 
+struct R1Nested {
+    int visible = 1;
+    int secret = 7;
+};
+
+struct R1NestedOwner {
+    R1Nested nested;
+};
+
 void ensureR1PlayerRegistered()
 {
     auto& reg = ayt::reflect::TypeRegistryImpl::instance();
@@ -3675,6 +3684,36 @@ void ensureR1PlayerRegistered()
     info->addField(new ayt::reflect::FieldInfoImpl(
         "secret", intInfo, offsetof(R1Player, secret), FA::Serialize));
     reg.registerTypeInfo("R1Player", info);
+}
+
+void ensureR1NestedRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("R1NestedOwner") != nullptr) return;
+    if (reg.findType("int") == nullptr) {
+        reg.registerType("int", typeid(int).hash_code(), sizeof(int));
+    }
+    auto* intInfo = reg.findType("int");
+    using FA = ayt::reflect::FieldAttribute;
+    auto* nestedInfo = new ayt::reflect::TypeInfoImpl<R1Nested>(
+        "R1Nested",
+        ayt::reflect::detail::defaultCreate<R1Nested>,
+        ayt::reflect::detail::defaultDestroy<R1Nested>,
+        ayt::reflect::detail::defaultCopy<R1Nested>);
+    nestedInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "visible", intInfo, offsetof(R1Nested, visible), FA::ScriptVisible));
+    nestedInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "secret", intInfo, offsetof(R1Nested, secret), FA::Serialize));
+    reg.registerTypeInfo("R1Nested", nestedInfo);
+
+    auto* ownerInfo = new ayt::reflect::TypeInfoImpl<R1NestedOwner>(
+        "R1NestedOwner",
+        ayt::reflect::detail::defaultCreate<R1NestedOwner>,
+        ayt::reflect::detail::defaultDestroy<R1NestedOwner>,
+        ayt::reflect::detail::defaultCopy<R1NestedOwner>);
+    ownerInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "nested", nestedInfo, offsetof(R1NestedOwner, nested), FA::ScriptVisible));
+    reg.registerTypeInfo("R1NestedOwner", ownerInfo);
 }
 } // namespace
 
@@ -3766,6 +3805,162 @@ script R1Player {
     CHECK(obj.hp == 42);
     CHECK(obj.maxHp == 100);
     CHECK(bridge.getLuaGlobalString("__test_witness") == "100");
+}
+
+TEST_CASE(lg12_r1_nested_runtime_helpers_enforce_visibility)
+{
+    ensureR1NestedRegistered();
+    R1NestedOwner object;
+    LogiaRuntimeBridge bridge;
+    auto ctx = ayt::script::logia::defaultLogiaHostContext();
+    ctx.hostType = ayt::reflect::TypeRegistryImpl::instance().findType("R1NestedOwner");
+
+    constexpr const char* source = R"(
+script R1NestedOwner {
+    on_start() {
+        local nested = ayt_reflect_get_field(self, "R1NestedOwner", "nested")
+        __nested_table_secret = tostring(nested.secret)
+        __nested_chain_secret = tostring(ayt_reflect_get_field_chain(
+            self, "R1NestedOwner", "nested", "secret"))
+        ayt_reflect_set_field_chain(
+            self, "R1NestedOwner", "nested", "secret", 99)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(bridge.loadScript("R1NestedOwner", source, ctx, errors));
+    CHECK(bridge.callLifecycle("R1NestedOwner", "on_start", &object, nullptr));
+    CHECK(bridge.getLuaGlobalString("__nested_table_secret") == "nil");
+    CHECK(bridge.getLuaGlobalString("__nested_chain_secret") == "nil");
+    CHECK(object.nested.secret == 7);
+}
+
+namespace
+{
+struct NonTrivialMethodPayload {
+    inline static int constructed = 0;
+    inline static int destroyed = 0;
+    inline static int live = 0;
+
+    std::string text = "ctor-default";
+    int amount = 11;
+
+    NonTrivialMethodPayload() {
+        ++constructed;
+        ++live;
+    }
+    NonTrivialMethodPayload(const NonTrivialMethodPayload& other)
+        : text(other.text), amount(other.amount) {
+        ++constructed;
+        ++live;
+    }
+    ~NonTrivialMethodPayload() {
+        ++destroyed;
+        --live;
+    }
+};
+
+struct NonTrivialMethodHost {
+    std::string consumedText;
+    int consumedAmount = 0;
+    std::string mutatedText;
+    int mutatedAmount = 0;
+
+    void consume(const NonTrivialMethodPayload& payload) {
+        consumedText = payload.text;
+        consumedAmount = payload.amount;
+    }
+
+    void mutate(NonTrivialMethodPayload& payload) {
+        payload.text += "-mutated";
+        payload.amount += 5;
+        mutatedText = payload.text;
+        mutatedAmount = payload.amount;
+    }
+};
+
+void ensureNonTrivialMethodHostRegistered()
+{
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    if (reg.findType("NonTrivialMethodHost") != nullptr) return;
+
+    if (reg.findType("int") == nullptr) {
+        reg.registerTypeInfo("int", new ayt::reflect::TypeInfoImpl<int32_t>(
+            "int", ayt::reflect::detail::defaultCreate<int32_t>,
+            ayt::reflect::detail::defaultDestroy<int32_t>,
+            ayt::reflect::detail::defaultCopy<int32_t>));
+    }
+    if (reg.findType("std::string") == nullptr) {
+        reg.registerType("std::string", typeid(std::string).hash_code(),
+                         sizeof(std::string));
+    }
+
+    auto* payloadInfo = new ayt::reflect::TypeInfoImpl<NonTrivialMethodPayload>(
+        "NonTrivialMethodPayload",
+        ayt::reflect::detail::defaultCreate<NonTrivialMethodPayload>,
+        ayt::reflect::detail::defaultDestroy<NonTrivialMethodPayload>,
+        ayt::reflect::detail::defaultCopy<NonTrivialMethodPayload>);
+    payloadInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "text", reg.findType("std::string"),
+        offsetof(NonTrivialMethodPayload, text),
+        ayt::reflect::FieldAttribute::Serialize));
+    payloadInfo->addField(new ayt::reflect::FieldInfoImpl(
+        "amount", reg.findType("int"),
+        offsetof(NonTrivialMethodPayload, amount),
+        ayt::reflect::FieldAttribute::Serialize));
+    reg.registerTypeInfo("NonTrivialMethodPayload", payloadInfo);
+
+    auto* hostInfo = new ayt::reflect::TypeInfoImpl<NonTrivialMethodHost>(
+        "NonTrivialMethodHost",
+        ayt::reflect::detail::defaultCreate<NonTrivialMethodHost>,
+        ayt::reflect::detail::defaultDestroy<NonTrivialMethodHost>,
+        ayt::reflect::detail::defaultCopy<NonTrivialMethodHost>);
+    using ayt::script::logia::reflect::MethodInfoImpl;
+    hostInfo->addMethod(new MethodInfoImpl<NonTrivialMethodHost, void,
+        const NonTrivialMethodPayload&>("consume", &NonTrivialMethodHost::consume));
+    hostInfo->addMethod(new MethodInfoImpl<NonTrivialMethodHost, void,
+        NonTrivialMethodPayload&>("mutate", &NonTrivialMethodHost::mutate));
+    reg.registerTypeInfo("NonTrivialMethodHost", hostInfo);
+}
+} // namespace
+
+TEST_CASE(reflect_method_nontrivial_struct_arg_uses_typed_lifetime)
+{
+    ensureNonTrivialMethodHostRegistered();
+    NonTrivialMethodPayload::constructed = 0;
+    NonTrivialMethodPayload::destroyed = 0;
+    NonTrivialMethodPayload::live = 0;
+
+    NonTrivialMethodHost object;
+    LogiaRuntimeBridge bridge;
+    auto ctx = ayt::script::logia::defaultLogiaHostContext();
+    ctx.hostType = ayt::reflect::TypeRegistryImpl::instance().findType(
+        "NonTrivialMethodHost");
+
+    constexpr const char* source = R"(
+script NonTrivialMethodHost {
+    on_start() {
+        self.consume({text="hello", amount=7})
+        self.mutate({text="world", amount=3})
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(bridge.loadScript("NonTrivialMethodHost", source, ctx, errors));
+    CHECK(errors.empty());
+    CHECK(bridge.callLifecycle(
+        "NonTrivialMethodHost", "on_start", &object, nullptr));
+
+    CHECK(object.consumedText == "hello");
+    CHECK(object.consumedAmount == 7);
+    CHECK(object.mutatedText == "world-mutated");
+    CHECK(object.mutatedAmount == 8);
+    // MethodInfo may materialize additional temporary copies depending on the
+    // PMF parameter shape. Every constructed object must still be destroyed.
+    CHECK(NonTrivialMethodPayload::constructed >= 2);
+    CHECK(NonTrivialMethodPayload::destroyed
+          == NonTrivialMethodPayload::constructed);
+    CHECK(NonTrivialMethodPayload::live == 0);
 }
 
 // ----------------------------------------------------------------------------

@@ -13,6 +13,8 @@
 #include "AYTest.h"
 
 #include <string>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 using ayt::script::LogiaRuntimeBridge;
@@ -31,6 +33,95 @@ bool loadFromSource(LogiaRuntimeBridge& bridge,
 } // namespace
 
 TEST_SUITE(LogiaRuntimeTests)
+
+TEST_CASE(runtime_rejects_lifecycle_call_from_non_owner_thread) {
+    LogiaRuntimeBridge bridge;
+    constexpr const char* src = R"(
+script ThreadOwner {
+    var n: int = 0
+    on_update() {
+        n = n + 1
+        __thread_owner_witness = tostring(n)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "ThreadOwner", src, errors));
+
+    std::atomic<bool> workerResult{true};
+    std::thread worker([&] {
+        float dt = 0.016f;
+        workerResult.store(
+            bridge.callLifecycle("ThreadOwner", "on_update", nullptr, &dt),
+            std::memory_order_release);
+    });
+    worker.join();
+
+    CHECK_FALSE(workerResult.load(std::memory_order_acquire));
+    CHECK(bridge.getLuaGlobalString("__thread_owner_witness").empty());
+
+    float dt = 0.016f;
+    CHECK(bridge.callLifecycle("ThreadOwner", "on_update", nullptr, &dt));
+    CHECK(bridge.getLuaGlobalString("__thread_owner_witness") == "1");
+}
+
+TEST_CASE(runtime_instruction_budget_terminates_infinite_loop) {
+    LogiaRuntimeBridge bridge;
+    constexpr const char* src = R"(
+script BudgetLoop {
+    on_start() {
+        while (true) {
+        }
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "BudgetLoop", src, errors));
+    CHECK_FALSE(bridge.callLifecycle("BudgetLoop", "on_start"));
+    const auto runtimeError = bridge.getLastError();
+    CHECK(runtimeError.luaMessage.find("instruction budget exceeded")
+          != std::string::npos);
+}
+
+TEST_CASE(runtime_memory_budget_rejects_oversized_lua_allocation) {
+    LogiaRuntimeBridge bridge;
+    constexpr const char* src = R"(
+script MemoryBudget {
+    on_start() {
+        __memory_budget_witness = string.rep("x", 70000000)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "MemoryBudget", src, errors));
+    CHECK_FALSE(bridge.callLifecycle("MemoryBudget", "on_start"));
+    const auto runtimeError = bridge.getLastError();
+    CHECK_FALSE(runtimeError.luaMessage.empty());
+    CHECK(runtimeError.luaMessage.find("memory") != std::string::npos);
+}
+
+TEST_CASE(runtime_sandbox_removes_dynamic_load_and_error_catch_globals) {
+    LogiaRuntimeBridge bridge;
+    constexpr const char* src = R"(
+script SandboxGlobals {
+    on_start() {
+        __sandbox_dofile = tostring(dofile)
+        __sandbox_loadfile = tostring(loadfile)
+        __sandbox_load = tostring(load)
+        __sandbox_pcall = tostring(pcall)
+        __sandbox_xpcall = tostring(xpcall)
+    }
+}
+)";
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "SandboxGlobals", src, errors));
+    CHECK(bridge.callLifecycle("SandboxGlobals", "on_start"));
+    CHECK(bridge.getLuaGlobalString("__sandbox_dofile") == "nil");
+    CHECK(bridge.getLuaGlobalString("__sandbox_loadfile") == "nil");
+    CHECK(bridge.getLuaGlobalString("__sandbox_load") == "nil");
+    CHECK(bridge.getLuaGlobalString("__sandbox_pcall") == "nil");
+    CHECK(bridge.getLuaGlobalString("__sandbox_xpcall") == "nil");
+}
 
 TEST_CASE(runtime_load_simple_script) {
     LogiaRuntimeBridge bridge;
@@ -250,6 +341,28 @@ script Boom {
     // in this planted source.
     CHECK(err.translated);
     CHECK(err.logiaLoc.line == 5);
+}
+
+TEST_CASE(s5ed03_failed_reload_restores_prior_source_map) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "ReloadBoom", R"(
+script ReloadBoom {
+    on_start() {
+        error("old module")
+    }
+}
+)", errors));
+
+    CHECK_FALSE(bridge.reloadScript("ReloadBoom", R"(
+script ReloadBoom {
+    on_start() {
+)", errors));
+    CHECK(bridge.hasScript("ReloadBoom"));
+    CHECK_FALSE(bridge.callLifecycle("ReloadBoom", "on_start"));
+    const auto runtimeError = bridge.getLastError();
+    CHECK(runtimeError.translated);
+    CHECK(runtimeError.logiaLoc.line == 4);
 }
 
 TEST_CASE(s5ed03_bridge_last_error_cleared_by_successful_call) {

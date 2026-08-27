@@ -106,4 +106,59 @@ script ActionHandler {
     resetSingletonBus();
 }
 
+TEST_CASE(int04b_shutdown_disconnects_lua_handlers)
+{
+    resetSingletonBus();
+    {
+        LogiaRuntimeBridge bridge;
+        std::vector<CompilerError> errors;
+        constexpr const char* source = R"(
+script ShutdownHandler {
+    function on_action(id: int, pressed: bool) {
+        __shutdown_witness = id
+    }
+    run() {
+        event.subscribe("device_action", on_action)
+    }
+}
+)";
+        CHECK(bridge.loadEventHandler("ShutdownHandler", source, errors));
+        CHECK(EventBus::instance().listenerCount(DeviceActionEvent::kTypeId) == 1u);
+        bridge.shutdown();
+        CHECK(EventBus::instance().listenerCount(DeviceActionEvent::kTypeId) == 0u);
+    }
+    CHECK(EventBus::instance().listenerCount(DeviceActionEvent::kTypeId) == 0u);
+    resetSingletonBus();
+}
+
+TEST_CASE(int04b_reload_replaces_instead_of_accumulating_handlers)
+{
+    resetSingletonBus();
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    constexpr const char* v1 = R"(
+script ReloadHandler {
+    function on_action(id: int, pressed: bool) { __reload_witness = id }
+    run() { event.subscribe("device_action", on_action) }
+}
+)";
+    constexpr const char* v2 = R"(
+script ReloadHandler {
+    function on_action(id: int, pressed: bool) { __reload_witness = id + 1000 }
+    run() { event.subscribe("device_action", on_action) }
+}
+)";
+    CHECK(bridge.loadEventHandler("ReloadHandler", v1, errors));
+    CHECK(EventBus::instance().listenerCount(DeviceActionEvent::kTypeId) == 1u);
+    CHECK(bridge.reloadScript("ReloadHandler", v2,
+        ayt::script::logia::eventHandlerLogiaHostContext(), errors));
+    CHECK(EventBus::instance().listenerCount(DeviceActionEvent::kTypeId) == 1u);
+    CHECK(EventBus::instance().emitByAlias<DeviceActionEvent>(
+        "device_action", DeviceActionEvent{7, true}));
+    double witness = 0.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__reload_witness", witness));
+    CHECK_INT_EQ(static_cast<int>(witness), 1007);
+    resetSingletonBus();
+}
+
 TEST_SUITE_END

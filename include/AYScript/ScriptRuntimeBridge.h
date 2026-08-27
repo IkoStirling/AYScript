@@ -388,6 +388,14 @@ std::size_t hashLogiaHostContext(const logia::LogiaHostContext& ctx);
 // compiles Logia sources into Lua chunks, and invokes lifecycle methods
 // (on_start / on_update / on_destroy) on demand.
 //
+// Production contract:
+//   - The bridge is permanently bound to its construction thread. Every public
+//     runtime/state API fails closed when called from another thread; EventBus
+//     callbacks apply the same check before entering Lua.
+//   - Each Lua entry receives a 1,000,000-instruction budget and each state has
+//     a 64 MiB allocator limit. Dynamic Lua loaders and protected-call wrappers
+//     are not exposed to Logia scripts.
+//
 // S1 deliberately does NOT inherit ayt::entity::IScriptBridge — the
 // signatures do not match (Logia uses snake_case methods; AYEntity's
 // stub uses camelCase). S2/S3 will add a thin adapter.

@@ -211,6 +211,7 @@ TEST_CASE(cache_records_failed_compile_and_skips_front_end) {
     // (entry with empty generatedLua + compileOk=false).
     CHECK(loadScriptDefault(bridge, "Broken", kBrokenScript, errors) == false);
     CHECK(!errors.empty());
+    const auto firstErrors = errors;
     CHECK(bridge.compileCacheMissCount() == 1u);
     CHECK(bridge.compileCacheHitCount()  == 0u);
     CHECK(bridge.hasScript("Broken") == false);
@@ -221,6 +222,13 @@ TEST_CASE(cache_records_failed_compile_and_skips_front_end) {
     errors.clear();
     CHECK(loadScriptDefault(bridge, "Broken", kBrokenScript, errors) == false);
     CHECK(!errors.empty());
+    CHECK(errors.size() == firstErrors.size());
+    for (size_t i = 0; i < errors.size(); ++i) {
+        CHECK(errors[i].code == firstErrors[i].code);
+        CHECK(errors[i].message == firstErrors[i].message);
+        CHECK(errors[i].line == firstErrors[i].line);
+        CHECK(errors[i].column == firstErrors[i].column);
+    }
     CHECK(bridge.compileCacheMissCount() == 1u);  // unchanged
     CHECK(bridge.compileCacheHitCount()  == 1u);  // bumped
     CHECK(bridge.hasScript("Broken") == false);

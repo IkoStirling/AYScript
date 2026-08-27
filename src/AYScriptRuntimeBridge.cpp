@@ -30,8 +30,12 @@
 #include "AYReflect.h"  // full TypeRegistryImpl definition
 
 #include <unordered_map>
+#include <unordered_set>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 
 namespace ayt::script
 {
@@ -72,14 +76,36 @@ std::size_t hashLogiaSource(const std::string& src)
     return std::hash<std::string>{}(src);
 }
 
-// Combine the three cache-key inputs into a single hash slot.
-std::size_t makeCacheKey(const std::string& src,
-                         const logia::LogiaHostContext& ctx)
+struct CompileCacheKey {
+    std::string source;
+    logia::LogiaHostKind kind = logia::LogiaHostKind::Component;
+    const ayt::reflect::ITypeInfo* hostType = nullptr;
+    bool expectSelf = false;
+    bool strictInheritance = false;
+    std::size_t pipelineVersion = kLogiaPipelineVersion;
+
+    bool operator==(const CompileCacheKey&) const = default;
+};
+
+struct CompileCacheKeyHash {
+    std::size_t operator()(const CompileCacheKey& key) const noexcept
+    {
+        logia::LogiaHostContext ctx{
+            key.kind, key.hostType, key.expectSelf, key.strictInheritance};
+        std::size_t hash = hashLogiaSource(key.source);
+        hash ^= hashLogiaHostContext(ctx) + 0x9E3779B97F4A7C15ULL
+              + (hash << 6) + (hash >> 2);
+        hash ^= key.pipelineVersion + 0x9E3779B97F4A7C15ULL
+              + (hash << 6) + (hash >> 2);
+        return hash;
+    }
+};
+
+CompileCacheKey makeCacheKey(const std::string& src,
+                             const logia::LogiaHostContext& ctx)
 {
-    std::size_t k = hashLogiaSource(src);
-    k ^= hashLogiaHostContext(ctx) + 0x9E3779B97F4A7C15ULL + (k << 6) + (k >> 2);
-    k ^= kLogiaPipelineVersion  + 0x9E3779B97F4A7C15ULL + (k << 6) + (k >> 2);
-    return k;
+    return CompileCacheKey{src, ctx.kind, ctx.hostType, ctx.expectSelf,
+                           ctx.strictInheritance, kLogiaPipelineVersion};
 }
 
 } // namespace
@@ -239,9 +265,16 @@ std::unordered_map<FieldKey, const ayt::reflect::IFieldInfo*, FieldKeyHash>& fie
     return c;
 }
 
+std::mutex& fieldCacheMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
 const ayt::reflect::IFieldInfo* lookupField(const std::string& typeName,
                                             const std::string& fieldName)
 {
+    std::lock_guard<std::mutex> lock(fieldCacheMutex());
     FieldKey k{typeName, fieldName};
     auto& cache = fieldCache();
     auto it = cache.find(k);
@@ -282,9 +315,16 @@ std::unordered_map<MethodKey, const ayt::reflect::IMethodInfo*, MethodKeyHash>& 
     return c;
 }
 
+std::mutex& methodCacheMutex()
+{
+    static std::mutex m;
+    return m;
+}
+
 const ayt::reflect::IMethodInfo* lookupMethod(const std::string& typeName,
                                               const std::string& methodName)
 {
+    std::lock_guard<std::mutex> lock(methodCacheMutex());
     MethodKey k{typeName, methodName};
     auto& cache = methodCache();
     auto it = cache.find(k);
@@ -306,8 +346,7 @@ const ayt::reflect::IMethodInfo* lookupMethod(const std::string& typeName,
 // the chain-helper code that handles intermediate hops
 // (ayt_reflect_*_field_chain_c) already calls this helper for leaves,
 // so the same recursive structure automatically applies to nested
-// chains too. Returns 0 on truly unknown types (e.g. std::string
-// field, which R3.0 deliberately left fail-closed for the field path).
+// chains too. Returns 0 on truly unknown or unregistered field types.
 //
 // Used by `ayt_reflect_get_field_c` (single hop) and the chain
 // leaf helper `ayt_reflect_get_field_chain_c`. The R3.12+R3 struct
@@ -339,16 +378,9 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
         lua_pushinteger(L, static_cast<lua_Integer>(*static_cast<int64_t*>(fieldPtr)));
         return 1;
     }
-    // R4.2b (2026-07-13): std::string leaf field. Closes the
-    // R3.5-deferred gap at L310-312 (and the parallel gap in
-    // storeFieldPrimitive at L400-401 — storeFieldPrimitive is NOT
-    // fixed in R4.2b; struct sub-field writes still fail closed for
-    // std::string because placement-new on a heap buffer is a
-    // separate design). The read path is sufficient for R4.2b
-    // verification (the out-param write-back test needs
-    // `self.lastString` to round-trip cleanly) and small in scope.
-    // Mirrors the struct-return path at L1185-1187 (lua_pushlstring
-    // from a std::string*).
+    // std::string leaf field. fieldPtr addresses a live object: host
+    // instances are already constructed and method struct arguments are
+    // allocated through ITypeInfo::create().
     if (eq("std::string")) {
         const std::string* sp = static_cast<const std::string*>(fieldPtr);
         lua_pushlstring(L, sp->data(), sp->size());
@@ -367,6 +399,7 @@ int pushFieldPrimitive(lua_State* L, const ayt::reflect::IFieldInfo* field, void
         for (size_t si = 0; si < subCount; ++si) {
             auto* sub = type->getField(si);
             if (!sub) continue;
+            if (!ayt::reflect::isScriptReadable(sub, type)) continue;
             const char* subName = sub->getName();
             if (!subName) continue;
             void* subPtr = sub->get(fieldPtr);
@@ -464,14 +497,10 @@ int ayt_reflect_set_field_c(lua_State* L)
 // store. Callers must validate `valueStackIdx <= lua_gettop(L)` before
 // calling.
 //
-// R4.0 / R3.5 — nested struct field: when the field's type has its own
+// Nested struct field: when the field's type has its own
 // fields (getFieldCount() > 0), `valueStackIdx` must point at a Lua
-// table. Sub-fields are written **directly into fieldPtr** (a live
-// constructed object). The older memset+memcpy temp path is unsafe for
-// std::string sub-fields; R3.5 leaf std::string write uses assign into
-// an existing string*. Nested structs that appear only inside a
-// memset-zeroed struct-arg temp still skip string leaves (leaf-only
-// string write for R3.5 — see design.md §5.7.4 R3.5).
+// table. Sub-fields are written directly into fieldPtr, which must reference
+// a live constructed object.
 int storeFieldPrimitive(lua_State* L,
                         const ayt::reflect::IFieldInfo* field,
                         void* fieldPtr,
@@ -507,10 +536,7 @@ int storeFieldPrimitive(lua_State* L,
             static_cast<int64_t>(lua_tointeger(L, valueStackIdx));
         return 1;
     }
-    // R3.5: leaf std::string write. fieldPtr must address a live
-    // constructed std::string (set_field / chain / nested direct-write
-    // into a host object). Struct-arg memset temps that contain string
-    // fields remain fail-closed at the call-method fill loop.
+    // std::string write into a live constructed field.
     if (eq("std::string")) {
         const char* s = lua_tostring(L, valueStackIdx);
         *static_cast<std::string*>(fieldPtr) = (s ? s : "");
@@ -528,6 +554,10 @@ int storeFieldPrimitive(lua_State* L,
         for (size_t si = 0; si < subCount; ++si) {
             auto* sub = type->getField(si);
             if (!sub) continue;
+            if (!ayt::reflect::isScriptReadable(sub, type)
+                || !ayt::reflect::isScriptWritable(sub)) {
+                continue;
+            }
             const char* subName = sub->getName();
             if (!subName) continue;
             const char* normName = ayt::reflect::normalizeFieldName(subName);
@@ -590,6 +620,12 @@ int ayt_reflect_get_field_chain_c(lua_State* L)
             lua_pushnil(L);
             return 1;
         }
+        auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+        auto* ownerType = reg.findType(typeName.c_str());
+        if (!ayt::reflect::isScriptReadable(field, ownerType)) {
+            lua_pushnil(L);
+            return 1;
+        }
         ptr = field->get(ptr);
         auto* fieldType = field->getType();
         if (!fieldType || !fieldType->getName()) {
@@ -603,6 +639,12 @@ int ayt_reflect_get_field_chain_c(lua_State* L)
     std::string leafName = lua_tostring(L, nargs);
     auto* leaf = lookupField(typeName, leafName);
     if (!leaf || ptr == nullptr) {
+        lua_pushnil(L);
+        return 1;
+    }
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    auto* ownerType = reg.findType(typeName.c_str());
+    if (!ayt::reflect::isScriptReadable(leaf, ownerType)) {
         lua_pushnil(L);
         return 1;
     }
@@ -652,6 +694,13 @@ int ayt_reflect_set_field_chain_c(lua_State* L)
                             typeName.c_str(), fieldName.c_str());
             return 0;
         }
+        auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+        auto* ownerType = reg.findType(typeName.c_str());
+        if (!ayt::reflect::isScriptReadable(field, ownerType)) {
+            ayt::log::warn("ayt_reflect_set_field_chain: %s.%s not ScriptVisible",
+                           typeName.c_str(), fieldName.c_str());
+            return 0;
+        }
         ptr = field->get(ptr);
         auto* fieldType = field->getType();
         if (!fieldType || !fieldType->getName()) {
@@ -669,6 +718,13 @@ int ayt_reflect_set_field_chain_c(lua_State* L)
     }
     if (!ayt::reflect::isScriptWritable(leaf)) {
         ayt::log::warn("ayt_reflect_set_field_chain: %s.%s is ScriptReadOnly (ignored)",
+                       typeName.c_str(), leafName.c_str());
+        return 0;
+    }
+    auto& reg = ayt::reflect::TypeRegistryImpl::instance();
+    auto* ownerType = reg.findType(typeName.c_str());
+    if (!ayt::reflect::isScriptReadable(leaf, ownerType)) {
+        ayt::log::warn("ayt_reflect_set_field_chain: %s.%s not ScriptVisible (ignored)",
                        typeName.c_str(), leafName.c_str());
         return 0;
     }
@@ -760,6 +816,16 @@ int ayt_reflect_call_method_c(lua_State* L)
         lua_pushnil(L);
         return 1;
     }
+    for (size_t i = 0; i < expected; ++i) {
+        auto* paramType = method->getParamType(i);
+        if (!paramType || !paramType->getName()) {
+            ayt::log::error(
+                "ayt_reflect_call_method: %s.%s parameter %zu has no registered type",
+                typeName.c_str(), methodName.c_str(), i);
+            lua_pushnil(L);
+            return 1;
+        }
+    }
 
     // Per-call slot container. Stack slots for primitives (8 bytes
     // each — sufficient for int/Int32/float/Float32/bool/Bool/double/
@@ -783,6 +849,14 @@ int ayt_reflect_call_method_c(lua_State* L)
     auto registerCleanup = [&](void* p, std::function<void(void*)> d) {
         cleanup.push_back({p, std::move(d)});
     };
+    struct ScopeGuard {
+        std::vector<HeapSlot>* q;
+        ~ScopeGuard() {
+            for (auto& s : *q) {
+                if (s.ptr && s.deleter) s.deleter(s.ptr);
+            }
+        }
+    } guard{&cleanup};
 
     // Marshal each Lua arg into its slot. Dispatch is by ITypeInfo
     // tag. Note: MethodInfoImpl's readArg dereferences args[I] as
@@ -791,7 +865,7 @@ int ayt_reflect_call_method_c(lua_State* L)
     for (size_t i = 0; i < expected; ++i) {
         int stackIdx = static_cast<int>(i) + 4;
         auto* paramType = method->getParamType(i);
-        const char* tname = paramType ? paramType->getName() : "int";
+        const char* tname = paramType->getName();
 
         // S3.12 + R3 primitive dispatch: write the value into the
         // stack slot and set argPtrs[i] = &argSlots[i].
@@ -835,27 +909,29 @@ int ayt_reflect_call_method_c(lua_State* L)
             std::memcpy(&argSlots[i], &v, sizeof(int32_t));
             argPtrs[i] = &argSlots[i];
         } else if (paramType && paramType->getFieldCount() > 0) {
-            // S3.12+R3: struct arg. Default-construct T in heap
-            // memory and fill field-by-field from the Lua table.
+            // Struct arg (including non-const T& / T* out params). Construct
+            // the real C++ object through reflection, then fill its live
+            // fields from the Lua table. Raw operator-new + memset is invalid
+            // for non-trivial members such as std::string/vector and bypasses
+            // user constructors and destructors.
             // Lua table key = C++ field name (exact match, camelCase
             // both sides — see design.md §5.7.4 R3 conventions).
-            // R3.5: std::string fields inside the struct remain
-            // fail-closed here (leaf-only string write on live host
-            // objects via set_field); memset + ::operator delete
-            // cannot safely own string dtors.
-            size_t typeSize = paramType->getSize();
-            if (typeSize == 0) typeSize = sizeof(uint64_t);  // safety
-            void* mem = ::operator new(typeSize);
-            std::memset(mem, 0, typeSize);
+            void* mem = paramType->create();
+            if (!mem) {
+                ayt::log::error(
+                    "ayt_reflect_call_method: %s.%s parameter %zu type '%s' could not be constructed",
+                    typeName.c_str(), methodName.c_str(), i, paramType->getName());
+                lua_pushnil(L);
+                return 1;
+            }
+            auto* constructedType = paramType;
+            registerCleanup(mem, [constructedType](void* p) {
+                constructedType->destroy(p);
+            });
             size_t fieldCount = paramType->getFieldCount();
             for (size_t fi = 0; fi < fieldCount; ++fi) {
                 auto* field = paramType->getField(fi);
                 if (!field) continue;
-                auto* ftype = field->getType();
-                if (ftype && ftype->getName()
-                    && std::strcmp(ftype->getName(), "std::string") == 0) {
-                    continue;  // R3.5 leaf-only string write
-                }
                 lua_getfield(L, stackIdx, field->getName());
                 if (!lua_isnil(L, -1)) {
                     // storeFieldPrimitive reads from top of stack.
@@ -865,7 +941,6 @@ int ayt_reflect_call_method_c(lua_State* L)
                 lua_pop(L, 1);
             }
             argPtrs[i] = mem;
-            registerCleanup(mem, [](void* p) { ::operator delete(p); });
         } else if (auto* containerType = dynamic_cast<ayt::reflect::IContainerTypeInfo*>(paramType)) {
             // R4.1 (2026-07-13): std::vector<T> / std::array<T, N>
             // arg. Lua-side: a 1-indexed table. Bridge:
@@ -892,9 +967,11 @@ int ayt_reflect_call_method_c(lua_State* L)
             }
 
             if (!elementType) {
-                int32_t v = 0;
-                std::memcpy(&argSlots[i], &v, sizeof(int32_t));
-                argPtrs[i] = &argSlots[i];
+                ayt::log::error(
+                    "ayt_reflect_call_method: %s.%s parameter %zu has no container element type",
+                    typeName.c_str(), methodName.c_str(), i);
+                lua_pushnil(L);
+                return 1;
             } else {
                 const char* ename = elementType->getName();
                 const bool elemIsInt    = (ename && (std::strcmp(ename, "int") == 0
@@ -910,7 +987,8 @@ int ayt_reflect_call_method_c(lua_State* L)
                     // these and the std::array<std::string, N> case below.
                     ayt::log::warn("ayt_reflect_call_method: container element type '%s' not yet supported in R4.1b",
                                    ename ? ename : "(null)");
-                    argPtrs[i] = nullptr;
+                    lua_pushnil(L);
+                    return 1;
                 } else if (isFixedSize && (elemIsInt || elemIsFloat)) {
                     // R4.1: std::array<T, N> of primitive — unchanged path.
                     const size_t elemSize = elemIsInt ? sizeof(int32_t) : sizeof(float);
@@ -1167,14 +1245,19 @@ int ayt_reflect_call_method_c(lua_State* L)
                         delete static_cast<std::string*>(p);
                     });
                 } else if (outIsStruct) {
-                    // R4.2 struct out-param: heap-alloc T, fill from
-                    // Lua table if user passed one (input + output),
-                    // else zero-init. After invoke, write-back loop
-                    // pushes a Lua table with each field's new value.
-                    size_t typeSize = paramType->getSize();
-                    if (typeSize == 0) typeSize = sizeof(uint64_t);
-                    void* mem = ::operator new(typeSize);
-                    std::memset(mem, 0, typeSize);
+                    // Defensive fallback for a future type implementation
+                    // that reports struct semantics outside the earlier
+                    // getFieldCount branch. Preserve C++ object lifetime here
+                    // as well.
+                    void* mem = paramType->create();
+                    if (!mem) {
+                        ayt::log::error(
+                            "ayt_reflect_call_method: %s.%s out parameter %zu type '%s' could not be constructed",
+                            typeName.c_str(), methodName.c_str(), i,
+                            outTname ? outTname : "(null)");
+                        lua_pushnil(L);
+                        return 1;
+                    }
                     if (lua_istable(L, stackIdx)) {
                         size_t fieldCount = paramType->getFieldCount();
                         for (size_t fi = 0; fi < fieldCount; ++fi) {
@@ -1189,7 +1272,10 @@ int ayt_reflect_call_method_c(lua_State* L)
                         }
                     }
                     argPtrs[i] = mem;
-                    registerCleanup(mem, [](void* p) { ::operator delete(p); });
+                    auto* constructedType = paramType;
+                    registerCleanup(mem, [constructedType](void* p) {
+                        constructedType->destroy(p);
+                    });
                 } else {
                     // Truly unsupported out-param type (double, bool,
                     // container, unknown). Fall through to int (no
@@ -1198,31 +1284,18 @@ int ayt_reflect_call_method_c(lua_State* L)
                     // for these types until a future R4.x ships them.
                     ayt::log::warn("ayt_reflect_call_method: out-param type '%s' not yet supported",
                                    outTname ? outTname : "(null)");
-                    int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
-                    std::memcpy(&argSlots[i], &v, sizeof(int32_t));
-                    argPtrs[i] = &argSlots[i];
+                    lua_pushnil(L);
+                    return 1;
                 }
             } else {
-                // Unknown type tag — treat as int (enums ride on this
-                // path; the C++ enum auto-converts from int via
-                // std::underlying_type_t in MethodInfoImpl::readArg).
-                int32_t v = static_cast<int32_t>(lua_tointeger(L, stackIdx));
-                std::memcpy(&argSlots[i], &v, sizeof(int32_t));
-                argPtrs[i] = &argSlots[i];
+                ayt::log::error(
+                    "ayt_reflect_call_method: %s.%s parameter %zu type '%s' is unsupported",
+                    typeName.c_str(), methodName.c_str(), i, tname);
+                lua_pushnil(L);
+                return 1;
             }
         }
     }
-
-    // RAII: free heap-allocated arg slots when scope exits,
-    // regardless of whether invoke() succeeded.
-    struct ScopeGuard {
-        std::vector<HeapSlot>* q;
-        ~ScopeGuard() {
-            for (auto& s : *q) {
-                if (s.ptr && s.deleter) s.deleter(s.ptr);
-            }
-        }
-    } guard{&cleanup};
 
     const void* retPtr = method->invoke(selfPtr, argPtrs.data());
 
@@ -1298,22 +1371,16 @@ int ayt_reflect_call_method_c(lua_State* L)
         return 0;
     }
     if (retType == nullptr) {
-        // R3.0: retType is null for return types that aren't
-        // registered as AYReflect types (e.g. C++ enum before R3.5
-        // registerEnum). The MethodInfoImpl stored the
-        // underlying-type int in retPtr; push it as a Lua integer.
-        // R3.5: when registerEnum<E>() ran, retType is EnumTypeInfo
-        // and the typed branch below handles it — this fallback
-        // remains for unregistered enums only.
-        int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
-        lua_pushinteger(L, static_cast<lua_Integer>(v));
+        ayt::log::error(
+            "ayt_reflect_call_method: %s.%s returned an unregistered type",
+            typeName.c_str(), methodName.c_str());
+        lua_pushnil(L);
         return 1;
     }
 
-    // Push the return value. retPtr points into the thread-local
-    // return buffer (owned by MethodInfoImpl::detail::tlsReturnBuffer)
-    // — valid until the next invoke() call. We read it into a Lua
-    // value before any further script execution.
+    // Push the return value. retPtr points into MethodInfoImpl's typed
+    // thread-local return slot and remains valid until the next return of
+    // the same C++ type on this thread.
     const char* tname = retType->getName();
     if (std::strcmp(tname, "int") == 0 || std::strcmp(tname, "Int32") == 0
         || std::strcmp(tname, "int32_t") == 0) {
@@ -1449,13 +1516,10 @@ int ayt_reflect_call_method_c(lua_State* L)
             lua_settable(L, outerIdx);
         }
     } else {
-        // Unknown return type — most commonly an unregistered enum
-        // that somehow got a non-null retType, or a future type.
-        // MethodInfoImpl stores the underlying-type int in retPtr;
-        // push it. Registered enums take the IEnumTypeInfo branch
-        // above (R3.5).
-        int32_t v = 0; std::memcpy(&v, retPtr, sizeof(int32_t));
-        lua_pushinteger(L, static_cast<lua_Integer>(v));
+        ayt::log::error(
+            "ayt_reflect_call_method: %s.%s return type '%s' is unsupported",
+            typeName.c_str(), methodName.c_str(), tname ? tname : "(null)");
+        lua_pushnil(L);
     }
     return 1;
 }
@@ -1465,6 +1529,50 @@ int ayt_reflect_call_method_c(lua_State* L)
 // ------------------------------------------------------------
 
 struct LogiaRuntimeBridge::Impl {
+    static constexpr std::size_t kLuaMemoryLimitBytes = 64u * 1024u * 1024u;
+    static constexpr int kLuaInstructionBudget = 1'000'000;
+
+    struct LuaMemoryBudget {
+        std::size_t used = 0;
+        std::size_t peak = 0;
+    } memoryBudget;
+
+    static void* luaAllocator(void* userData, void* ptr,
+                              std::size_t oldSize, std::size_t newSize)
+    {
+        auto* budget = static_cast<LuaMemoryBudget*>(userData);
+        const std::size_t accountedOld = ptr ? oldSize : 0u;
+        const std::size_t base = budget->used >= accountedOld
+            ? budget->used - accountedOld
+            : 0u;
+
+        if (newSize == 0u) {
+            std::free(ptr);
+            budget->used = base;
+            return nullptr;
+        }
+        if (newSize > kLuaMemoryLimitBytes - base) {
+            return nullptr;
+        }
+
+        void* next = std::realloc(ptr, newSize);
+        if (!next) return nullptr;
+        budget->used = base + newSize;
+        if (budget->used > budget->peak) budget->peak = budget->used;
+        return next;
+    }
+
+    static void instructionBudgetHook(lua_State* L, lua_Debug*)
+    {
+        luaL_error(L, "Logia execution instruction budget exceeded");
+    }
+
+    void resetExecutionBudget()
+    {
+        lua_sethook(lua.lua_state(), &instructionBudgetHook,
+                    LUA_MASKCOUNT, kLuaInstructionBudget);
+    }
+
     // sol::state is non-copyable and non-movable; pimpl it.
     sol::state lua;
 
@@ -1480,6 +1588,73 @@ struct LogiaRuntimeBridge::Impl {
     // populate it from its own context if it wants `getLastError`
     // to carry an absolute path.
     std::unordered_map<std::string, logia::LogiaSourceMap> sourceMaps;
+
+    // EventBus outlives the Lua VM, so every subscription created by a
+    // script must be disconnected before its sol::function is destroyed.
+    std::vector<std::string> eventOwnerStack;
+    std::unordered_map<ayt::event::ConnectionId, std::string> eventOwners;
+    std::unordered_map<std::string,
+        std::unordered_set<ayt::event::ConnectionId>> eventConnections;
+
+    std::string currentEventOwner() const
+    {
+        return eventOwnerStack.empty() ? std::string{} : eventOwnerStack.back();
+    }
+
+    void enterEventOwner(const std::string& owner)
+    {
+        eventOwnerStack.push_back(owner);
+    }
+
+    void leaveEventOwner()
+    {
+        if (!eventOwnerStack.empty()) eventOwnerStack.pop_back();
+    }
+
+    void trackEventConnection(const std::string& owner,
+                              ayt::event::ConnectionId id)
+    {
+        if (id == ayt::event::kInvalidConnectionId) return;
+        eventOwners[id] = owner;
+        eventConnections[owner].insert(id);
+    }
+
+    void forgetEventConnection(ayt::event::ConnectionId id)
+    {
+        auto ownerIt = eventOwners.find(id);
+        if (ownerIt == eventOwners.end()) return;
+        auto connectionsIt = eventConnections.find(ownerIt->second);
+        if (connectionsIt != eventConnections.end()) {
+            connectionsIt->second.erase(id);
+            if (connectionsIt->second.empty()) eventConnections.erase(connectionsIt);
+        }
+        eventOwners.erase(ownerIt);
+    }
+
+    void unsubscribeEventConnections(const std::string& owner)
+    {
+        auto it = eventConnections.find(owner);
+        if (it == eventConnections.end()) return;
+        std::vector<ayt::event::ConnectionId> ids(it->second.begin(), it->second.end());
+        eventConnections.erase(it);
+        auto& bus = ayt::event::EventBus::instance();
+        for (auto id : ids) {
+            eventOwners.erase(id);
+            bus.unsubscribe(id);
+        }
+    }
+
+    void unsubscribeAllEventConnections()
+    {
+        std::vector<ayt::event::ConnectionId> ids;
+        ids.reserve(eventOwners.size());
+        for (const auto& entry : eventOwners) ids.push_back(entry.first);
+        eventOwners.clear();
+        eventConnections.clear();
+        eventOwnerStack.clear();
+        auto& bus = ayt::event::EventBus::instance();
+        for (auto id : ids) bus.unsubscribe(id);
+    }
 
     // S5 ED-03 (2026-07-15): last Lua runtime error captured by
     // `callLifecycle` (and by chunk-load errors in `loadScript`).
@@ -1515,9 +1690,11 @@ struct LogiaRuntimeBridge::Impl {
     struct CompileCacheEntry {
         std::string generatedLua;
         logia::LogiaSourceMap sourceMap;  // S5 ED-03
+        std::vector<logia::CompilerError> diagnostics;
         bool compileOk = false;  // captures success/failure once.
     };
-    std::unordered_map<std::size_t, CompileCacheEntry> _compileCache;
+    std::unordered_map<CompileCacheKey, CompileCacheEntry,
+                       CompileCacheKeyHash> _compileCache;
 
     // S3.6: hit/miss counters exposed via the public API.
     // _hits counts loadScript calls that found a matching entry and
@@ -1531,6 +1708,21 @@ struct LogiaRuntimeBridge::Impl {
     // until ~Impl or ensureLua() on the next loadScript/initialize.
     // Avoids eager sol::state{} replacement on shutdown's stack frame.
     bool _luaLive = false;
+    const std::thread::id ownerThread = std::this_thread::get_id();
+
+    bool isOwnerThread() const noexcept
+    {
+        return std::this_thread::get_id() == ownerThread;
+    }
+
+    bool requireOwnerThread(const char* operation) const noexcept
+    {
+        if (isOwnerThread()) return true;
+        ayt::log::error(
+            "LogiaRuntimeBridge::%s rejected: call must run on the runtime owner thread",
+            operation ? operation : "(unknown)");
+        return false;
+    }
 
     Impl()
     {
@@ -1543,13 +1735,23 @@ struct LogiaRuntimeBridge::Impl {
         if (_luaLive) {
             return;
         }
-        lua = sol::state{};
+        lua = sol::state(&sol::default_at_panic, &luaAllocator, &memoryBudget);
         lua.open_libraries(
             sol::lib::base,
             sol::lib::string,
             sol::lib::table,
             sol::lib::math,
             sol::lib::utf8);
+        // Logia scripts are data-driven engine code, not general-purpose Lua
+        // loaders. Remove base-library escape hatches and protected-call
+        // wrappers so an instruction-budget error cannot be swallowed in an
+        // endless pcall loop.
+        lua["dofile"] = sol::nil;
+        lua["loadfile"] = sol::nil;
+        lua["load"] = sol::nil;
+        lua["pcall"] = sol::nil;
+        lua["xpcall"] = sol::nil;
+        resetExecutionBudget();
         // S3.10: register int/float/bool/... so any host (Component,
         // System, Tool) emitting ayt_reflect_*_field calls finds
         // a non-null ITypeInfo for the field. Idempotent across
@@ -1687,7 +1889,23 @@ struct LogiaRuntimeBridge::Impl {
         // connect through the bus (design §14.5.1). EventHandler host
         // (INT-04b) uses the same ambient surface via loadEventHandler.
         // deferred to INT-04b.
-        installLogiaEventAmbient(lua, ayt::event::EventBus::instance());
+        LogiaEventHooks eventHooks;
+        eventHooks.isRuntimeThread = [this] { return isOwnerThread(); };
+        eventHooks.resetExecutionBudget = [this] { resetExecutionBudget(); };
+        eventHooks.currentOwner = [this] { return currentEventOwner(); };
+        eventHooks.onSubscribed = [this](const std::string& owner,
+                                         ayt::event::ConnectionId id) {
+            trackEventConnection(owner, id);
+        };
+        eventHooks.onUnsubscribed = [this](ayt::event::ConnectionId id) {
+            forgetEventConnection(id);
+        };
+        eventHooks.enterOwner = [this](const std::string& owner) {
+            enterEventOwner(owner);
+        };
+        eventHooks.leaveOwner = [this] { leaveEventOwner(); };
+        installLogiaEventAmbient(lua, ayt::event::EventBus::instance(),
+                                 std::move(eventHooks));
 
         // LG-05 / S3.3: AYReflect-backed self.field read/write.
         // Registered as plain lua_CFunction entries (raw
@@ -1740,10 +1958,14 @@ struct LogiaRuntimeBridge::Impl {
 LogiaRuntimeBridge::LogiaRuntimeBridge()
     : _impl(std::make_unique<Impl>()) {}
 
-LogiaRuntimeBridge::~LogiaRuntimeBridge() = default;
+LogiaRuntimeBridge::~LogiaRuntimeBridge()
+{
+    if (_impl) shutdown();
+}
 
 bool LogiaRuntimeBridge::initialize()
 {
+    if (!_impl->requireOwnerThread("initialize")) return false;
     _impl->ensureLua();
     if (_impl->initialized) return true;
     _impl->initialized = true;
@@ -1752,6 +1974,10 @@ bool LogiaRuntimeBridge::initialize()
 
 void LogiaRuntimeBridge::shutdown()
 {
+    if (!_impl || !_impl->requireOwnerThread("shutdown")) return;
+    // EventBus is process-global and can otherwise retain protected Lua
+    // functions after the VM has been reset or destroyed.
+    _impl->unsubscribeAllEventConnections();
     _impl->scripts.clear();
     // S5 ED-03 (2026-07-15): also clear the per-script source maps.
     // Paired with `scripts` so a post-shutdown loadScript starts
@@ -1779,7 +2005,9 @@ void LogiaRuntimeBridge::shutdown()
 
 bool LogiaRuntimeBridge::isInitialized() const
 {
-    return _impl->initialized;
+    return _impl && _impl->requireOwnerThread("isInitialized")
+        ? _impl->initialized
+        : false;
 }
 
 bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
@@ -1803,6 +2031,13 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
                                     const logia::LogiaHostContext& ctx,
                                     std::vector<logia::CompilerError>& errors)
 {
+    if (!_impl->requireOwnerThread("loadScript")) {
+        errors.clear();
+        errors.emplace_back(logia::ErrorCode::InvalidOperation,
+                            "loadScript must run on the Lua runtime owner thread",
+                            0, 0);
+        return false;
+    }
     _impl->ensureLua();
     errors.clear();
 
@@ -1811,7 +2046,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     // sol::state can be reset by shutdown() or affected by error
     // paths; caching only the *compile-side* output is correct and
     // matches the spec ("skips Lexer/Parser/Semantic/Codegen").
-    const std::size_t cacheKey = makeCacheKey(logiaSource, ctx);
+    const CompileCacheKey cacheKey = makeCacheKey(logiaSource, ctx);
     auto cacheIt = _impl->_compileCache.find(cacheKey);
     std::string cachedLua;
     logia::LogiaSourceMap cachedMap;  // S5 ED-03: cache-hit's source map.
@@ -1822,6 +2057,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         ++_impl->_compileHits;
         cachedLua = cacheIt->second.generatedLua;
         cachedMap = cacheIt->second.sourceMap;
+        errors = cacheIt->second.diagnostics;
         cachedOk  = cacheIt->second.compileOk;
     } else {
         ++_impl->_compileMisses;
@@ -1837,17 +2073,8 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         sourceMap = cachedMap;  // S5 ED-03
         luaOk  = cachedOk;
         if (!luaOk) {
-            // Cached compile-failure: surface the same error a fresh
-            // compile would have produced (we cached a non-empty
-            // error report on miss; for now we just bail with a
-            // generic "cached compile failed" entry — full diagnostic
-            // replay is a follow-up if a unit test needs it).
-            logia::CompilerError ce;
-            ce.code = logia::ErrorCode::InvalidOperation;
-            ce.message = "Cached compile failed for script '" + scriptName + "'";
-            ce.line = 0;
-            ce.column = 0;
-            errors.push_back(std::move(ce));
+            // A failed compile is a cacheable result too. Replay the exact
+            // diagnostics so editor output is identical on hit and miss.
             _impl->scripts.erase(scriptName);
             // S5 ED-03: drop the cached source map too so
             // `hasScript` and `sourceMaps` stay in sync (the
@@ -1864,12 +2091,13 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         logia::LogiaToLuaResult pipeline =
             logia::compileLogiaToLua(logiaSource, ctx, opts);
         if (!pipeline.success) {
-            errors = std::move(pipeline.errors);
+            errors = pipeline.errors;
             _impl->scripts.erase(scriptName);
             _impl->sourceMaps.erase(scriptName);  // S5 ED-03
             _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
                 std::string{},
                 logia::LogiaSourceMap{},  // S5 ED-03: default-constructed.
+                errors,
                 false,
             };
             return false;
@@ -1886,12 +2114,14 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         _impl->_compileCache[cacheKey] = Impl::CompileCacheEntry{
             luaSrc,
             sourceMap,
+            {},
             true,
         };
     }
 
     // 3. Execute the Lua chunk in sol::state (runs on every call —
     //    safe_script rebinds the chunk into the live sol::state).
+    _impl->resetExecutionBudget();
     auto result = _impl->lua.safe_script(luaSrc, sol::script_pass_on_error);
     if (!result.valid()) {
         sol::error err = result;
@@ -1969,6 +2199,13 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
                                       const logia::LogiaHostContext& ctx,
                                       std::vector<logia::CompilerError>& errors)
 {
+    if (!_impl->requireOwnerThread("reloadScript")) {
+        errors.clear();
+        errors.emplace_back(logia::ErrorCode::InvalidOperation,
+                            "reloadScript must run on the Lua runtime owner thread",
+                            0, 0);
+        return false;
+    }
     // S3.7a failure policy: snapshot the prior module so a failed
     // reload does not detach the previously-loaded script. A
     // successful loadScript will overwrite the map entry; a
@@ -1982,14 +2219,51 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
         prior = priorIt->second;  // sol::table is a cheap handle copy
         hadPrior = true;
     }
+    logia::LogiaSourceMap priorMap;
+    bool hadPriorMap = false;
+    auto priorMapIt = _impl->sourceMaps.find(scriptName);
+    if (priorMapIt != _impl->sourceMaps.end()) {
+        priorMap = priorMapIt->second;
+        hadPriorMap = true;
+    }
 
     const bool ok = loadScript(scriptName, logiaSource, ctx, errors);
     if (!ok && hadPrior) {
         // loadScript erased the entry on failure; restore the
         // prior good module so the running game keeps its binding.
         _impl->scripts[scriptName] = prior;
+        if (hadPriorMap) _impl->sourceMaps[scriptName] = priorMap;
     }
-    return ok;
+    if (!ok) return false;
+
+    if (ctx.kind == logia::LogiaHostKind::EventHandler) {
+        // Swap handler registrations only after the replacement module has
+        // compiled and loaded. If its bind step fails, restore and rebind the
+        // previous module so hot reload is transactional.
+        _impl->unsubscribeEventConnections(scriptName);
+        if (!callLifecycle(scriptName, "run", nullptr, nullptr)) {
+            const auto bindError = getLastError();
+            _impl->unsubscribeEventConnections(scriptName);
+            if (hadPrior) {
+                _impl->scripts[scriptName] = prior;
+                if (hadPriorMap) _impl->sourceMaps[scriptName] = priorMap;
+                (void)callLifecycle(scriptName, "run", nullptr, nullptr);
+            } else {
+                _impl->scripts.erase(scriptName);
+                _impl->sourceMaps.erase(scriptName);
+            }
+            _impl->_lastError = bindError;
+            errors.emplace_back(
+                logia::ErrorCode::InvalidOperation,
+                bindError.luaMessage.empty()
+                    ? "Event handler '" + scriptName + "' has no runnable run() entry"
+                    : "Event handler bind failed: " + bindError.luaMessage,
+                bindError.logiaLoc.line,
+                bindError.logiaLoc.column);
+            return false;
+        }
+    }
+    return true;
 }
 
 // S3.8b (LG-07) — ToolRunner one-shot entry point.
@@ -2017,49 +2291,87 @@ bool LogiaRuntimeBridge::runTool(const std::string& scriptName,
     // function (the no-self contract). We pass nullptr for both
     // receiver and arg2 for clarity; callLifecycle ignores them on
     // the `run` path.
-    return callLifecycle(scriptName, "run", nullptr, nullptr);
+    if (callLifecycle(scriptName, "run", nullptr, nullptr)) return true;
+    const auto runtimeError = getLastError();
+    errors.emplace_back(
+        logia::ErrorCode::InvalidOperation,
+        runtimeError.luaMessage.empty()
+            ? "Tool '" + scriptName + "' has no runnable run() entry"
+            : "Tool run failed: " + runtimeError.luaMessage,
+        runtimeError.logiaLoc.line,
+        runtimeError.logiaLoc.column);
+    return false;
 }
 
 bool LogiaRuntimeBridge::loadEventHandler(const std::string& scriptName,
                                           const std::string& logiaSource,
                                           std::vector<logia::CompilerError>& errors)
 {
+    if (!_impl->requireOwnerThread("loadEventHandler")) {
+        errors.clear();
+        errors.emplace_back(logia::ErrorCode::InvalidOperation,
+                            "loadEventHandler must run on the Lua runtime owner thread",
+                            0, 0);
+        return false;
+    }
     errors.clear();
+    if (_impl->scripts.find(scriptName) != _impl->scripts.end()) {
+        return reloadScript(scriptName, logiaSource,
+                            logia::eventHandlerLogiaHostContext(), errors);
+    }
     if (!loadScript(scriptName, logiaSource,
                     logia::eventHandlerLogiaHostContext(), errors)) {
         return false;
     }
     // Bind entry: run() registers ambient event.subscribe handlers.
-    return callLifecycle(scriptName, "run", nullptr, nullptr);
+    _impl->unsubscribeEventConnections(scriptName);
+    if (callLifecycle(scriptName, "run", nullptr, nullptr)) return true;
+    const auto runtimeError = getLastError();
+    _impl->unsubscribeEventConnections(scriptName);
+    _impl->scripts.erase(scriptName);
+    _impl->sourceMaps.erase(scriptName);
+    errors.emplace_back(
+        logia::ErrorCode::InvalidOperation,
+        runtimeError.luaMessage.empty()
+            ? "Event handler '" + scriptName + "' has no runnable run() entry"
+            : "Event handler bind failed: " + runtimeError.luaMessage,
+        runtimeError.logiaLoc.line,
+        runtimeError.logiaLoc.column);
+    return false;
 }
 
 // S3.6 — compile-cache observability. Counters live on _impl so the
 // public methods delegate without holding a separate state.
 std::size_t LogiaRuntimeBridge::compileCacheHitCount() const noexcept
 {
-    return _impl ? _impl->_compileHits : 0u;
+    return _impl && _impl->requireOwnerThread("compileCacheHitCount")
+        ? _impl->_compileHits
+        : 0u;
 }
 
 std::size_t LogiaRuntimeBridge::compileCacheMissCount() const noexcept
 {
-    return _impl ? _impl->_compileMisses : 0u;
+    return _impl && _impl->requireOwnerThread("compileCacheMissCount")
+        ? _impl->_compileMisses
+        : 0u;
 }
 
 void LogiaRuntimeBridge::resetCompileCacheCounters() noexcept
 {
-    if (!_impl) return;
+    if (!_impl || !_impl->requireOwnerThread("resetCompileCacheCounters")) return;
     _impl->_compileHits = 0;
     _impl->_compileMisses = 0;
 }
 
 void LogiaRuntimeBridge::clearCompileCache() noexcept
 {
-    if (!_impl) return;
+    if (!_impl || !_impl->requireOwnerThread("clearCompileCache")) return;
     _impl->_compileCache.clear();
 }
 
 bool LogiaRuntimeBridge::hasScript(const std::string& scriptName) const
 {
+    if (!_impl || !_impl->requireOwnerThread("hasScript")) return false;
     return _impl->scripts.find(scriptName) != _impl->scripts.end();
 }
 
@@ -2068,7 +2380,8 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
                                        void* receiver,
                                        void* arg2)
 {
-    if (!_impl || !_impl->_luaLive) {
+    if (!_impl || !_impl->requireOwnerThread("callLifecycle")
+        || !_impl->_luaLive) {
         return false;
     }
     auto it = _impl->scripts.find(scriptName);
@@ -2082,10 +2395,17 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
         return false;
     }
 
+    _impl->enterEventOwner(scriptName);
+    struct EventOwnerGuard {
+        Impl* impl;
+        ~EventOwnerGuard() { impl->leaveEventOwner(); }
+    } eventOwnerGuard{_impl.get()};
+
     // `receiver` is the ScriptComponent*. S2 changed the Lua `self`
     // argument from the scriptName string (S1 placeholder) to the
     // actual receiver pointer — sol2 5.5+ pushes a raw typed pointer
     // through lua_pushlightuserdata without an explicit wrapper.
+    _impl->resetExecutionBudget();
     sol::protected_function_result r;
     if (methodName == "on_update") {
         // on_update(self, dt) — second param from arg2 pointer.
@@ -2219,7 +2539,9 @@ logia::SourceLocation translateLuaErrorToLogia(
 LogiaRuntimeBridge::TranslatedRuntimeError
 LogiaRuntimeBridge::getLastError() const noexcept
 {
-    return _impl ? _impl->_lastError : TranslatedRuntimeError{};
+    return _impl && _impl->requireOwnerThread("getLastError")
+        ? _impl->_lastError
+        : TranslatedRuntimeError{};
 }
 
 // ------------------------------------------------------------
@@ -2228,7 +2550,8 @@ LogiaRuntimeBridge::getLastError() const noexcept
 
 void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
 {
-    if (!_impl || !_impl->_luaLive) return;
+    if (!_impl || !_impl->requireOwnerThread("tickAmbient")
+        || !_impl->_luaLive) return;
     if (scaledDelta < 0.0f) scaledDelta = 0.0f;
     _impl->_currentDelta = scaledDelta;
     _impl->_totalElapsed += scaledDelta;
@@ -2245,33 +2568,42 @@ void LogiaRuntimeBridge::tickAmbient(float scaledDelta)
 
 float LogiaRuntimeBridge::currentDelta() const noexcept
 {
-    return _impl ? _impl->_currentDelta : 0.0f;
+    return _impl && _impl->requireOwnerThread("currentDelta")
+        ? _impl->_currentDelta
+        : 0.0f;
 }
 
 float LogiaRuntimeBridge::totalElapsed() const noexcept
 {
-    return _impl ? _impl->_totalElapsed : 0.0f;
+    return _impl && _impl->requireOwnerThread("totalElapsed")
+        ? _impl->_totalElapsed
+        : 0.0f;
 }
 
 void LogiaRuntimeBridge::setInputProvider(InputProvider* provider) noexcept
 {
-    if (!_impl) return;
+    if (!_impl || !_impl->requireOwnerThread("setInputProvider")) return;
     _impl->_input = provider ? provider : &g_defaultInputProvider;
 }
 
 LogiaRuntimeBridge::InputProvider* LogiaRuntimeBridge::inputProvider() const noexcept
 {
-    return _impl ? _impl->_input : &g_defaultInputProvider;
+    return _impl && _impl->requireOwnerThread("inputProvider")
+        ? _impl->_input
+        : &g_defaultInputProvider;
 }
 
 void* LogiaRuntimeBridge::implHandle()
 {
-    return _impl.get();
+    return _impl && _impl->requireOwnerThread("implHandle")
+        ? _impl.get()
+        : nullptr;
 }
 
 std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
 {
-    if (_impl == nullptr || name == nullptr || !_impl->_luaLive) return {};
+    if (_impl == nullptr || !_impl->requireOwnerThread("getLuaGlobalString")
+        || name == nullptr || !_impl->_luaLive) return {};
     sol::object obj = _impl->lua[name];
     if (obj.is<std::string>()) {
         return obj.as<std::string>();
@@ -2281,7 +2613,8 @@ std::string LogiaRuntimeBridge::getLuaGlobalString(const char* name) const
 
 bool LogiaRuntimeBridge::tryGetLuaGlobalNumber(const char* name, double& out) const
 {
-    if (_impl == nullptr || name == nullptr || !_impl->_luaLive) return false;
+    if (_impl == nullptr || !_impl->requireOwnerThread("tryGetLuaGlobalNumber")
+        || name == nullptr || !_impl->_luaLive) return false;
     sol::object obj = _impl->lua[name];
     if (!obj.valid()) return false;
     if (obj.get_type() == sol::type::number) {

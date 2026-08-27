@@ -71,6 +71,36 @@ script Empty {
     CHECK(contains(lua, "return M"));
 }
 
+TEST_CASE(codegen_instance_reuse_resets_source_map_state) {
+    Compiler firstCompiler;
+    Compiler secondCompiler;
+    auto firstProgram = firstCompiler.compile(R"(
+script First {
+    on_start() { log.info("first") }
+}
+)");
+    auto secondProgram = secondCompiler.compile(R"(
+script Second {
+    on_start() { log.info("second") }
+}
+)");
+    CHECK(firstProgram.success);
+    CHECK(secondProgram.success);
+    CHECK(firstProgram.program != nullptr);
+    CHECK(secondProgram.program != nullptr);
+
+    LuaCodegen codegen;
+    auto first = codegen.generate(*firstProgram.program);
+    auto second = codegen.generate(*secondProgram.program);
+    CHECK(first.success);
+    CHECK(second.success);
+
+    int secondLines = 0;
+    for (char ch : second.source) if (ch == '\n') ++secondLines;
+    CHECK(second.sourceMap.luaLineToSource.size()
+          == static_cast<size_t>(secondLines + 1));
+}
+
 TEST_CASE(codegen_var_with_int) {
     const char* src = R"(
 script Foo {

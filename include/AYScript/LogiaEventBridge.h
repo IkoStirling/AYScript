@@ -9,8 +9,23 @@
 
 #include <sol/sol.hpp>
 
+#include <functional>
+#include <string>
+
 namespace ayt::script
 {
+
+struct LogiaEventHooks {
+    // EventBus publishers may run on worker threads. The callback must verify
+    // runtime affinity before touching sol::function or any Lua-owned state.
+    std::function<bool()> isRuntimeThread;
+    std::function<void()> resetExecutionBudget;
+    std::function<std::string()> currentOwner;
+    std::function<void(const std::string&, ayt::event::ConnectionId)> onSubscribed;
+    std::function<void(ayt::event::ConnectionId)> onUnsubscribed;
+    std::function<void(const std::string&)> enterOwner;
+    std::function<void()> leaveOwner;
+};
 
 /// Register builtin aliases on `bus` (idempotent).
 /// Aliases: window_resize, window_close, resource_ready, script_test_ping,
@@ -21,6 +36,8 @@ void registerBuiltinEventAliases(ayt::event::EventBus& bus);
 /// Install ambient `event.emit` / `event.subscribe` / `event.unsubscribe`
 /// into the Lua state. Soft-fails unknown aliases (log + skip / return 0).
 /// Scene aliases are subscribe-only (Scene* as lightuserdata); Lua emit soft-fails.
-void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus);
+void installLogiaEventAmbient(sol::state& lua,
+                              ayt::event::EventBus& bus,
+                              LogiaEventHooks hooks = {});
 
 } // namespace ayt::script

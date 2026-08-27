@@ -171,6 +171,9 @@ void ScriptSubSystem::shutdown()
         // destruction and SubSystem deletion; unhooking here is the
         // safe contract.
         _bridge.setInputProvider(nullptr);
+        if (_adapter) {
+            _adapter->detachRuntime();
+        }
         _bridge.shutdown();
         _adapter.reset();
         _initialized = false;
@@ -369,14 +372,16 @@ bool ScriptSubSystem::bindAndLoad(ayt::entity::ScriptComponent& component,
     if (!_bridge.loadScript(name, scriptSource, errors)) {
         return false;
     }
-    component.setBridge(_adapter ? _adapter->asScriptBridge() : nullptr);
+    component.setBridge(_adapter
+        ? _adapter->sharedScriptBridge()
+        : std::shared_ptr<ayt::entity::IScriptBridge>{});
     return true;
 }
 
 void ScriptSubSystem::bindComponent(ayt::entity::ScriptComponent& component)
 {
     if (!_adapter) return;
-    component.setBridge(_adapter->asScriptBridge());
+    component.setBridge(_adapter->sharedScriptBridge());
 }
 
 void ScriptSubSystem::tickComponentHosts(float deltaTime)

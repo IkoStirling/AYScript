@@ -20,6 +20,43 @@ namespace ayt::script
 {
 namespace {
 
+struct OwnedEventHandler {
+    sol::protected_function function;
+    std::string owner;
+    LogiaEventHooks hooks;
+};
+
+template <typename... Args>
+void invokeEventHandler(const std::shared_ptr<OwnedEventHandler>& holder,
+                         const char* label,
+                         Args&&... args)
+{
+    if (holder->hooks.isRuntimeThread
+        && !holder->hooks.isRuntimeThread()) {
+        ayt::log::error(
+            "[INT-04] %s handler rejected: EventBus callback is not on the Lua runtime owner thread",
+            label);
+        return;
+    }
+    if (holder->hooks.resetExecutionBudget) {
+        holder->hooks.resetExecutionBudget();
+    }
+    if (holder->hooks.enterOwner) {
+        holder->hooks.enterOwner(holder->owner);
+    }
+    struct OwnerGuard {
+        const LogiaEventHooks& hooks;
+        ~OwnerGuard() { if (hooks.leaveOwner) hooks.leaveOwner(); }
+    } guard{holder->hooks};
+
+    sol::protected_function_result result =
+        holder->function(std::forward<Args>(args)...);
+    if (!result.valid()) {
+        sol::error err = result;
+        ayt::log::error("[INT-04] %s handler: %s", label, err.what());
+    }
+}
+
 bool readIntArg(const sol::object& o, int& out)
 {
     if (!o.valid()) {
@@ -41,12 +78,12 @@ bool readU64Arg(const sol::object& o, uint64_t& out)
     if (!o.valid()) {
         return false;
     }
-    if (o.is<double>()) {
-        out = static_cast<uint64_t>(o.as<double>());
+    if (o.is<lua_Integer>()) {
+        out = static_cast<uint64_t>(o.as<lua_Integer>());
         return true;
     }
-    if (o.is<int>()) {
-        out = static_cast<uint64_t>(o.as<int>());
+    if (o.is<double>()) {
+        out = static_cast<uint64_t>(o.as<double>());
         return true;
     }
     return false;
@@ -214,7 +251,9 @@ void registerBuiltinEventAliases(ayt::event::EventBus& bus)
     bus.registerAlias<ayt::event::PhysicsCollisionEvent>("physics_collision");
 }
 
-void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
+void installLogiaEventAmbient(sol::state& lua,
+                              ayt::event::EventBus& bus,
+                              LogiaEventHooks hooks)
 {
     registerBuiltinEventAliases(bus);
 
@@ -315,15 +354,17 @@ void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
         return false;
     };
 
-    eventTbl["subscribe"] = [&bus](const std::string& alias,
-                                   sol::protected_function fn) -> double {
+    eventTbl["subscribe"] = [&bus, hooks](const std::string& alias,
+                                          sol::protected_function fn) -> lua_Integer {
         if (!fn.valid()) {
             ayt::log::warn("[INT-04] event.subscribe(\"%s\"): invalid handler", alias.c_str());
-            return 0.0;
+            return 0;
         }
 
-        // Keep a shared_ptr copy so the listener outlives the sol stack.
-        auto holder = std::make_shared<sol::protected_function>(std::move(fn));
+        auto holder = std::make_shared<OwnedEventHandler>();
+        holder->function = std::move(fn);
+        holder->owner = hooks.currentOwner ? hooks.currentOwner() : std::string{};
+        holder->hooks = hooks;
 
         ayt::event::ConnectionId id = ayt::event::kInvalidConnectionId;
 
@@ -331,127 +372,92 @@ void installLogiaEventAmbient(sol::state& lua, ayt::event::EventBus& bus)
             id = bus.subscribeByAlias<ayt::event::WindowResizeEvent>(
                 alias,
                 [holder](const ayt::event::WindowResizeEvent& e) {
-                    sol::protected_function_result r = (*holder)(e.width, e.height);
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] window_resize handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "window_resize", e.width, e.height);
                 });
         } else if (alias == "window_close") {
             id = bus.subscribeByAlias<ayt::event::WindowCloseEvent>(
                 alias,
                 [holder](const ayt::event::WindowCloseEvent&) {
-                    sol::protected_function_result r = (*holder)();
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] window_close handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "window_close");
                 });
         } else if (alias == "resource_ready") {
             id = bus.subscribeByAlias<ayt::event::ResourceLoadCompleteEvent>(
                 alias,
                 [holder](const ayt::event::ResourceLoadCompleteEvent& e) {
-                    sol::protected_function_result r =
-                        (*holder)(static_cast<double>(e.handle), e.refCount, e.ok);
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] resource_ready handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "resource_ready",
+                                       static_cast<lua_Integer>(e.handle), e.refCount, e.ok);
                 });
         } else if (alias == "script_test_ping") {
             id = bus.subscribeByAlias<ayt::event::ScriptTestPingEvent>(
                 alias,
                 [holder](const ayt::event::ScriptTestPingEvent& e) {
-                    sol::protected_function_result r = (*holder)(e.value);
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] script_test_ping handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "script_test_ping", e.value);
                 });
         } else if (alias == "device_action") {
             id = bus.subscribeByAlias<ayt::event::DeviceActionEvent>(
                 alias,
                 [holder](const ayt::event::DeviceActionEvent& e) {
-                    sol::protected_function_result r = (*holder)(e.actionId, e.pressed);
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] device_action handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "device_action", e.actionId, e.pressed);
                 });
         } else if (alias == "task_complete") {
             id = bus.subscribeByAlias<ayt::event::TaskCompleteEvent>(
                 alias,
                 [holder](const ayt::event::TaskCompleteEvent& e) {
-                    sol::protected_function_result r =
-                        (*holder)(static_cast<double>(e.taskId), e.ok);
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] task_complete handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "task_complete",
+                                       static_cast<lua_Integer>(e.taskId), e.ok);
                 });
         } else if (alias == "physics_collision") {
             id = bus.subscribeByAlias<ayt::event::PhysicsCollisionEvent>(
                 alias,
                 [holder](const ayt::event::PhysicsCollisionEvent& e) {
-                    sol::protected_function_result r = (*holder)(
-                        static_cast<double>(e.bodyA),
-                        static_cast<double>(e.bodyB),
-                        static_cast<int>(e.kind));
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] physics_collision handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "physics_collision",
+                                       static_cast<lua_Integer>(e.bodyA),
+                                       static_cast<lua_Integer>(e.bodyB),
+                                       static_cast<int>(e.kind));
                 });
         } else if (alias == "scene_current_changed") {
             // Scene* → lightuserdata (opaque). No full Scene usertype.
             id = bus.subscribeByAlias<ayt::event::SceneCurrentChangedEvent>(
                 alias,
                 [holder](const ayt::event::SceneCurrentChangedEvent& e) {
-                    sol::protected_function_result r =
-                        (*holder)(static_cast<void*>(e.current));
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] scene_current_changed handler: %s",
-                                        err.what());
-                    }
+                    invokeEventHandler(holder, "scene_current_changed",
+                                       static_cast<void*>(e.current));
                 });
         } else if (alias == "scene_begin_play") {
             id = bus.subscribeByAlias<ayt::event::SceneBeginPlayEvent>(
                 alias,
                 [holder](const ayt::event::SceneBeginPlayEvent& e) {
-                    sol::protected_function_result r =
-                        (*holder)(static_cast<void*>(e.play));
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] scene_begin_play handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "scene_begin_play",
+                                       static_cast<void*>(e.play));
                 });
         } else if (alias == "scene_end_play") {
             id = bus.subscribeByAlias<ayt::event::SceneEndPlayEvent>(
                 alias,
                 [holder](const ayt::event::SceneEndPlayEvent& e) {
-                    sol::protected_function_result r =
-                        (*holder)(static_cast<void*>(e.edit));
-                    if (!r.valid()) {
-                        sol::error err = r;
-                        ayt::log::error("[INT-04] scene_end_play handler: %s", err.what());
-                    }
+                    invokeEventHandler(holder, "scene_end_play",
+                                       static_cast<void*>(e.edit));
                 });
         } else {
             ayt::log::warn("[INT-04] event.subscribe(\"%s\"): unknown alias (soft fail)",
                            alias.c_str());
-            return 0.0;
+            return 0;
         }
 
-        return static_cast<double>(id);
+        if (id != ayt::event::kInvalidConnectionId && hooks.onSubscribed) {
+            hooks.onSubscribed(holder->owner, id);
+        }
+        return static_cast<lua_Integer>(id);
     };
 
-    eventTbl["unsubscribe"] = [&bus](double idNum) {
+    eventTbl["unsubscribe"] = [&bus, hooks](lua_Integer idNum) {
         const auto id = static_cast<ayt::event::ConnectionId>(idNum);
         if (id == ayt::event::kInvalidConnectionId) {
             return;
         }
         bus.unsubscribe(id);
+        if (hooks.onUnsubscribed) {
+            hooks.onUnsubscribed(id);
+        }
     };
 
     lua["event"] = eventTbl;

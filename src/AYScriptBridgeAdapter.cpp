@@ -25,6 +25,7 @@
 #include <AYEntity/World.h>
 #include <AYEntity/components/ScriptComponent.h>
 
+#include <atomic>
 #include <cstring>
 
 namespace ayt::script
@@ -41,19 +42,26 @@ public:
     // receiver so `self.<primitiveField>` reads/writes (S3.3) mutate
     // AY_PROPERTY fields on the real component.
     bool call(const char* method, void* arg1, void* arg2) override {
-        if (_bridge == nullptr || method == nullptr) return false;
+        auto* bridge = _bridge.load(std::memory_order_acquire);
+        if (bridge == nullptr || method == nullptr) return false;
         auto* receiver = static_cast<ayt::entity::ScriptComponent*>(arg1);
         const char* scriptName = receiver ? receiver->getScriptName() : "";
-        return _bridge->callLifecycle(scriptName, toLogiaName(method),
-                                      /*receiver*/ arg1, arg2);
+        return bridge->callLifecycle(scriptName, toLogiaName(method),
+                                     /*receiver*/ arg1, arg2);
     }
 
     bool hasScript(const char* scriptName) const override {
-        if (_bridge == nullptr) return false;
-        return _bridge->hasScript(scriptName ? scriptName : "");
+        auto* bridge = _bridge.load(std::memory_order_acquire);
+        if (bridge == nullptr) return false;
+        return bridge->hasScript(scriptName ? scriptName : "");
     }
 
-    LogiaRuntimeBridge* bridge() const { return _bridge; }
+    LogiaRuntimeBridge* bridge() const {
+        return _bridge.load(std::memory_order_acquire);
+    }
+    void detachRuntime() {
+        _bridge.store(nullptr, std::memory_order_release);
+    }
 
 private:
     static const char* toLogiaName(const char* m) {
@@ -64,20 +72,16 @@ private:
         return m; // unknown — bridge returns false (script not found)
     }
 
-    LogiaRuntimeBridge* _bridge; // non-owning
+    std::atomic<LogiaRuntimeBridge*> _bridge; // non-owning, detachable
 };
 
 // === Public surface (defined in the .h forward-decl) ===
 
 LogiaScriptBridgeAdapter::LogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge)
-    : _impl(new Impl(bridge))
+    : _impl(std::make_shared<Impl>(bridge))
 {}
 
-LogiaScriptBridgeAdapter::~LogiaScriptBridgeAdapter()
-{
-    delete _impl;
-    _impl = nullptr;
-}
+LogiaScriptBridgeAdapter::~LogiaScriptBridgeAdapter() = default;
 
 bool LogiaScriptBridgeAdapter::call(const char* method, void* arg1, void* arg2)
 {
@@ -94,9 +98,22 @@ LogiaRuntimeBridge* LogiaScriptBridgeAdapter::bridgePtr() const
     return _impl ? _impl->bridge() : nullptr;
 }
 
+std::shared_ptr<ayt::entity::IScriptBridge>
+LogiaScriptBridgeAdapter::sharedScriptBridge() const
+{
+    return std::static_pointer_cast<ayt::entity::IScriptBridge>(_impl);
+}
+
+void LogiaScriptBridgeAdapter::detachRuntime()
+{
+    if (_impl) {
+        _impl->detachRuntime();
+    }
+}
+
 ayt::entity::IScriptBridge* LogiaScriptBridgeAdapter::asScriptBridge() const
 {
-    return _impl;
+    return _impl.get();
 }
 
 LogiaScriptBridgeAdapter* makeLogiaScriptBridgeAdapter(LogiaRuntimeBridge* bridge)

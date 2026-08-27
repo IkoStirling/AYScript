@@ -98,6 +98,11 @@ LuaCodegenResult LuaCodegen::generate(const Program& program)
     _out.clear();
     _indent = 0;
     _tmpCounter = 0;
+    _sourceMap = {};
+    _luaLineCount = 0;
+    _currentAnchor = {};
+    _currentHostTypeName.clear();
+    _emittingScriptHelper = false;
 
     // S5 ED-03 (2026-07-15): preamble is codegen-internal (no Logia
     // source anchor). writeNoAnchor tracks the line count for the

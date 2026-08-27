@@ -14,10 +14,6 @@ project(AYScript
 option(AY_SCRIPT_USE_COMPILE_TIME_TYPES
        "Use compile-time generated type metadata tables in SemanticAnalyzer (off = runtime TypeRegistry)"
        OFF)
-if(AY_SCRIPT_USE_COMPILE_TIME_TYPES)
-    target_compile_definitions(AYScript PUBLIC AY_SCRIPT_USE_COMPILE_TIME_TYPES=1)
-endif()
-
 # ---- Third-party deps ----
 # sol2 3.5.0 (header-only INTERFACE target) + Lua 5.5 (vcpkg)
 find_package(sol2 CONFIG REQUIRED)
@@ -32,6 +28,10 @@ file(GLOB AYSCRIPT_SOURCES CONFIGURE_DEPENDS
 )
 
 add_library(AYScript STATIC ${AYSCRIPT_SOURCES})
+
+if(AY_SCRIPT_USE_COMPILE_TIME_TYPES)
+    target_compile_definitions(AYScript PUBLIC AY_SCRIPT_USE_COMPILE_TIME_TYPES=1)
+endif()
 
 target_include_directories(AYScript PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
