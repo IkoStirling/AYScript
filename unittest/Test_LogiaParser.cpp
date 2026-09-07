@@ -81,9 +81,8 @@ TEST_CASE(parse_player_controller) {
 
     LifecycleFuncDecl* onUpdate = findLifecycle(script, LifecycleKind::OnUpdate);
     CHECK(onUpdate != nullptr);
-    // S2.5: source still shows `on_update(dt: float)` for clarity
-    // (semantic analyzer soft-warns), but the parser records the
-    // legacy param. The codegen ignores params and emits `(self)`.
+    // Lifecycle parameters are retained so semantic analysis can scope
+    // them and codegen can emit `(self, dt)` for the runtime bridge.
     CHECK(onUpdate->params.size() == 1u);
     CHECK(onUpdate->params[0].name == "dt");
 

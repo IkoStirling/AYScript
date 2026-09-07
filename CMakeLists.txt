@@ -48,7 +48,7 @@ target_include_directories(AYScript PUBLIC
 # PUBLIC link so INT-04 (AYScript/LogiaEventBridge.h → AYEventSystem/EventBus.h) stays
 # reachable even if GameLoop's dep surface changes.
 target_link_libraries(AYScript
-    PUBLIC  AYLog AYGameLoop AYEntity AYReflect AYEventSystem
+    PUBLIC  AY::Module AYLog AYGameLoop AYEntityCore AYReflect AYEventSystem
     PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO AYTime
 )
 

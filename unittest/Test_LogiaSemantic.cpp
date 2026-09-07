@@ -2,7 +2,7 @@
 //
 // Verifies that SemanticAnalyzer:
 //   - hard-errors on unknown var type names
-//   - hard-errors on lifecycle functions declared with parameters
+//   - scopes and validates lifecycle parameters
 //   - hard-errors on `get_component(...)` (S2.5 removed)
 //   - soft-warns on member access where the field doesn't exist on a
 //     registered type
@@ -20,6 +20,8 @@
 #include "AYReflect.h"
 #include "AYReflectMacros.h"
 
+#include <fstream>
+#include <iterator>
 #include <string>
 
 using namespace ayt::script::logia;
@@ -228,19 +230,19 @@ script Foo {
     CHECK_NOT_NULL(findVar(*r.program, "e"));
 }
 
-TEST_CASE(semantic_lifecycle_with_params_is_warning) {
-    // S2.5: lifecycle functions take no parameters. The parser forgives
-    // non-empty param lists (for backward compat) and SemanticAnalyzer
-    // emits a soft warning. The compile still succeeds.
+TEST_CASE(semantic_lifecycle_params_are_scoped) {
     Compiler c;
     auto r = c.compile(R"(
 script Foo {
-    on_start(entity: Entity) {
+    on_update(dt: float) {
+        var copy: float = dt
     }
 }
 )");
     CHECK(r.success);
-    CHECK(hasWarning(r, ErrorCode::InvalidStatement));
+    CHECK_FALSE(hasWarningWithMessage(
+        r, "lifecycle functions take no parameters"));
+    CHECK_FALSE(hasWarningWithMessage(r, "implicit global 'dt'"));
 }
 
 TEST_CASE(semantic_get_component_is_soft_warning) {
@@ -391,28 +393,19 @@ script Foo {
 }
 
 TEST_CASE(semantic_player_controller_example_compiles) {
-    // The canonical example from examples/player_controller.logia.
-    const char* src = R"(
-script PlayerController {
-    var tick_counter: int = 0
-
-    on_start() {
-        tick_counter = 0
-    }
-
-    on_update(dt: float) {
-        tick_counter = tick_counter + 1
-        if input.is_pressed("jump") {
-            self.position.y = self.position.y + self.jump_force * dt
-        }
-        self.position.x = self.position.x + self.speed * dt
-    }
-
-    on_destroy() {
-        log.info("PlayerController destroyed")
-    }
-}
-)";
+#ifndef AYSCRIPT_TEST_SOURCE_DIR
+#error "AYSCRIPT_TEST_SOURCE_DIR must point at the AYScript source tree"
+#endif
+    // Compile the real example rather than an embedded copy. The two had
+    // drifted far enough that the file shipped by AYEditor failed while this
+    // test remained green.
+    const std::string path = std::string(AYSCRIPT_TEST_SOURCE_DIR)
+        + "/examples/player_controller.logia";
+    std::ifstream stream(path, std::ios::binary);
+    CHECK(stream.is_open());
+    if (!stream.is_open()) return;
+    const std::string src((std::istreambuf_iterator<char>(stream)),
+                          std::istreambuf_iterator<char>());
     // Note: `script PlayerController` itself is not registered with
     // AYReflect (only Transform/HealthComponent are). SemanticAnalyzer
     // emits a soft warning on the unknown script name; the compile

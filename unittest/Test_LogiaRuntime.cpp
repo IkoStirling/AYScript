@@ -150,10 +150,8 @@ script Broken {
     CHECK_FALSE(bridge.hasScript("Broken"));
 }
 
-TEST_CASE(runtime_load_lifecycle_with_param_is_warning) {
-    // S2.5: lifecycle functions take no parameters. The parser
-    // forgives non-empty param lists; SemanticAnalyzer emits a soft
-    // warning. The compile still succeeds.
+TEST_CASE(runtime_load_lifecycle_with_param) {
+    // Declared lifecycle parameters are accepted and forwarded to Lua.
     LogiaRuntimeBridge bridge;
     const char* src = R"(
 script BadLifecycle {

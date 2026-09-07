@@ -6,10 +6,15 @@ AYScript 是 Logia 脚本语言与运行时模块，提供 Lexer/Parser/语义�
 
 ```cpp
 #include <AYScript.h>
+#include <AYScript/ScriptRuntimeModule.h>
 #include <AYScript/ScriptRuntimeBridge.h>
 #include <AYScript/ScriptSubSystem.h>
 #include <AYScript/logia/Logia.h>
 ```
+
+默认 Client / Server / Editor Host 通过 `ScriptRuntimeModule`
+（`AYScript.Runtime`）安装脚本子系统；直接构造或注册 `ScriptSubSystem` 仍可用于独立 Demo
+与测试。
 
 ## 依赖
 

@@ -150,8 +150,18 @@ TEST_CASE(int01_editor_binding_drives_scriptcomponent_at_1x) {
 
     auto* ent = world.createEntity();
     CHECK(ent != nullptr);
+    if (ent == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        nukeScratch();
+        return;
+    }
     auto* comp = ent->addComponent<ayt::entity::ScriptComponent>();
     CHECK(comp != nullptr);
+    if (comp == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        nukeScratch();
+        return;
+    }
     comp->setScriptName("INT01Counter");
 
     std::vector<CompilerError> errors;
@@ -197,7 +207,18 @@ TEST_CASE(int01_hot_reload_swaps_lua_after_file_edit) {
 
     auto* ent = world.createEntity();
     CHECK(ent != nullptr);
+    if (ent == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        nukeScratch();
+        return;
+    }
     auto* comp = ent->addComponent<ayt::entity::ScriptComponent>();
+    CHECK(comp != nullptr);
+    if (comp == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        nukeScratch();
+        return;
+    }
     comp->setScriptName("INT01Counter");
 
     std::vector<CompilerError> errors;
@@ -283,8 +304,16 @@ TEST_CASE(runtime_shutdown_before_world_teardown_keeps_component_bridge_safe) {
 
     auto* ent = world.createEntity();
     CHECK(ent != nullptr);
+    if (ent == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        return;
+    }
     auto* comp = ent->addComponent<ayt::entity::ScriptComponent>();
     CHECK(comp != nullptr);
+    if (comp == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        return;
+    }
     comp->setScriptName("INT01Counter");
 
     std::vector<CompilerError> errors;

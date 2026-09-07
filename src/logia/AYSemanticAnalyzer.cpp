@@ -1297,18 +1297,49 @@ void SemanticAnalyzer::analyzeVarDecl(VarDeclStmt& v)
 
 void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
 {
-    // S2.5: lifecycle functions take no parameters. The parser silently
-    // drops a non-empty parameter list (forgiving old S1 code), so we
-    // report it here as a soft warning. The S2.5 codegen also ignores
-    // the params field — `self` is always the only argument emitted.
-    if (!fn.params.empty()) {
-        LogiaDiagnostic d;
-        d.severity = DiagnosticSeverity::Warning;
-        d.errorCode = ErrorCode::InvalidStatement;
-        d.location = sourceLocFor(&fn);   // S5 ED-02: lifecycle-keyword loc
-        d.message = "lifecycle functions take no parameters in S2.5";
-        d.hint = "use 'self' for the receiver; read entity context via World::instance()";
-        report(d);
+    // Lifecycle parameters are part of the emitted Lua signature. For
+    // example, `on_update(dt: float)` becomes
+    // `function M.on_update(self, dt)`, and the runtime bridge supplies
+    // the matching tick argument. Keep those names in function scope so
+    // reads do not fall through to the Lua-style implicit-global path.
+    //
+    // `_scope` also contains script-level vars, so every overwritten
+    // entry is restored after this lifecycle body. This keeps parameters
+    // function-local even when two lifecycle methods reuse a name.
+    std::vector<std::pair<std::string, std::optional<ScopeEntry>>> savedParams;
+    std::unordered_set<std::string> savedNames;
+    savedParams.reserve(fn.params.size());
+    for (const auto& param : fn.params) {
+        if (savedNames.insert(param.name).second) {
+            const auto existing = _scope.find(param.name);
+            if (existing == _scope.end()) {
+                savedParams.emplace_back(param.name, std::nullopt);
+            } else {
+                savedParams.emplace_back(param.name, existing->second);
+            }
+        }
+
+        const bool builtIn = isBuiltInType(param.typeName);
+        const auto* paramType = _registry
+            ? _registry->findType(param.typeName.c_str())
+            : nullptr;
+        if (!builtIn && !paramType) {
+            LogiaDiagnostic d;
+            d.severity = DiagnosticSeverity::Error;
+            d.errorCode = ErrorCode::TypeMismatch;
+            d.location = sourceLocFor(&fn);
+            d.message = "lifecycle parameter '" + param.name
+                      + "' has unknown type '" + param.typeName + "'";
+            d.hint = "register the type with AYReflect or use a built-in "
+                     "(int, float, bool, string, Entity)";
+            report(d);
+            continue;
+        }
+
+        ScopeEntry entry;
+        entry.type = paramType;
+        entry.decl = nullptr;
+        _scope[param.name] = entry;
     }
 
     // S3.1 (LG-04): the System host (ctx.kind == System) defines its
@@ -1407,6 +1438,14 @@ void SemanticAnalyzer::analyzeLifecycle(LifecycleFuncDecl& fn)
         if (s) analyzeStmt(*s);
     }
     _labelStack.pop_back();
+
+    for (auto it = savedParams.rbegin(); it != savedParams.rend(); ++it) {
+        if (it->second.has_value()) {
+            _scope[it->first] = *it->second;
+        } else {
+            _scope.erase(it->first);
+        }
+    }
 }
 
 // R5.0 (2026-07-13): walk a while loop's condition and body.

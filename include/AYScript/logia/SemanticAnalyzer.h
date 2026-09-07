@@ -17,12 +17,11 @@
 //   - `self.field` / `self.field.subfield` — must resolve against AYReflect fields
 //
 // Hard errors:
-//   - Unknown type name on a var declaration
-//   - Unknown script name (must match a registered host type)
-//   - Reference to an undeclared identifier
-//   - Lifecycle function declared with parameters
+//   - Unknown type name on a var declaration or function parameter
+//   - Invalid statically-checkable control-flow/type contracts
 //
 // Soft warnings (compile passes):
+//   - Unknown script name (runtime binding may be supplied later)
 //   - Member access where the field doesn't exist on a registered type
 //   - Undeclared identifier read (Lua-style implicit global)
 

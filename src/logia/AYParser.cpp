@@ -1,8 +1,9 @@
 // AYParser.cpp
 //
 // S2.5 redesign (2026-07-07): `component` → `script`, `export` removed,
-// lifecycle functions take no parameters, `get_component(...)` is no
-// longer parsed (it was an S0-S2 path that S2.5 replaces with `self`).
+// and `get_component(...)` is no longer parsed (it was an S0-S2 path
+// that S2.5 replaces with `self`). Lifecycle parameters are forwarded
+// to Lua and scoped by SemanticAnalyzer.
 
 #include "AYScript/logia/Parser.h"
 #include <stdexcept>

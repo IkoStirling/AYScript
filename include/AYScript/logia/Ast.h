@@ -371,15 +371,13 @@ struct Param {
 
 class LifecycleFuncDecl : public Stmt {
 public:
-    // S2.5: lifecycle functions take no parameters. The parser
-    // records the original parameter list (so SemanticAnalyzer can
-    // emit a soft warning for old-style `on_start(entity: Entity)` /
-    // `on_update(dt: float)` code) but emits the Lua function with
-    // just `(self)` — the params don't reach Lua.
+    // Lifecycle parameters are forwarded to the generated Lua function
+    // after the optional `self` receiver. The semantic analyzer also
+    // exposes them only within this function body's scope.
     LifecycleFuncDecl(LifecycleKind kind, std::vector<Param> params, std::vector<StmtPtr> body)
         : kind(kind), params(std::move(params)), body(std::move(body)) {}
     LifecycleKind kind;
-    std::vector<Param> params;   // S2.5: diagnostic only, not emitted
+    std::vector<Param> params;
     std::vector<StmtPtr> body;
 };
 

@@ -25,6 +25,10 @@ target_include_directories(${TEST_NAME} PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+target_compile_definitions(${TEST_NAME} PRIVATE
+    AYSCRIPT_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
+)
+
 target_link_libraries(${TEST_NAME} PRIVATE
     AYScript
     AYTest
