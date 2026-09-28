@@ -22,3 +22,5 @@ AYScript 是 Logia 脚本语言与运行时模块，提供 Lexer/Parser/语义�
 - 内部：AYIO、sol2、Lua
 
 Logia 语法、宿主接口和跨模块事件边界见 [design.md](design.md)。
+
+测试按 fast/integration 分层，统计使用注册用例数；入口见[统一测试契约](../../AYDocs/testing.md)。

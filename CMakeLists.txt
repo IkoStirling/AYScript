@@ -69,4 +69,4 @@ add_subdirectory(cli)
 enable_testing()
 add_subdirectory(unittest)
 
-message(STATUS "AYScript v0.2.0 (Logia 1284 cases + S4.1 signal/connect/disconnect) — see ${CMAKE_CURRENT_SOURCE_DIR}/design.md")
+message(STATUS "AYScript v0.2.0 (Logia case-based regression + S4.1 signal/connect/disconnect) — see ${CMAKE_CURRENT_SOURCE_DIR}/design.md")

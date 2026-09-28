@@ -45,4 +45,5 @@ target_link_libraries(${TEST_NAME} PRIVATE
     AYDeviceSubSystem
 )
 
-ay_add_test(${TEST_NAME})
+ay_add_test_tiers(${TEST_NAME} PREFIX script TIMEOUT 120
+    INTEGRATION_SUITES LogiaCliTests LogiaHotReloadWatcherTests LogiaScriptSubSystemPlayTests)
