@@ -1,7 +1,7 @@
 // main.cpp - ays-logia CLI executable entry point.
 //
 // Usage:
-//   ays-logia compile <file.logia> [--host component|system|tool|eventhandler]
+//   ays-logia compile <file.logia> [--host component|actor|system|tool|eventhandler]
 //                                [--strict-inheritance]
 //                                [-o out.lua]
 //
@@ -35,7 +35,7 @@ namespace
 {
 
 const char* kUsage =
-    "Usage: ays-logia compile <file.logia> [--host component|system|tool|eventhandler]\n"
+    "Usage: ays-logia compile <file.logia> [--host component|actor|system|tool|eventhandler]\n"
     "                                [--strict-inheritance]\n"
     "                                [-o out.lua]\n"
     "\n"
@@ -65,6 +65,7 @@ bool parseHostKind(const std::string& s,
 {
     using ayt::script::logia::LogiaHostKind;
     if (s == "component") { out = LogiaHostKind::Component; return true; }
+    if (s == "actor")     { out = LogiaHostKind::Actor;     return true; }
     if (s == "system")    { out = LogiaHostKind::System;    return true; }
     if (s == "tool")      { out = LogiaHostKind::Tool;      return true; }
     if (s == "eventhandler") {
@@ -72,7 +73,7 @@ bool parseHostKind(const std::string& s,
         return true;
     }
     err = "unknown --host kind '" + s
-          + "' (expected component|system|tool|eventhandler)";
+          + "' (expected component|actor|system|tool|eventhandler)";
     return false;
 }
 

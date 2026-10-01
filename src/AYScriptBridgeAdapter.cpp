@@ -24,6 +24,7 @@
 
 #include <AYEntity/World.h>
 #include <AYEntity/components/ScriptComponent.h>
+#include <AYEntity/components/ActorInstanceComponent.h>
 
 #include <atomic>
 #include <cstring>
@@ -46,6 +47,10 @@ public:
         if (bridge == nullptr || method == nullptr) return false;
         auto* receiver = static_cast<ayt::entity::ScriptComponent*>(arg1);
         const char* scriptName = receiver ? receiver->getScriptName() : "";
+        if (auto* actor = dynamic_cast<ayt::entity::ActorScriptComponent*>(receiver)) {
+            return bridge->callActorLifecycle(scriptName, toLogiaName(method),
+                                              *actor, arg2);
+        }
         return bridge->callLifecycle(scriptName, toLogiaName(method),
                                      /*receiver*/ arg1, arg2);
     }

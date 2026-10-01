@@ -1140,8 +1140,9 @@ void SemanticAnalyzer::analyzeScript(ScriptDecl& s)
     // host-kind-specific hint text below tells the user which C++ side
     // binding to add (AY_SYSTEM for ECS systems, ScriptComponent for
     // entity scripts).
-    auto* selfType = resolveScriptName(s.name, 0, 0);
-    if (!selfType) {
+    auto* selfType = _ctx.kind == LogiaHostKind::Actor
+        ? nullptr : resolveScriptName(s.name, 0, 0);
+    if (!selfType && _ctx.kind != LogiaHostKind::Actor) {
         LogiaDiagnostic d;
         d.severity = DiagnosticSeverity::Warning;
         d.errorCode = ErrorCode::UnknownIdentifier;

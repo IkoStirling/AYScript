@@ -131,6 +131,55 @@ script INT01Counter {
 
 TEST_SUITE(LogiaScriptSubSystemPlayTests)
 
+TEST_CASE(binding_after_attach_starts_once_and_destroys_once) {
+    auto& world = ayt::entity::World::instance();
+    logia_test::resetWorldForTest(world);
+    auto sub = std::make_unique<ScriptSubSystem>();
+    CHECK(sub->initialize());
+
+    auto* entity = world.createEntity();
+    CHECK(entity != nullptr);
+    if (entity == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        return;
+    }
+    auto* component = entity->addComponent<ayt::entity::ScriptComponent>();
+    CHECK(component != nullptr);
+    if (component == nullptr) {
+        logia_test::shutdownScriptHost(world, sub.get());
+        return;
+    }
+    component->setScriptName("LifecycleProbe");
+    std::vector<CompilerError> errors;
+    CHECK(sub->bindAndLoad(*component, R"(
+script LifecycleProbe {
+    var starts: int = 0
+    var destroys: int = 0
+    on_start() {
+        starts = starts + 1
+        __lifecycle_start = starts
+    }
+    on_destroy() {
+        destroys = destroys + 1
+        __lifecycle_destroy = destroys
+    }
+}
+)", errors));
+    CHECK(errors.empty());
+    double count = 0.0;
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__lifecycle_start", count));
+    CHECK(count == 1.0);
+    entity->onStart();
+    component->activateScript();
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__lifecycle_start", count));
+    CHECK(count == 1.0);
+
+    world.destroyEntity(entity);
+    CHECK(sub->bridge().tryGetLuaGlobalNumber("__lifecycle_destroy", count));
+    CHECK(count == 1.0);
+    logia_test::shutdownScriptHost(world, sub.get());
+}
+
 TEST_CASE(int01_editor_binding_drives_scriptcomponent_at_1x) {
     // INT-01 P0: bind + tick via ScriptSubSystem::update → the
     // ScriptComponent's `onUpdate(dt)` lifecycle routes through the

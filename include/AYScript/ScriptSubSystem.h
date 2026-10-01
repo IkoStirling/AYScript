@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ayt::entity { class ScriptComponent; }
@@ -137,6 +138,9 @@ public:
                              const std::string& filePath,
                              std::vector<logia::CompilerError>& errors);
 
+    /// Bind class behavior for Actor instances in the active World.
+    void bindActorHosts();
+
     // Number of successful reloadScript calls applied by the watcher
     // coordinator (observability for tests).
     [[nodiscard]] std::size_t hotReloadApplyCount() const;
@@ -156,6 +160,7 @@ private:
 
     ayt::game::SubSystemDescriptor _descriptor;
     bool _initialized = false;
+    std::unordered_map<std::string, std::string> _actorScriptPaths;
 };
 
 } // namespace ayt::script

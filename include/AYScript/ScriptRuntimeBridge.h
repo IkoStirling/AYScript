@@ -8,6 +8,8 @@
 #include "AYScript/logia/CompilerError.h"
 #include "AYScript/logia/Logia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
+namespace ayt::entity { struct ActorScriptComponent; }
+
 namespace ayt::script
 {
 
@@ -371,7 +373,9 @@ namespace ayt::script
 //       2026-08-15 R1 (ScriptVisible / ScriptReadOnly): bump 30 → 31.
 //       Semantic rejects non-visible / read-only field access;
 //       runtime set_field no-ops ScriptReadOnly.
-constexpr std::size_t kLogiaPipelineVersion = 31u;
+//       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
+//       assignment no longer duplicates intermediate member names.
+constexpr std::size_t kLogiaPipelineVersion = 32u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -585,6 +589,13 @@ public:
                        void* receiver = nullptr,
                        void* arg2 = nullptr);
 
+    /// Dispatch an Actor class with a persistent, per-instance Lua self table.
+    /// Declared primitive properties are synchronized back after each call.
+    bool callActorLifecycle(const std::string& scriptName,
+                            const std::string& methodName,
+                            ayt::entity::ActorScriptComponent& actor,
+                            void* arg2 = nullptr);
+
     // === S3.5 — ambient API real-time bindings (was: mock in S1) ===
 
     // Plumb the per-tick scaled delta (and accumulate elapsed time)
@@ -650,6 +661,10 @@ public:
     bool tryGetLuaGlobalNumber(const char* name, double& out) const;
 
 private:
+    bool callLifecycleImpl(const std::string& scriptName,
+                           const std::string& methodName,
+                           void* receiver, void* arg2,
+                           ayt::entity::ActorScriptComponent* actor);
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };

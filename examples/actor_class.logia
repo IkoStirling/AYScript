@@ -1,0 +1,12 @@
+// Actor class example: EnemyActor.ayactor declares hp and this script path.
+// Check with: ays-logia compile actor_class.logia --host actor
+script EnemyActor {
+    on_start() {
+        self.hp = self.hp - 1
+    }
+
+    on_update(dt: float) {
+        self.hp = self.hp - 2
+        self.transform.position.x = self.transform.position.x + dt
+    }
+}

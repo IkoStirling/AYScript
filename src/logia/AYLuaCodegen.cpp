@@ -1250,10 +1250,6 @@ std::string LuaCodegen::emitAssignmentTarget(const Expr& target)
     decl += " = ";
     if (auto* m = dynamic_cast<const MemberExpr*>(&target)) {
         decl += emitExpr(*m->object);
-        for (size_t i = 1; i + 1 < rev.size(); ++i) {
-            decl += ".";
-            decl += rev[i];
-        }
     } else {
         decl += "nil";
     }
@@ -1353,20 +1349,7 @@ std::string LuaCodegen::emitCompoundRhs(const Expr& target,
                                        const std::string& op,
                                        const Expr& rhs)
 {
-    std::vector<std::string> members;
-    std::string lhsStr;
-    if (collectMemberChain(target, members)) {
-        std::vector<std::string> rev(members.rbegin(), members.rend());
-        if (auto* m = dynamic_cast<const MemberExpr*>(&target)) {
-            lhsStr = emitExpr(*m->object);
-            for (size_t i = 1; i < rev.size(); ++i) {
-                lhsStr += ".";
-                lhsStr += rev[i];
-            }
-        }
-    } else {
-        lhsStr = emitExpr(target);
-    }
+    const std::string lhsStr = emitExpr(target);
     std::string rhsStr = emitExpr(rhs);
     std::string out;
     out += lhsStr;

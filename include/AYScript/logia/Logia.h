@@ -33,6 +33,7 @@ enum class LogiaHostKind {
     System,       // S3.1 (LG-04) — ISystem tick
     Tool,         // S3+    — editor/CLI one-shot
     EventHandler, // S3+    — event-bus callback object
+    Actor,        // Actor class — per-instance Lua self table, no C++ host type
 };
 
 // Caller-supplied description of the C++ host a `script` block binds to.
@@ -73,6 +74,12 @@ inline LogiaHostContext defaultLogiaHostContext()
         true,
         false,
     };
+}
+
+/// Actor class host: `self` is an instance table backed by ECS state.
+inline LogiaHostContext actorLogiaHostContext()
+{
+    return LogiaHostContext{LogiaHostKind::Actor, nullptr, true, false};
 }
 
 // S3.8b: Tool host context — one-shot editor / CLI scripts.

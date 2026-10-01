@@ -16,6 +16,10 @@
 #include <AYEntity/World.h>
 #include <AYEntity/EntityImpl.h>
 #include <AYEntity/components/ScriptComponent.h>
+#include <AYEntity/components/ActorInstanceComponent.h>
+#include <AYEntity/ActorClassAsset.h>
+#include <nlohmann/json.hpp>
+#include <filesystem>
 
 #include <cstdint>
 #include <memory>
@@ -121,6 +125,7 @@ bool ScriptSubSystem::initialize()
 
 void ScriptSubSystem::update(float deltaTime)
 {
+    bindActorHosts();
     pollAndApplyReloads();
     _bridge.tickAmbient(deltaTime);
     tickLogiaSystems(_bridge, deltaTime);
@@ -129,6 +134,7 @@ void ScriptSubSystem::update(float deltaTime)
 
 void ScriptSubSystem::fixedUpdate(float fixedDeltaTime)
 {
+    bindActorHosts();
     pollAndApplyReloads();
     _bridge.tickAmbient(fixedDeltaTime);
     tickLogiaSystems(_bridge, fixedDeltaTime);
@@ -145,6 +151,7 @@ void ScriptSubSystem::tick(ayt::game::FramePhase phase,
     }
 
     if (phase == ayt::game::FramePhase::Gameplay) {
+        bindActorHosts();
         // File IO and ambient/visual scripts are variable-rate work. In a
         // headless host without Entity, this also supplies the component path.
         pollAndApplyReloads();
@@ -161,6 +168,7 @@ void ScriptSubSystem::shutdown()
 
     stopHotReload();
     _hotReload.reset();
+    _actorScriptPaths.clear();
 
     if (_initialized) {
         // INT-02 (2026-07-15): unhook any injected InputProvider so
@@ -298,6 +306,86 @@ bool ScriptSubSystem::bindAndLoadFromFile(
     return true;
 }
 
+void ScriptSubSystem::bindActorHosts()
+{
+    if (!_initialized) return;
+    for (auto* entity : ayt::entity::World::instance().getAllEntities()) {
+        if (!entity || !entity->isValid()) continue;
+        auto* instance = entity->getComponent<ayt::entity::ActorInstanceComponent>();
+        if (!instance || instance->runtimeBindingAttempted) continue;
+        instance->runtimeBindingAttempted = true;
+        std::string error;
+        ayt::entity::ActorClassAsset asset;
+        if (!ayt::entity::resolveActorClassAsset(instance->assetsRoot,
+                instance->classPath, asset, &error)) {
+            ayt::log::error("Actor '%s': %s", entity->getName(), error.c_str());
+            continue;
+        }
+        if (asset.scriptPath.empty()) continue;
+        try {
+            auto properties = nlohmann::json::parse(asset.propertiesJson);
+            const auto overrides = nlohmann::json::parse(instance->propertyOverridesJson);
+            if (!overrides.is_object()) throw std::runtime_error("properties override must be object");
+            for (auto it = overrides.begin(); it != overrides.end(); ++it) {
+                if (!properties.contains(it.key())
+                    || !((properties[it.key()].is_number() && it.value().is_number())
+                         || (properties[it.key()].is_boolean() && it.value().is_boolean())
+                         || (properties[it.key()].is_string() && it.value().is_string()))) {
+                    throw std::runtime_error("invalid Actor property override: " + it.key());
+                }
+                properties[it.key()] = it.value();
+            }
+            auto* script = entity->addComponent<ayt::entity::ActorScriptComponent>();
+            if (!script) throw std::runtime_error("ActorScriptComponent is unavailable");
+            for (auto it = properties.begin(); it != properties.end(); ++it) {
+                if (it.value().is_boolean()) script->properties[it.key()] = it.value().get<bool>();
+                else if (it.value().is_number()) script->properties[it.key()] = it.value().get<double>();
+                else if (it.value().is_string()) script->properties[it.key()] = it.value().get<std::string>();
+            }
+            script->setScriptName(asset.id.c_str());
+            std::string scriptPath;
+            if (!ayt::entity::resolveActorScriptPath(instance->assetsRoot,
+                    asset.scriptPath, scriptPath, &error)) {
+                throw std::runtime_error(error);
+            }
+            const auto existing = _actorScriptPaths.find(asset.id);
+            if (existing != _actorScriptPaths.end()) {
+                if (existing->second != scriptPath) {
+                    throw std::runtime_error("Actor class id is already bound to another script: "
+                        + asset.id);
+                }
+                bindComponent(*script);
+                continue;
+            }
+            if (_bridge.hasScript(asset.id)) {
+                throw std::runtime_error("Actor class id conflicts with an existing Logia script: "
+                    + asset.id);
+            }
+            std::vector<logia::CompilerError> errors;
+            const auto context = logia::actorLogiaHostContext();
+            const std::string source = ayt::io::File::readAllText(scriptPath);
+            if (source.empty()) throw std::runtime_error(
+                "Actor Logia source is empty or unreadable: " + scriptPath);
+            if (_bridge.loadScript(asset.id, source, context, errors)) {
+                bindComponent(*script);
+                if (!watchScriptPath(asset.id, scriptPath, context)) {
+                    ayt::log::warn("Actor '%s': could not watch Logia source '%s'",
+                        entity->getName(), scriptPath.c_str());
+                }
+                _actorScriptPaths.emplace(asset.id, scriptPath);
+            } else {
+                for (const auto& diagnostic : errors) {
+                    ayt::log::error("Actor '%s' %d:%d %s", entity->getName(),
+                        diagnostic.line, diagnostic.column,
+                        diagnostic.message.c_str());
+                }
+            }
+        } catch (const std::exception& ex) {
+            ayt::log::error("Actor '%s': %s", entity->getName(), ex.what());
+        }
+    }
+}
+
 std::size_t ScriptSubSystem::hotReloadApplyCount() const
 {
     return _hotReload ? _hotReload->applyCount : 0u;
@@ -346,12 +434,21 @@ void ScriptSubSystem::pollAndApplyReloads()
         const std::string source =
             ayt::io::File::readAllText(entry.normalizedPath);
         if (source.empty()) {
+            ayt::log::error("Logia reload skipped for '%s': source is empty or unreadable; existing script remains unchanged",
+                            entry.normalizedPath.c_str());
             continue;
         }
 
         std::vector<logia::CompilerError> errors;
         if (_bridge.reloadScript(entry.scriptName, source, entry.ctx, errors)) {
             ++_hotReload->applyCount;
+        } else {
+            ayt::log::error("Logia reload failed for '%s'; existing script remains unchanged",
+                            entry.normalizedPath.c_str());
+            for (const auto& error : errors) {
+                ayt::log::error("  %d:%d %s", error.line, error.column,
+                                error.message.c_str());
+            }
         }
     }
 }

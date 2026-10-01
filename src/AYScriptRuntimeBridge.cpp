@@ -12,6 +12,9 @@
 #include "AYScript/LogiaEventBridge.h"
 #include "AYScript/logia/Logia.h"
 #include "AYScript/logia/LogiaPipeline.h"
+#include <AYEntity/components/ActorInstanceComponent.h>
+#include <AYEntity/components/TransformComponent.h>
+#include <AYEntity/EntityImpl.h>
 
 #define SOL_ALL_SAFETIES_ON 1
 #define SOL_SAFE_NUMERICS   1
@@ -1578,6 +1581,7 @@ struct LogiaRuntimeBridge::Impl {
 
     // scriptName → module table (the table returned by the chunk)
     std::unordered_map<std::string, sol::table> scripts;
+    std::unordered_map<void*, sol::table> actorSelf;
 
     // S5 ED-03 (2026-07-15): per-script LogiaSourceMap indexed by
     // scriptName — paired with `scripts` so a `callLifecycle` Lua
@@ -1979,6 +1983,7 @@ void LogiaRuntimeBridge::shutdown()
     // functions after the VM has been reset or destroyed.
     _impl->unsubscribeAllEventConnections();
     _impl->scripts.clear();
+    _impl->actorSelf.clear();
     // S5 ED-03 (2026-07-15): also clear the per-script source maps.
     // Paired with `scripts` so a post-shutdown loadScript starts
     // from a clean state — no stale Lua → Logia line translations
@@ -2380,6 +2385,21 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
                                        void* receiver,
                                        void* arg2)
 {
+    return callLifecycleImpl(scriptName, methodName, receiver, arg2, nullptr);
+}
+
+bool LogiaRuntimeBridge::callActorLifecycle(
+    const std::string& scriptName, const std::string& methodName,
+    ayt::entity::ActorScriptComponent& actor, void* arg2)
+{
+    return callLifecycleImpl(scriptName, methodName, &actor, arg2, &actor);
+}
+
+bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
+                                           const std::string& methodName,
+                                           void* receiver, void* arg2,
+                                           ayt::entity::ActorScriptComponent* actor)
+{
     if (!_impl || !_impl->requireOwnerThread("callLifecycle")
         || !_impl->_luaLive) {
         return false;
@@ -2392,7 +2412,38 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
     sol::table M = it->second;
     sol::protected_function fn = M[methodName];
     if (!fn.valid()) {
+        if (actor && methodName == "on_destroy") _impl->actorSelf.erase(actor);
         return false;
+    }
+
+    sol::object self;
+    if (actor) {
+        auto [itSelf, inserted] = _impl->actorSelf.try_emplace(actor,
+            _impl->lua.create_table());
+        sol::table& table = itSelf->second;
+        (void)inserted;
+        for (const auto& [key, value] : actor->properties) {
+            std::visit([&](const auto& typed) { table[key] = typed; }, value);
+        }
+        if (auto* entity = actor->getEntity()) {
+            if (auto* transform = entity->getComponent<ayt::entity::Transform>()) {
+                sol::table transformTable = _impl->lua.create_table();
+                sol::table position = _impl->lua.create_table();
+                position["x"] = transform->position.x;
+                position["y"] = transform->position.y;
+                position["z"] = transform->position.z;
+                transformTable["position"] = position;
+                sol::table scale = _impl->lua.create_table();
+                scale["x"] = transform->scale.x;
+                scale["y"] = transform->scale.y;
+                scale["z"] = transform->scale.z;
+                transformTable["scale"] = scale;
+                table["transform"] = transformTable;
+            }
+        }
+        self = sol::make_object(_impl->lua, table);
+    } else {
+        self = sol::make_object(_impl->lua, receiver);
     }
 
     _impl->enterEventOwner(scriptName);
@@ -2410,10 +2461,10 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
     if (methodName == "on_update") {
         // on_update(self, dt) — second param from arg2 pointer.
         float dt = arg2 ? *static_cast<float*>(arg2) : 0.0f;
-        r = fn.call(receiver, dt);
+        r = fn.call(self, dt);
     } else if (methodName == "on_start") {
         // on_start(self, entity) — entity passed as lightuserdata.
-        r = fn.call(receiver, arg2);
+        r = fn.call(self, arg2);
     } else if (methodName == "run") {
         // S3.8b (LG-07): Tool host's run() takes NO args — neither
         // self nor a dt / entity. The ToolRunner passes nullptr for
@@ -2422,7 +2473,7 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
         r = fn.call();
     } else {
         // on_destroy(self) — no extra args.
-        r = fn.call(receiver);
+        r = fn.call(self);
     }
 
     if (!r.valid()) {
@@ -2461,7 +2512,61 @@ bool LogiaRuntimeBridge::callLifecycle(const std::string& scriptName,
             ayt::log::error("Logia call '%s.%s' failed: %s",
                             scriptName.c_str(), methodName.c_str(), msg.c_str());
         }
+        if (actor && methodName == "on_destroy") _impl->actorSelf.erase(actor);
         return false;
+    }
+    if (actor) {
+        const sol::table table = _impl->actorSelf.at(actor);
+        for (auto& [key, value] : actor->properties) {
+            const sol::object field = table[key];
+            if (std::holds_alternative<double>(value) && field.is<double>()) {
+                value = field.as<double>();
+            } else if (std::holds_alternative<bool>(value) && field.is<bool>()) {
+                value = field.as<bool>();
+            } else if (std::holds_alternative<std::string>(value)
+                       && field.is<std::string>()) {
+                value = field.as<std::string>();
+            }
+        }
+        if (auto* entity = actor->getEntity()) {
+            if (auto* transform = entity->getComponent<ayt::entity::Transform>()) {
+                const sol::object transformObject = table["transform"];
+                if (transformObject.is<sol::table>()) {
+                    const sol::table transformTable = transformObject.as<sol::table>();
+                    const auto readVector = [](const sol::table& parent,
+                                               const char* key,
+                                               ayt::math::FVector3& out) {
+                        const sol::object object = parent[key];
+                        if (!object.is<sol::table>()) return false;
+                        const sol::table values = object.as<sol::table>();
+                        const sol::object x = values["x"];
+                        const sol::object y = values["y"];
+                        const sol::object z = values["z"];
+                        if (!x.is<double>() || !y.is<double>() || !z.is<double>())
+                            return false;
+                        out = {static_cast<float>(x.as<double>()),
+                               static_cast<float>(y.as<double>()),
+                               static_cast<float>(z.as<double>())};
+                        return true;
+                    };
+                    ayt::math::FVector3 position;
+                    if (readVector(transformTable, "position", position)
+                        && (position.x != transform->position.x
+                            || position.y != transform->position.y
+                            || position.z != transform->position.z)) {
+                        transform->setPosition(position.x, position.y, position.z);
+                    }
+                    ayt::math::FVector3 scale;
+                    if (readVector(transformTable, "scale", scale)
+                        && (scale.x != transform->scale.x
+                            || scale.y != transform->scale.y
+                            || scale.z != transform->scale.z)) {
+                        transform->setScale(scale.x, scale.y, scale.z);
+                    }
+                }
+            }
+        }
+        if (methodName == "on_destroy") _impl->actorSelf.erase(actor);
     }
     // S5 ED-03 (2026-07-15): successful lifecycle call clears any
     // prior `_lastError`. This matches the semantics spelled out

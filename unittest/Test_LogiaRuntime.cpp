@@ -363,6 +363,31 @@ script ReloadBoom {
     CHECK(runtimeError.logiaLoc.line == 4);
 }
 
+TEST_CASE(failed_reload_keeps_previous_update_behavior) {
+    LogiaRuntimeBridge bridge;
+    std::vector<CompilerError> errors;
+    CHECK(loadFromSource(bridge, "ReloadStable", R"(
+script ReloadStable {
+    on_update(dt: float) { __reload_stable = 7 }
+}
+)", errors));
+    float dt = 0.016f;
+    CHECK(bridge.callLifecycle("ReloadStable", "on_update", nullptr, &dt));
+    double value = 0.0;
+    CHECK(bridge.tryGetLuaGlobalNumber("__reload_stable", value));
+    CHECK(value == 7.0);
+
+    errors.clear();
+    CHECK_FALSE(bridge.reloadScript("ReloadStable", R"(
+script ReloadStable {
+    on_update(dt: float) {
+)", errors));
+    CHECK_FALSE(errors.empty());
+    CHECK(bridge.callLifecycle("ReloadStable", "on_update", nullptr, &dt));
+    CHECK(bridge.tryGetLuaGlobalNumber("__reload_stable", value));
+    CHECK(value == 7.0);
+}
+
 TEST_CASE(s5ed03_bridge_last_error_cleared_by_successful_call) {
     LogiaRuntimeBridge bridge;
     bridge.initialize();
