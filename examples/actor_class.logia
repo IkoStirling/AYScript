@@ -1,4 +1,4 @@
-// Actor class example: EnemyActor.ayactor declares hp and this script path.
+// Actor class example: EnemyActor.act declares hp and this script path.
 // Check with: ays-logia compile actor_class.logia --host actor
 script EnemyActor {
     on_start() {

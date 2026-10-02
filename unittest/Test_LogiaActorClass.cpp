@@ -63,7 +63,7 @@ TEST_CASE(actor_instances_bind_from_class_and_run_in_world)
     asset.propertiesJson = R"({"hp":20})";
     std::string error;
     CHECK(ayt::entity::saveActorClassAsset(
-        (root / "actors/BoundEnemy.ayactor").string(), asset, &error));
+        (root / "actors/BoundEnemy.act").string(), asset, &error));
     {
         std::ofstream script(root / "actors/BoundEnemy.logia");
         script << "script BoundEnemy {\n"
@@ -76,19 +76,19 @@ TEST_CASE(actor_instances_bind_from_class_and_run_in_world)
     }
     ayt::entity::ActorClassAsset child;
     child.id = "EliteEnemy";
-    child.parentPath = "actors/BoundEnemy.ayactor";
+    child.parentPath = "actors/BoundEnemy.act";
     child.propertiesJson = R"({"hp":30})";
     CHECK(ayt::entity::saveActorClassAsset(
-        (root / "actors/EliteEnemy.ayactor").string(), child, &error));
+        (root / "actors/EliteEnemy.act").string(), child, &error));
     auto* first = world.createEntity();
     auto* second = world.createEntity();
     auto* elite = world.createEntity();
     CHECK(ayt::entity::instantiateActorClass(*first, asset,
-        "actors/BoundEnemy.ayactor", root.string(), &error));
+        "actors/BoundEnemy.act", root.string(), &error));
     CHECK(ayt::entity::instantiateActorClass(*second, asset,
-        "actors/BoundEnemy.ayactor", root.string(), &error));
+        "actors/BoundEnemy.act", root.string(), &error));
     CHECK(ayt::entity::instantiateActorClass(*elite, child,
-        "actors/EliteEnemy.ayactor", root.string(), &error));
+        "actors/EliteEnemy.act", root.string(), &error));
     ScriptSubSystem runtime;
     CHECK(runtime.initialize());
     runtime.bindActorHosts();
@@ -113,8 +113,8 @@ TEST_CASE(actor_instances_bind_from_class_and_run_in_world)
     runtime.shutdown();
     world.shutdown();
     fs::remove(root / "actors/BoundEnemy.logia");
-    fs::remove(root / "actors/BoundEnemy.ayactor");
-    fs::remove(root / "actors/EliteEnemy.ayactor");
+    fs::remove(root / "actors/BoundEnemy.act");
+    fs::remove(root / "actors/EliteEnemy.act");
     fs::remove(root / "actors");
     fs::remove(root);
     fs::remove(root.parent_path());
