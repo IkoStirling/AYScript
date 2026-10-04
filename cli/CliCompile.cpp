@@ -61,7 +61,9 @@ CliCompileResult compileFromCli(const CliCompileRequest& req)
     codegenOpts.scriptName = req.sourcePath.empty()
                                  ? std::string{"<inline>"}
                                  : req.sourcePath;
-    LogiaToLuaResult pipeline = compileLogiaToLua(source, req.ctx, codegenOpts);
+    auto context = req.ctx;
+    context.sourcePath = req.sourcePath;
+    LogiaToLuaResult pipeline = compileLogiaToLua(source, context, codegenOpts);
     out.diagnostics = std::move(pipeline.diagnostics);
     out.errors = std::move(pipeline.errors);
     out.lua = std::move(pipeline.lua);

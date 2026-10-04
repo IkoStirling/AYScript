@@ -29,6 +29,7 @@ private:
     std::unique_ptr<Stmt> parseSignalDecl(const Token& signalTok);   // S4.1 (2026-07-15): per-component signal declaration
     std::unique_ptr<Stmt> parseStatement();
     std::vector<Param> parseParamList();
+    std::string parseTypeName(unsigned depth = 0);
 
     std::unique_ptr<Expr> parseExpression();
     std::unique_ptr<Expr> parseBinary(int precedence = 0);

@@ -28,6 +28,7 @@ enum class LifecycleKind {
     OnStart,
     OnUpdate,
     OnDestroy,
+    OnReload,
     Run,            // S3.8b: Tool host entry point (no receiver / no self).
 };
 
@@ -35,6 +36,7 @@ class Expr;
 class Stmt;
 class ScriptDecl;
 class Program;
+class FunctionDeclStmt;
 
 using ExprPtr = std::unique_ptr<Expr>;
 using StmtPtr = std::unique_ptr<Stmt>;
@@ -64,6 +66,9 @@ public:
     // stack arg. nullptr when unresolved.
     const char*                      resolvedMethodOwnerName = nullptr;
     const void*                      resolvedDecl  = nullptr;
+    const FunctionDeclStmt* resolvedFunction = nullptr;
+    bool resolvedInstanceState = false;
+    std::string checkedValueType;
 
     // S5 ED-02 (2026-07-14): source location stamped by the parser
     // at construction. Read by `SemanticAnalyzer::sourceLocFor(Expr*)`
@@ -190,12 +195,22 @@ public:
     // can convert it to a virtual `sourceLoc()` if/when the
     // cast chain becomes a measured hotspot.
     SourceLocation sourceLoc;
+    int closingLine = 0;
 };
 
 class ExprStmt : public Stmt {
 public:
     explicit ExprStmt(ExprPtr expr) : expr(std::move(expr)) {}
     ExprPtr expr;
+};
+
+class AwaitStmt : public Stmt {
+public:
+    ExprPtr operation;
+};
+class ImportStmt : public Stmt {
+public:
+    std::string path;
 };
 
 class VarDeclStmt : public Stmt {
@@ -210,6 +225,7 @@ public:
     std::string name;
     std::string typeName;
     ExprPtr initializer;
+    bool instanceState = false;
 
     // ---- S2: SemanticAnalyzer resolves `typeName` to a registered type. ----
     // nullptr when unresolved (built-in or unregistered — analyzer reports
@@ -399,6 +415,9 @@ public:
           params(std::move(params)),
           body(std::move(body)) {}
     std::string name;
+    /// Empty annotations retain legacy behavior; checked scripts default to void.
+    std::string returnType;
+    bool asynchronous = false;
     std::vector<Param> params;
     std::vector<StmtPtr> body;
 };

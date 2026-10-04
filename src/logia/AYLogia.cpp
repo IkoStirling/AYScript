@@ -4,8 +4,11 @@
 #include "AYScript/logia/Lexer.h"
 #include "AYScript/logia/Parser.h"
 #include "AYScript/logia/SemanticAnalyzer.h"
+#include "AYScript/logia/CheckedSemantics.h"
+#include "AYScript/logia/Modules.h"
 
 #include <algorithm>
+#include <functional>
 #include <memory>
 
 namespace ayt::script::logia
@@ -71,6 +74,41 @@ CompileResult Compiler::compile(const std::string& source,
     // NOT introduce new diagnostics in LG-03 — every existing test
     // that asserted on a S2.5 diagnostic must still pass unchanged.
     if (parserOk) {
+        auto moduleContext = ctx;
+        if (moduleContext.sourcePath.empty()) moduleContext.sourcePath = _options.fileName;
+        auto moduleDiagnostics = expandLogiaModules(*result.program, moduleContext, result.dependencies);
+        for (auto& d : moduleDiagnostics) {
+            result.errors.push_back(d.toCompilerError()); result.diagnostics.push_back(std::move(d));
+        }
+        if (ctx.strictSemantics) {
+            auto diagnostics = checkLogiaSemantics(*result.program, ctx, _options.fileName);
+            for (auto& d : diagnostics) {
+                if (d.severity == DiagnosticSeverity::Error)
+                    result.errors.push_back(d.toCompilerError());
+                result.diagnostics.push_back(std::move(d));
+            }
+        } else {
+        std::function<void(const std::vector<StmtPtr>&)> checkedSyntax;
+        checkedSyntax = [&](const auto& statements) {
+            for (const auto& item : statements) {
+                bool checkedOnly=dynamic_cast<AwaitStmt*>(item.get())!=nullptr;
+                if(auto* function=dynamic_cast<FunctionDeclStmt*>(item.get())){checkedOnly|=!function->returnType.empty();checkedSyntax(function->body);}
+                if(auto* lifecycle=dynamic_cast<LifecycleFuncDecl*>(item.get())){checkedOnly|=lifecycle->kind==LifecycleKind::OnReload;checkedSyntax(lifecycle->body);}
+                if(auto* branch=dynamic_cast<IfStmt*>(item.get())){checkedSyntax(branch->thenBranch);checkedSyntax(branch->elseBranch);}
+                if(auto* loop=dynamic_cast<WhileStmt*>(item.get()))checkedSyntax(loop->body);
+                if(auto* loop=dynamic_cast<ForStmt*>(item.get()))checkedSyntax(loop->body);
+                if(auto* block=dynamic_cast<BlockStmt*>(item.get()))checkedSyntax(block->body);
+                if(checkedOnly){LogiaDiagnostic d{DiagnosticSeverity::Error,ErrorCode::InvalidStatement,"this syntax requires the checked language contract",item->sourceLoc,{}};result.errors.push_back(d.toCompilerError());result.diagnostics.push_back(std::move(d));}
+            }
+        };
+        for(const auto& script:result.program->scripts)checkedSyntax(script->members);
+        for (const auto& script : result.program->scripts)
+            for (const auto& member : script->members)
+                if (auto* var = dynamic_cast<VarDeclStmt*>(member.get()); var && var->instanceState) {
+                    LogiaDiagnostic d{DiagnosticSeverity::Error, ErrorCode::InvalidStatement,
+                        "state declarations require the checked language contract", var->sourceLoc, {}};
+                    result.errors.push_back(d.toCompilerError()); result.diagnostics.push_back(std::move(d));
+                }
         auto sem = std::make_unique<SemanticAnalyzer>(SemanticOptions{
             _options.useCompileTimeTypes,
             _options.fileName.c_str()
@@ -81,6 +119,7 @@ CompileResult Compiler::compile(const std::string& source,
             if (d.severity == DiagnosticSeverity::Error) {
                 result.errors.push_back(d.toCompilerError());
             }
+        }
         }
     }
 

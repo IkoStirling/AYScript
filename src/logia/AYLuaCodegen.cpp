@@ -163,6 +163,45 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
     // LG-05 / S3.3: record the host type name for `self.<field>`
     // reflect-call rewrites. Scope is per-script — reset on exit.
     _currentHostTypeName = script.hostTypeName;
+    if (_options.hostContext.strictSemantics) {
+        for (const auto& member : script.members) {
+            if (auto* var = dynamic_cast<const VarDeclStmt*>(member.get()); var && !var->instanceState) {
+                _currentAnchor = var->sourceLoc;
+                emitLocalVar(*var);
+            }
+        }
+    }
+    if (_options.hostContext.strictSemantics && _options.hostContext.expectSelf) {
+        writeLine("M._instanceState = {}");
+        writeLine("M._stateSchema = {}");
+        for (const auto& member : script.members) {
+            auto* var = dynamic_cast<const VarDeclStmt*>(member.get());
+            if (var && var->instanceState)
+                writeLine("M._stateSchema[\"" + var->name + "\"] = \"" + var->typeName + "\"");
+        }
+        writeLine("function M._get_state(self)");
+        writeLine("    local bag = M._instanceState[self]");
+        writeLine("    if bag then return bag end");
+        writeLine("    bag = {}; M._instanceState[self] = bag");
+        writeLine("    local __state = bag");
+        writeLine("    local old = M._previousState and M._previousState[self]");
+        for (const auto& member : script.members) {
+            auto* var = dynamic_cast<const VarDeclStmt*>(member.get());
+            if (!var || !var->instanceState) continue;
+            _currentAnchor = member->sourceLoc;
+            const auto key = "[\"" + var->name + "\"]";
+            std::string initial = var->initializer ? emitExpr(*var->initializer)
+                : var->typeName == "bool" ? "false" : var->typeName == "string" ? "\"\""
+                : var->typeName.starts_with("array<") ? "__ay_array_new({})"
+                : var->typeName == "table" ? "{}" : var->typeName == "vec3" ? "vec3.new(0,0,0)"
+                : var->typeName == "vec2" ? "{x=0,y=0}" : var->typeName == "quat" ? "quat.identity()" : "0";
+            writeLine("    if old and M._previousSchema" + key + " == M._stateSchema" + key
+                + " then bag" + key + " = old" + key + " else bag" + key + " = " + initial + " end");
+        }
+        writeLine("    if M._previousState then M._previousState[self] = nil end");
+        writeLine("    return bag");
+        writeLine("end");
+    }
 
     // S4.1 (2026-07-15): zero-cost guard. If the script declares
     // no signals, we emit no helper block — `__ay_emit` / `__ay_connect`
@@ -289,6 +328,7 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
     // Var declarations first (locals). Lifecycle functions come next.
     for (const auto& member : script.members) {
         if (auto* var = dynamic_cast<VarDeclStmt*>(member.get())) {
+            if (var->instanceState || _options.hostContext.strictSemantics) continue;
             _currentAnchor = member->sourceLoc;
             emitLocalVar(*var);
         }
@@ -334,7 +374,11 @@ void LuaCodegen::emitLocalVar(const VarDeclStmt& var)
     if (var.initializer) {
         line += emitExpr(*var.initializer);
     } else {
-        line += "nil";
+        line += _options.hostContext.strictSemantics ?
+            (var.typeName.starts_with("array<") ? "__ay_array_new({})" : var.typeName == "bool" ? "false"
+            : var.typeName == "string" ? "\"\"" : var.typeName == "table" ? "{}"
+            : var.typeName == "vec3" ? "vec3.new(0,0,0)" : var.typeName == "vec2" ? "{x=0,y=0}"
+            : var.typeName == "quat" ? "quat.identity()" : "0") : "nil";
     }
     writeLine(line);
 }
@@ -388,6 +432,8 @@ void LuaCodegen::emitLifecycleFunc(const LifecycleFuncDecl& func)
     writeLine(header);
 
     ++_indent;
+    if (_options.hostContext.strictSemantics && _options.hostContext.expectSelf)
+        writeLine("local __state = M._get_state(self)");
     emitBlock(func.body);
     --_indent;
 
@@ -434,15 +480,19 @@ void LuaCodegen::emitFunctionDecl(const FunctionDeclStmt& fn)
     // (matches emitLifecycleFunc's shape — anchor recorded once).
     std::string header;
     header += "function ";
+    if (_options.hostContext.strictSemantics) header += "M.";
     header += fn.name;
     header += "(";
+    if (_options.hostContext.strictSemantics && _options.hostContext.expectSelf) header += "self";
     for (size_t i = 0; i < fn.params.size(); ++i) {
-        if (i > 0) header += ", ";
+        if (i > 0 || (_options.hostContext.strictSemantics && _options.hostContext.expectSelf)) header += ", ";
         header += fn.params[i].name;
     }
     header += ")";
     writeLine(header);
     ++_indent;
+    if (_options.hostContext.strictSemantics && _options.hostContext.expectSelf)
+        writeLine("local __state = M._get_state(self)");
     // S4.1 D-2: rewrite bare `self` inside helpers to `__ay_bound_self`
     // (set by `__ay_emit` around handler dispatch).
     const bool prevHelper = _emittingScriptHelper;
@@ -464,6 +514,14 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     // 13 Stmt subclasses; setting the anchor here covers every
     // emit path uniformly.
     _currentAnchor = stmt.sourceLoc;
+
+    if (auto* wait = dynamic_cast<const AwaitStmt*>(&stmt)) {
+        auto* call = dynamic_cast<const CallExpr*>(wait->operation.get());
+        auto* name = call ? dynamic_cast<const IdentifierExpr*>(call->callee.get()) : nullptr;
+        if (name && call->args.size() == 1)
+            writeLine(std::string(name->name == "delay" ? "__ay_wait_delay(" : "__ay_wait_event(") + emitExpr(*call->args[0]) + ")");
+        return;
+    }
 
     if (auto* v = dynamic_cast<const VarDeclStmt*>(&stmt)) { emitVarDecl(*v); return; }
     if (auto* i = dynamic_cast<const IfStmt*>(&stmt))      { emitIfStmt(*i);   return; }
@@ -525,7 +583,11 @@ void LuaCodegen::emitVarDecl(const VarDeclStmt& var)
     if (var.initializer) {
         out += emitExpr(*var.initializer);
     } else {
-        out += "nil";
+        out += _options.hostContext.strictSemantics ?
+            (var.typeName.starts_with("array<") ? "__ay_array_new({})" : var.typeName == "bool" ? "false"
+            : var.typeName == "string" ? "\"\"" : var.typeName == "table" ? "{}"
+            : var.typeName == "vec3" ? "vec3.new(0,0,0)" : var.typeName == "vec2" ? "{x=0,y=0}"
+            : var.typeName == "quat" ? "quat.identity()" : "0") : "nil";
     }
     writeLine(out);
 }
@@ -963,6 +1025,15 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
         return out;
     }
     if (auto* c = dynamic_cast<const CallExpr*>(&expr)) {
+        if (_options.hostContext.strictSemantics) {
+            if (auto* id = dynamic_cast<const IdentifierExpr*>(c->callee.get()); id && id->resolvedFunction) {
+                std::string out = "M." + id->name + "(";
+                bool first = true;
+                if (_options.hostContext.expectSelf) { out += "self"; first = false; }
+                for (const auto& arg : c->args) { if (!first) out += ", "; out += emitExpr(*arg); first = false; }
+                return out + ")";
+            }
+        }
         // S4.1 (2026-07-15): ambient free-function calls `emit(...)`
         // and `connect(...)` rewrite to `__ay_emit(self, ...)` /
         // `__ay_connect(self, ..., handler)` — codegen inserts `self`
@@ -1148,6 +1219,11 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
     }
     if (auto* id = dynamic_cast<const IdentifierExpr*>(&expr)) {
         if (id->name == "self") return selfLua();
+        if (id->resolvedInstanceState) return "__state." + id->name;
+        if (_options.hostContext.strictSemantics && id->resolvedFunction) {
+            return "(function(...) return M." + id->name + "("
+                + (_options.hostContext.expectSelf ? "self, ..." : "...") + ") end)";
+        }
         return id->name;
     }
     if (auto* lit = dynamic_cast<const LiteralExpr*>(&expr)) {
@@ -1199,6 +1275,7 @@ std::string LuaCodegen::emitExpr(const Expr& expr)
             out += emitExpr(*e.value);
         }
         out += "}";
+        if (t->checkedValueType.starts_with("array<")) out = "__ay_array_new(" + out + ")";
         return out;
     }
     errorAt(Token{}, "Unsupported expression in codegen");
@@ -1354,7 +1431,7 @@ std::string LuaCodegen::emitCompoundRhs(const Expr& target,
     std::string out;
     out += lhsStr;
     out += " ";
-    out += op;
+    out += op.ends_with('=') ? op.substr(0, op.size() - 1) : op;
     out += " ";
     out += rhsStr;
     return out;
@@ -1374,6 +1451,7 @@ std::string LuaCodegen::freshTmp(const std::string& hint)
 
 const char* LuaCodegen::selfLua() const
 {
+    if (_options.hostContext.strictSemantics) return "self";
     return _emittingScriptHelper ? "__ay_bound_self" : "self";
 }
 

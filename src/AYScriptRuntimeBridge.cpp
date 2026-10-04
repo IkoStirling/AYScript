@@ -8,10 +8,15 @@
 #endif
 
 #include "AYScript/ScriptRuntimeBridge.h"
+#include "ScriptWorldFacade.h"
+#include "ScriptTasks.h"
+#include "ScriptMath.h"
+#include "ScriptActorSync.h"
 
 #include "AYScript/LogiaEventBridge.h"
 #include "AYScript/logia/Logia.h"
 #include "AYScript/logia/LogiaPipeline.h"
+#include "AYScript/logia/Package.h"
 #include <AYEntity/components/ActorInstanceComponent.h>
 #include <AYEntity/components/TransformComponent.h>
 #include <AYEntity/EntityImpl.h>
@@ -39,6 +44,8 @@
 #include <cstdlib>
 #include <mutex>
 #include <thread>
+#include <cctype>
+#include <regex>
 
 namespace ayt::script
 {
@@ -66,6 +73,18 @@ std::size_t hashLogiaHostContext(const logia::LogiaHostContext& ctx)
        + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
     h ^= (ctx.strictInheritance ? 0x5555555555555555ULL : 0)
        + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+    h ^= (ctx.strictSemantics ? 0x3333333333333333ULL : 0);
+    std::size_t schema = 0;
+    for (const auto& [name, type] : ctx.actorProperties)
+        schema ^= std::hash<std::string>{}(name) ^ (std::hash<std::string>{}(type) << 1);
+    h ^= schema;
+    h ^= std::hash<std::string>{}(ctx.sourcePath);
+    h ^= std::hash<std::string>{}(ctx.assetRoot);
+    for (const auto& [name, signature] : ctx.hostFunctions) {
+        std::size_t entry = std::hash<std::string>{}(name) ^ std::hash<std::string>{}(signature.result);
+        for (const auto& parameter : signature.parameters) entry = entry * 31 + std::hash<std::string>{}(parameter);
+        h ^= entry;
+    }
     return h;
 }
 
@@ -85,6 +104,11 @@ struct CompileCacheKey {
     const ayt::reflect::ITypeInfo* hostType = nullptr;
     bool expectSelf = false;
     bool strictInheritance = false;
+    bool strictSemantics = false;
+    std::unordered_map<std::string, std::string> actorProperties;
+    std::unordered_map<std::string, logia::HostFunctionSignature> hostFunctions;
+    std::string sourcePath;
+    std::string assetRoot;
     std::size_t pipelineVersion = kLogiaPipelineVersion;
 
     bool operator==(const CompileCacheKey&) const = default;
@@ -95,6 +119,10 @@ struct CompileCacheKeyHash {
     {
         logia::LogiaHostContext ctx{
             key.kind, key.hostType, key.expectSelf, key.strictInheritance};
+        ctx.strictSemantics = key.strictSemantics;
+        ctx.actorProperties = key.actorProperties;
+        ctx.hostFunctions = key.hostFunctions;
+        ctx.sourcePath = key.sourcePath; ctx.assetRoot = key.assetRoot;
         std::size_t hash = hashLogiaSource(key.source);
         hash ^= hashLogiaHostContext(ctx) + 0x9E3779B97F4A7C15ULL
               + (hash << 6) + (hash >> 2);
@@ -108,7 +136,7 @@ CompileCacheKey makeCacheKey(const std::string& src,
                              const logia::LogiaHostContext& ctx)
 {
     return CompileCacheKey{src, ctx.kind, ctx.hostType, ctx.expectSelf,
-                           ctx.strictInheritance, kLogiaPipelineVersion};
+                           ctx.strictInheritance, ctx.strictSemantics, ctx.actorProperties, ctx.hostFunctions, ctx.sourcePath, ctx.assetRoot, kLogiaPipelineVersion};
 }
 
 } // namespace
@@ -1578,10 +1606,16 @@ struct LogiaRuntimeBridge::Impl {
 
     // sol::state is non-copyable and non-movable; pimpl it.
     sol::state lua;
+    ScriptWorldFacade worldFacade;
+    ScriptTasks tasks;
+    struct HostEntry { logia::HostFunctionSignature signature; ScriptHostFunction function; };
+    std::unordered_map<std::string, HostEntry> hostFunctions;
 
     // scriptName → module table (the table returned by the chunk)
     std::unordered_map<std::string, sol::table> scripts;
     std::unordered_map<void*, sol::table> actorSelf;
+    std::unordered_map<void*, std::string> actorOwners;
+    std::unordered_map<std::string, std::vector<std::string>> dependencies;
 
     // S5 ED-03 (2026-07-15): per-script LogiaSourceMap indexed by
     // scriptName — paired with `scripts` so a `callLifecycle` Lua
@@ -1607,12 +1641,22 @@ struct LogiaRuntimeBridge::Impl {
 
     void enterEventOwner(const std::string& owner)
     {
+        if (eventOwnerStack.empty()) for (const auto& [receiver, name] : actorOwners) if (name == owner) {
+            auto self = actorSelf.find(receiver);
+            if (self != actorSelf.end()) refreshActorSelf(lua,self->second,*static_cast<ayt::entity::ActorScriptComponent*>(receiver));
+        }
         eventOwnerStack.push_back(owner);
     }
 
-    void leaveEventOwner()
+    void leaveEventOwner() noexcept
     {
-        if (!eventOwnerStack.empty()) eventOwnerStack.pop_back();
+        if (eventOwnerStack.empty()) return;
+        auto owner = std::move(eventOwnerStack.back());eventOwnerStack.pop_back();
+        if (!eventOwnerStack.empty() && eventOwnerStack.back() == owner) return;
+        try { for (const auto& [receiver, name] : actorOwners) if (name == owner) {
+            auto self = actorSelf.find(receiver);
+            if (self != actorSelf.end()) commitActorSelf(self->second,*static_cast<ayt::entity::ActorScriptComponent*>(receiver));
+        } } catch (const std::exception& error) { ayt::log::error("Logia Actor synchronization failed: %s",error.what()); }
     }
 
     void trackEventConnection(const std::string& owner,
@@ -1637,10 +1681,13 @@ struct LogiaRuntimeBridge::Impl {
 
     void unsubscribeEventConnections(const std::string& owner)
     {
-        auto it = eventConnections.find(owner);
-        if (it == eventConnections.end()) return;
-        std::vector<ayt::event::ConnectionId> ids(it->second.begin(), it->second.end());
-        eventConnections.erase(it);
+        std::vector<ayt::event::ConnectionId> ids;
+        for (auto it = eventConnections.begin(); it != eventConnections.end();) {
+            if (it->first == owner || it->first.starts_with(owner + "/instance/")) {
+                ids.insert(ids.end(), it->second.begin(), it->second.end());
+                it = eventConnections.erase(it);
+            } else ++it;
+        }
         auto& bus = ayt::event::EventBus::instance();
         for (auto id : ids) {
             eventOwners.erase(id);
@@ -1767,6 +1814,7 @@ struct LogiaRuntimeBridge::Impl {
 
     void registerEngineApi()
     {
+        worldFacade.install(lua);
         // log table → wraps AYLog
         auto logTbl = lua.create_table();
         logTbl["info"]  = [](const std::string& s) {
@@ -1887,6 +1935,7 @@ struct LogiaRuntimeBridge::Impl {
             return v;
         };
         lua["vec2"] = vec2Tbl;
+        registerScriptMathAndArrays(lua);
 
         // INT-04: ambient event.emit / subscribe / unsubscribe →
         // EventBus string aliases. Does NOT route S4.1 signal/emit/
@@ -1910,6 +1959,10 @@ struct LogiaRuntimeBridge::Impl {
         eventHooks.leaveOwner = [this] { leaveEventOwner(); };
         installLogiaEventAmbient(lua, ayt::event::EventBus::instance(),
                                  std::move(eventHooks));
+        tasks.install(lua, ScriptTaskHooks{
+            [this] { return currentEventOwner(); },
+            [this](const std::string& owner) { enterEventOwner(owner); },
+            [this] { leaveEventOwner(); }});
 
         // LG-05 / S3.3: AYReflect-backed self.field read/write.
         // Registered as plain lua_CFunction entries (raw
@@ -1979,11 +2032,16 @@ bool LogiaRuntimeBridge::initialize()
 void LogiaRuntimeBridge::shutdown()
 {
     if (!_impl || !_impl->requireOwnerThread("shutdown")) return;
+    _impl->tasks.clear();
     // EventBus is process-global and can otherwise retain protected Lua
     // functions after the VM has been reset or destroyed.
     _impl->unsubscribeAllEventConnections();
     _impl->scripts.clear();
     _impl->actorSelf.clear();
+    _impl->actorOwners.clear();
+    _impl->dependencies.clear();
+    _impl->hostFunctions.clear();
+    _impl->worldFacade.bind(nullptr, {});
     // S5 ED-03 (2026-07-15): also clear the per-script source maps.
     // Paired with `scripts` so a post-shutdown loadScript starts
     // from a clean state — no stale Lua → Logia line translations
@@ -2033,7 +2091,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
 // chunk. On miss, run the full pipeline and cache the result.
 bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
                                     const std::string& logiaSource,
-                                    const logia::LogiaHostContext& ctx,
+                                    const logia::LogiaHostContext& requestedContext,
                                     std::vector<logia::CompilerError>& errors)
 {
     if (!_impl->requireOwnerThread("loadScript")) {
@@ -2043,8 +2101,13 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
                             0, 0);
         return false;
     }
+    auto ctx = requestedContext;
+    for (const auto& [name, entry] : _impl->hostFunctions) ctx.hostFunctions[name] = entry.signature;
     _impl->ensureLua();
     errors.clear();
+    // Imported files are re-read on each load/reload. Never reuse a main-source
+    // cache hit while an imported source may have changed independently.
+    if (logiaSource.find("import") != std::string::npos) _impl->_compileCache.erase(makeCacheKey(logiaSource, ctx));
 
     // S3.6: cache lookup. The Lua-state piece (safe_script +
     // module-table registration) still runs every call because the
@@ -2109,6 +2172,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         }
 
         luaSrc = std::move(pipeline.lua);
+        _impl->dependencies[scriptName] = pipeline.dependencies;
         sourceMap = std::move(pipeline.sourceMap);  // S5 ED-03
         luaOk  = true;
 
@@ -2127,7 +2191,7 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     // 3. Execute the Lua chunk in sol::state (runs on every call —
     //    safe_script rebinds the chunk into the live sol::state).
     _impl->resetExecutionBudget();
-    auto result = _impl->lua.safe_script(luaSrc, sol::script_pass_on_error);
+    auto result = _impl->lua.safe_script(luaSrc, sol::script_pass_on_error, "logia:" + scriptName);
     if (!result.valid()) {
         sol::error err = result;
         logia::CompilerError ce;
@@ -2232,14 +2296,38 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
         hadPriorMap = true;
     }
 
+    auto priorDependencies = scriptDependencies(scriptName);
     const bool ok = loadScript(scriptName, logiaSource, ctx, errors);
     if (!ok && hadPrior) {
         // loadScript erased the entry on failure; restore the
         // prior good module so the running game keeps its binding.
         _impl->scripts[scriptName] = prior;
         if (hadPriorMap) _impl->sourceMaps[scriptName] = priorMap;
+        _impl->dependencies[scriptName]=priorDependencies;
     }
     if (!ok) return false;
+    if (hadPrior && ctx.strictSemantics && ctx.expectSelf) {
+        sol::table next = _impl->scripts.at(scriptName);
+        sol::object oldStates = prior["_instanceState"];
+        sol::object oldSchema = prior["_stateSchema"];
+        if (oldStates.is<sol::table>() && oldSchema.is<sol::table>()) {
+            next["_previousState"] = oldStates;
+            next["_previousSchema"] = oldSchema;
+            sol::protected_function migrate = next["_get_state"];
+            if (migrate.valid()) for (const auto& entry : oldStates.as<sol::table>()) {
+                _impl->resetExecutionBudget();
+                auto migrated = migrate(entry.first);
+                if (!migrated.valid()) {
+                    sol::error error = migrated;
+                    errors.push_back({logia::ErrorCode::InvalidOperation, std::string("state migration failed: ")+error.what(),0,0});
+                    _impl->scripts[scriptName]=prior;
+                    if(hadPriorMap) _impl->sourceMaps[scriptName]=priorMap;
+                    _impl->dependencies[scriptName]=priorDependencies;
+                    return false;
+                }
+            }
+        }
+    }
 
     if (ctx.kind == logia::LogiaHostKind::EventHandler) {
         // Swap handler registrations only after the replacement module has
@@ -2252,6 +2340,7 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
             if (hadPrior) {
                 _impl->scripts[scriptName] = prior;
                 if (hadPriorMap) _impl->sourceMaps[scriptName] = priorMap;
+        _impl->dependencies[scriptName]=priorDependencies;
                 (void)callLifecycle(scriptName, "run", nullptr, nullptr);
             } else {
                 _impl->scripts.erase(scriptName);
@@ -2268,7 +2357,50 @@ bool LogiaRuntimeBridge::reloadScript(const std::string& scriptName,
             return false;
         }
     }
+    _impl->tasks.cancelOwner(scriptName);
+    if (ctx.kind != logia::LogiaHostKind::EventHandler) _impl->unsubscribeEventConnections(scriptName);
+    if (hadPrior && ctx.strictSemantics && ctx.expectSelf) {
+        sol::table module=_impl->scripts.at(scriptName);
+        sol::object callback=module["on_reload"], instances=module["_instanceState"];
+        if(callback.is<sol::function>()&&instances.is<sol::table>()) {
+            std::vector<void*> receivers;
+            for(const auto& entry:instances.as<sol::table>()) {
+                if(entry.first.is<void*>())receivers.push_back(entry.first.as<void*>());
+                else if(entry.first.is<sol::table>())for(const auto& [receiver,self]:_impl->actorSelf)
+                    if(self.pointer()==entry.first.as<sol::table>().pointer())receivers.push_back(receiver);
+            }
+            for(auto* receiver:receivers) {
+                auto actor=_impl->actorSelf.find(receiver);
+                // The module replacement has committed. Hook failures are runtime
+                // diagnostics; they do not roll back already applied engine effects.
+                callLifecycleImpl(scriptName,"on_reload",receiver,nullptr,actor==_impl->actorSelf.end()?nullptr:static_cast<ayt::entity::ActorScriptComponent*>(receiver));
+            }
+        }
+    }
     return true;
+}
+
+std::vector<std::string> LogiaRuntimeBridge::scriptDependencies(const std::string& name) const
+{
+    if (!_impl || !_impl->requireOwnerThread("scriptDependencies")) return {};
+    auto it = _impl->dependencies.find(name);
+    return it == _impl->dependencies.end() ? std::vector<std::string>{} : it->second;
+}
+
+bool LogiaRuntimeBridge::loadScriptPackage(const std::string& path, std::vector<logia::CompilerError>& errors)
+{
+    errors.clear();
+    if (!_impl || !_impl->requireOwnerThread("loadScriptPackage")) return false;
+    auto package = logia::readLogiaPackage(path);
+    if (!package.success) { for (const auto& d : package.diagnostics) errors.push_back(d.toCompilerError()); return false; }
+    for (const auto& [name, signature] : package.context.hostFunctions) {
+        auto entry = _impl->hostFunctions.find(name);
+        if (entry == _impl->hostFunctions.end() || entry->second.signature != signature) {
+            errors.emplace_back(logia::ErrorCode::InvalidOperation, "required package host provider unavailable or incompatible: " + name, 0, 0);
+            return false;
+        }
+    }
+    return reloadScript(package.scriptName, package.source, package.context, errors);
 }
 
 // S3.8b (LG-07) — ToolRunner one-shot entry point.
@@ -2395,6 +2527,107 @@ bool LogiaRuntimeBridge::callActorLifecycle(
     return callLifecycleImpl(scriptName, methodName, &actor, arg2, &actor);
 }
 
+void LogiaRuntimeBridge::releaseInstance(const std::string& scriptName, void* receiver)
+{
+    if (!_impl || !_impl->requireOwnerThread("releaseInstance") || !receiver) return;
+    _impl->tasks.cancelOwner(scriptName + "/instance/"
+        + std::to_string(reinterpret_cast<std::uintptr_t>(receiver)));
+    auto it = _impl->scripts.find(scriptName);
+    if (it != _impl->scripts.end()) {
+        auto actor = _impl->actorSelf.find(receiver);
+        sol::object receiverKey = actor == _impl->actorSelf.end() ? sol::make_object(_impl->lua,receiver) : sol::make_object(_impl->lua,actor->second);
+        for (const char* key : {"_instanceState", "_previousState", "_instanceSignals"}) {
+            sol::object data = it->second[key];
+            if (data.is<sol::table>()) data.as<sol::table>()[receiverKey] = sol::nil;
+        }
+    }
+    _impl->actorSelf.erase(receiver);
+    _impl->actorOwners.erase(receiver);
+    _impl->unsubscribeEventConnections(scriptName + "/instance/"
+        + std::to_string(reinterpret_cast<std::uintptr_t>(receiver)));
+}
+
+void LogiaRuntimeBridge::bindWorld(ayt::entity::World* world, const std::string& assetsRoot)
+{
+    if (_impl && _impl->requireOwnerThread("bindWorld")) _impl->worldFacade.bind(world, assetsRoot);
+}
+
+bool LogiaRuntimeBridge::registerHostFunction(const std::string& name,
+    const logia::HostFunctionSignature& signature, ScriptHostFunction function)
+{
+    if (!_impl || !_impl->requireOwnerThread("registerHostFunction") || !function) return false;
+    _impl->ensureLua();
+    auto dot = name.find('.');
+    if (dot == std::string::npos || dot == 0 || dot + 1 == name.size() || name.find('.', dot + 1) != std::string::npos) return false;
+    auto identifier = [](std::string_view value) {
+        if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value.front())) || value.front() == '_')) return false;
+        for (char c : value) if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+        return true;
+    };
+    const auto space = name.substr(0, dot), member = name.substr(dot + 1);
+    if (!identifier(space) || !identifier(member) || space.starts_with('_') || member.starts_with('_')) return false;
+    for (const char* reserved : {"entity", "input", "time", "event", "log", "vec2", "vec3", "quat", "array", "math", "string", "table", "utf8", "tasks"})
+        if (space == reserved) return false;
+    auto scalar = [](const std::string& type) { return type == "int" || type == "float" || type == "bool" || type == "string"; };
+    for (const auto& type : signature.parameters) if (!scalar(type)) return false;
+    if (signature.result != "void" && !scalar(signature.result)) return false;
+    _impl->hostFunctions[name] = {signature, std::move(function)};
+    sol::object current = _impl->lua[space];
+    sol::table table = current.is<sol::table>() ? current.as<sol::table>() : _impl->lua.create_table();
+    table[member] = [this, name](sol::variadic_args args) -> sol::object {
+        auto found = _impl->hostFunctions.find(name);
+        if (found == _impl->hostFunctions.end()) throw std::runtime_error("Logia host provider is unavailable: " + name);
+        // Copy the provider so self-unregistration cannot invalidate a running call.
+        const auto entry = found->second;
+        if (args.size() != entry.signature.parameters.size()) throw std::runtime_error("Logia host argument count mismatch");
+        std::vector<ScriptHostValue> values;
+        for (size_t i = 0; i < args.size(); ++i) {
+            sol::object value = args[i]; const auto& type = entry.signature.parameters[i];
+            if (type == "int" && value.is<lua_Integer>()) values.emplace_back(static_cast<std::int64_t>(value.as<lua_Integer>()));
+            else if (type == "float" && value.is<double>() && std::isfinite(value.as<double>())) values.emplace_back(value.as<double>());
+            else if (type == "bool" && value.is<bool>()) values.emplace_back(value.as<bool>());
+            else if (type == "string" && value.is<std::string>()) values.emplace_back(value.as<std::string>());
+            else throw std::runtime_error("Logia host argument type mismatch");
+        }
+        const auto result = entry.function(values);
+        const auto& type = entry.signature.result;
+        const bool valid = (type == "void" && std::holds_alternative<std::monostate>(result))
+            || (type == "int" && std::holds_alternative<std::int64_t>(result))
+            || (type == "float" && std::holds_alternative<double>(result) && std::isfinite(std::get<double>(result)))
+            || (type == "bool" && std::holds_alternative<bool>(result))
+            || (type == "string" && std::holds_alternative<std::string>(result));
+        if (!valid) throw std::runtime_error("Logia host result violates registered signature");
+        return std::visit([this](const auto& value) -> sol::object {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, std::monostate>) return sol::make_object(_impl->lua, sol::nil);
+            else return sol::make_object(_impl->lua, value);
+        }, result);
+    };
+    _impl->lua[space] = table;
+    clearCompileCache();
+    return true;
+}
+void LogiaRuntimeBridge::unregisterHostFunction(const std::string& name)
+{
+    if (!_impl || !_impl->requireOwnerThread("unregisterHostFunction")) return;
+    _impl->hostFunctions.erase(name);
+    clearCompileCache();
+}
+void LogiaRuntimeBridge::flushWorldCommands()
+{
+    if (_impl && _impl->requireOwnerThread("flushWorldCommands")) _impl->worldFacade.flush();
+}
+
+void LogiaRuntimeBridge::resetInstanceState(const std::string& scriptName)
+{
+    if (!_impl || !_impl->requireOwnerThread("resetInstanceState")) return;
+    auto it = _impl->scripts.find(scriptName);
+    if (it == _impl->scripts.end()) return;
+    it->second["_instanceState"] = _impl->lua.create_table();
+    it->second["_previousState"] = sol::nil;
+    it->second["_previousSchema"] = sol::nil;
+}
+
 bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
                                            const std::string& methodName,
                                            void* receiver, void* arg2,
@@ -2404,6 +2637,10 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
         || !_impl->_luaLive) {
         return false;
     }
+    struct DestroyGuard {
+        LogiaRuntimeBridge* bridge; const std::string& script; void* receiver;
+        ~DestroyGuard() { if (receiver) bridge->releaseInstance(script, receiver); }
+    } destroyGuard{this, scriptName, methodName == "on_destroy" ? receiver : nullptr};
     auto it = _impl->scripts.find(scriptName);
     if (it == _impl->scripts.end()) {
         return false;
@@ -2412,7 +2649,7 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
     sol::table M = it->second;
     sol::protected_function fn = M[methodName];
     if (!fn.valid()) {
-        if (actor && methodName == "on_destroy") _impl->actorSelf.erase(actor);
+
         return false;
     }
 
@@ -2421,32 +2658,16 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
         auto [itSelf, inserted] = _impl->actorSelf.try_emplace(actor,
             _impl->lua.create_table());
         sol::table& table = itSelf->second;
+        _impl->actorOwners[actor] = scriptName + "/instance/" + std::to_string(reinterpret_cast<std::uintptr_t>(actor));
         (void)inserted;
-        for (const auto& [key, value] : actor->properties) {
-            std::visit([&](const auto& typed) { table[key] = typed; }, value);
-        }
-        if (auto* entity = actor->getEntity()) {
-            if (auto* transform = entity->getComponent<ayt::entity::Transform>()) {
-                sol::table transformTable = _impl->lua.create_table();
-                sol::table position = _impl->lua.create_table();
-                position["x"] = transform->position.x;
-                position["y"] = transform->position.y;
-                position["z"] = transform->position.z;
-                transformTable["position"] = position;
-                sol::table scale = _impl->lua.create_table();
-                scale["x"] = transform->scale.x;
-                scale["y"] = transform->scale.y;
-                scale["z"] = transform->scale.z;
-                transformTable["scale"] = scale;
-                table["transform"] = transformTable;
-            }
-        }
+        refreshActorSelf(_impl->lua, table, *actor);
         self = sol::make_object(_impl->lua, table);
     } else {
         self = sol::make_object(_impl->lua, receiver);
     }
 
-    _impl->enterEventOwner(scriptName);
+    _impl->enterEventOwner(receiver ? scriptName + "/instance/"
+        + std::to_string(reinterpret_cast<std::uintptr_t>(receiver)) : scriptName);
     struct EventOwnerGuard {
         Impl* impl;
         ~EventOwnerGuard() { impl->leaveEventOwner(); }
@@ -2488,6 +2709,7 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
         // translated location when available, so dev-facing log
         // output also points at the right Logia source line.
         _impl->_lastError.luaMessage = msg;
+        _impl->_lastError.scriptName = scriptName;
         _impl->_lastError.logiaLoc = translateLuaErrorToLogia(
             scriptName, msg, _impl->sourceMaps);
         _impl->_lastError.translated =
@@ -2512,61 +2734,12 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
             ayt::log::error("Logia call '%s.%s' failed: %s",
                             scriptName.c_str(), methodName.c_str(), msg.c_str());
         }
-        if (actor && methodName == "on_destroy") _impl->actorSelf.erase(actor);
+
         return false;
     }
     if (actor) {
-        const sol::table table = _impl->actorSelf.at(actor);
-        for (auto& [key, value] : actor->properties) {
-            const sol::object field = table[key];
-            if (std::holds_alternative<double>(value) && field.is<double>()) {
-                value = field.as<double>();
-            } else if (std::holds_alternative<bool>(value) && field.is<bool>()) {
-                value = field.as<bool>();
-            } else if (std::holds_alternative<std::string>(value)
-                       && field.is<std::string>()) {
-                value = field.as<std::string>();
-            }
-        }
-        if (auto* entity = actor->getEntity()) {
-            if (auto* transform = entity->getComponent<ayt::entity::Transform>()) {
-                const sol::object transformObject = table["transform"];
-                if (transformObject.is<sol::table>()) {
-                    const sol::table transformTable = transformObject.as<sol::table>();
-                    const auto readVector = [](const sol::table& parent,
-                                               const char* key,
-                                               ayt::math::FVector3& out) {
-                        const sol::object object = parent[key];
-                        if (!object.is<sol::table>()) return false;
-                        const sol::table values = object.as<sol::table>();
-                        const sol::object x = values["x"];
-                        const sol::object y = values["y"];
-                        const sol::object z = values["z"];
-                        if (!x.is<double>() || !y.is<double>() || !z.is<double>())
-                            return false;
-                        out = {static_cast<float>(x.as<double>()),
-                               static_cast<float>(y.as<double>()),
-                               static_cast<float>(z.as<double>())};
-                        return true;
-                    };
-                    ayt::math::FVector3 position;
-                    if (readVector(transformTable, "position", position)
-                        && (position.x != transform->position.x
-                            || position.y != transform->position.y
-                            || position.z != transform->position.z)) {
-                        transform->setPosition(position.x, position.y, position.z);
-                    }
-                    ayt::math::FVector3 scale;
-                    if (readVector(transformTable, "scale", scale)
-                        && (scale.x != transform->scale.x
-                            || scale.y != transform->scale.y
-                            || scale.z != transform->scale.z)) {
-                        transform->setScale(scale.x, scale.y, scale.z);
-                    }
-                }
-            }
-        }
-        if (methodName == "on_destroy") _impl->actorSelf.erase(actor);
+        commitActorSelf(_impl->actorSelf.at(actor), *actor);
+
     }
     // S5 ED-03 (2026-07-15): successful lifecycle call clears any
     // prior `_lastError`. This matches the semantics spelled out
@@ -2614,6 +2787,9 @@ logia::SourceLocation translateLuaErrorToLogia(
         if (openQuote == std::string::npos) return {};
         auto lineMarker = luaMessage.find("]:", openQuote);
         if (lineMarker == std::string::npos) return {};
+        if (luaMessage.substr(openQuote, lineMarker-openQuote).find("logia:"+scriptName+"\"") == std::string::npos) {
+            cursor=lineMarker+2; continue;
+        }
         std::size_t lineStart = lineMarker + 2;  // skip past "]:"
         // Skip non-digit prefix (defensive — Lua always emits a
         // digit at this position, but be robust to future Lua
@@ -2641,12 +2817,38 @@ logia::SourceLocation translateLuaErrorToLogia(
 } // namespace
 
 // S5 ED-03 (2026-07-15): public accessor.
+void LogiaRuntimeBridge::tickTasks(float deltaTime)
+{
+    if (!_impl || !_impl->requireOwnerThread("tickTasks") || !_impl->_luaLive) return;
+    _impl->resetExecutionBudget();
+    for (const auto& [receiver, table] : _impl->actorSelf) refreshActorSelf(_impl->lua, table, *static_cast<ayt::entity::ActorScriptComponent*>(receiver));
+    try { _impl->tasks.tick(deltaTime); }
+    catch (const std::exception& error) { _impl->_lastError.luaMessage = error.what(); return; }
+    const auto message = _impl->tasks.errorMessage();
+    if (!message.empty()) {
+        const auto owner = _impl->tasks.errorOwner();
+        const auto script = owner.substr(0, owner.find("/instance/"));
+        _impl->_lastError.luaMessage = message;
+        _impl->_lastError.scriptName = script;
+        _impl->_lastError.logiaLoc = translateLuaErrorToLogia(script, message, _impl->sourceMaps);
+        _impl->_lastError.translated = _impl->_lastError.logiaLoc.line > 0;
+        ayt::log::error("Logia task '%s': %s", owner.c_str(), message.c_str());
+    }
+}
+
 LogiaRuntimeBridge::TranslatedRuntimeError
 LogiaRuntimeBridge::getLastError() const noexcept
 {
-    return _impl && _impl->requireOwnerThread("getLastError")
-        ? _impl->_lastError
-        : TranslatedRuntimeError{};
+    if (!_impl || !_impl->requireOwnerThread("getLastError")) return {};
+    auto result = _impl->_lastError;
+    static const std::regex frame(R"re(\[string "logia:([^"]+)"\]:(\d+):([^\n]*))re");
+    for (std::sregex_iterator i(result.luaMessage.begin(), result.luaMessage.end(), frame), end; i != end; ++i) {
+        auto map = _impl->sourceMaps.find((*i)[1].str());
+        if (map == _impl->sourceMaps.end()) continue;
+        try { auto loc = map->second.lookup(std::stoi((*i)[2].str())); if(loc.line>0) result.frames.push_back({loc,(*i)[3].str()}); }
+        catch (const std::exception&) {}
+    }
+    return result;
 }
 
 // ------------------------------------------------------------

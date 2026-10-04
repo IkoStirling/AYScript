@@ -3032,3 +3032,78 @@ Implement AYScript S4.1 per design.md Phase S4.
 ```
 
 ---
+# Checked Logia 能力扩展（2026-10-05）
+
+本节是下方历史分阶段设计的当前实现补充。`strictSemantics` 默认为 false，以保留旧脚本；
+`checkedLogiaHostContext` 开启严格语义，Actor 自动加载和 AYEditor 文档选择此契约。
+管线版本为 35。完整的语义、状态、任务、模块和打包测试见 `Test_LogiaChecked.cpp`、
+`Test_LogiaModulesAndTools.cpp`。
+
+## 编译与状态
+
+严格检查不沿用旧 analyzer 的扁平符号表：每个函数、分支、循环与显式块都有词法作用域。
+helper 位于返回模块的 `M` 中，调用和 callback closure 显式携带 self，不写全局函数名。
+参数与返回注解静态检查；省略返回注解表示 void。不存在隐式全局；赋值只能作为语句。
+生命周期签名受宿主约束，回调匹配 signal 或已知 EventBus 的实际位置参数。
+Reflect 的 ScriptVisible/ScriptReadOnly 仍由编译器与原生边界共同执行，禁止通过只读父字段写入。
+反射容器索引读取是快照；修改时替换整个字段，不能把快照的索引修改当作原生写入。
+
+`var` 是模块共享数据。共享初始化仅使用值表达式，不能调用函数、读取 self 或实例 state。
+`state` 则位于 `M._instanceState[self]`，在实例首次调用时初始化；可读取此前的模块变量、
+state 或宿主字段。基本类型默认初始化，array 默认空、quat 默认单位旋转。
+销毁入口和 `releaseInstance` 清理 state、local signal、EventBus subscription、Actor self 和 tasks，
+包括未声明 on_destroy 的脚本。外部宿主必须在 receiver 存储失效前调用 releaseInstance。
+
+失败的编译/模块读取/状态迁移保留旧模块。成功替换迁移同名同类型 state（包括共享的数组/表引用），
+删除字段丢弃、新增或改变类型的字段重新初始化。迁移立即完成，连续重载不会丢掉尚未读取的状态。
+原有任务与订阅随后取消，实例 `on_reload()` 可重新接线；恢复回调的运行时副作用不提供事务回滚。
+`resetInstanceState` 只重置 state，宿主属性继续由 ECS 管理。状态不是 Scene/网络存档格式。
+Actor 类继承继续采用完整脚本替换，空路径沿用父脚本；明确不引入隐式 super，公共行为改用 helper 模块。
+
+## World 与宿主接口
+
+`entity.*` 使用 bridge 私有、不可复用的整数令牌。pending 创建尚不能读取 Entity，flush 后可查询；
+结构、位置和字段命令最多排队 4096 条。WorldBeforeShutdown callback 清理借用的 World 与所有令牌。
+字段调用只访问已注册、可读/可写的数值字段；范围、可见性、失效句柄在应用边界再次检查。
+ScriptSubSystem 在 Gameplay（兼容 update 也是变量帧）恢复任务，再在组件迭代后 flush。
+
+`registerHostFunction` 只接受 `namespace.member`，拒绝覆盖内置命名空间，参数/结果限
+int、float、bool、string、void。宿主拥有 provider 及其借用模块的生命周期，应在加载前注册、
+模块销毁前注销。签名进入 compile-cache key；删除 provider 后旧脚本调用明确报 unavailable。
+框架不自动授予音频、物理或 UI 全部原生 API；宿主决定具体授权、线程与资源所有权。
+Actor 属性及 position/scale/rotation 在 lifecycle、事件和任务边界同步，有限数值才写回 Transform。
+
+## 任务、模块与数学
+
+任务是隐藏 Lua coroutine：脚本不能获取 coroutine 库。每 bridge 最多 1024 个任务，
+每 tick 最多恢复 256 个；每次恢复仍有 100 万指令与 bridge 64 MiB Lua 分配预算。
+零延时也等待后续任务 tick；事件只标记待恢复，不在 EventBus callback 内重入任务。
+等待事件暂不返回 payload；需要 payload 时使用经过签名检查的 event.subscribe。
+delay 接受非负有限秒数；task helper 无参数、void，含 await 的 helper 不能普通调用。
+cancel/pending 操作任务 ID；receiver 销毁、成功替换和 shutdown 取消等待及临时订阅。
+
+import 必须在 checked、file-backed 编译中使用；相对路径限制在 assetRoot（默认主文件目录）内。
+模块只包含 helper/import，helper 名冲突硬错误；依赖深度 32、文件数 128、单文件 1 MiB、
+总依赖 4 MiB，循环、根逃逸、缺失文件和无效模块均报告原始文件位置。
+导入依赖每次 load/reload 重新读取；监听器跟踪闭包，更新任一依赖会重编译所有引用的主脚本。
+失败时继续运行旧版本；成功时更新监听闭包。helper 原始 SourceLocation 贯穿 codegen/source map。
+
+`array<T>` 为 Lua 私有存储代理，1-based 连续索引，元素类型编译期检查；索引越界和空 pop 报错，
+最多 65536 元素、嵌套类型深度 8。不能利用通用 table 接口绕过数组类型或索引规则。
+vec3 提供 new/length/normalized/add/subtract/scale/dot/cross，quat 提供
+identity/axis_angle/normalized/multiply/rotate/slerp；axis_angle 使用弧度，运算由 AYMath 执行。
+
+## 作者与分发接口
+
+analyzeLogia 复用严格编译结果，通过声明身份解析引用，提供模块函数、词法变量、provider 和
+Actor/Reflect 属性的补全与定义位置；不完整文本仍提供宿主 schema 和内置提示。
+completion 的局部过滤以源文件和行号为单位；同一行内的块边界不能精确区分。
+ays-logia analyze 输出 JSON；compile --checked 校验但不改变旧 CLI 默认契约。
+AYEditor 文档分析未保存文本，Complete 菜单可插入符号，Definition 在当前或导入文档中导航；
+宿主可用 setLogiaHostContext 传入明确 schema/provider 信息。
+getLastError 保留 Lua traceback，并附带各命名 Logia chunk 对应的原文件调用帧。
+
+buildLogiaPackage 校验入口及闭包，在新的 staging 目录写完整源码与 v1 清单，再验证和原子重命名。
+readLogiaPackage 检查版本、相对路径、文件数量/大小、FNV-1a 64 指纹、宿主契约与依赖闭包。
+指纹仅用于检测内容变化，不是安全签名。loadScriptPackage 要求所有声明 provider 已注册且签名完全匹配，
+不从清单自动注册原生功能。包为可移动源码包，仍在运行时编译；不生成独立字节码或替代项目 cooked 资源。

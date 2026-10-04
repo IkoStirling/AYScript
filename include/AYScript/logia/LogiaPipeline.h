@@ -27,6 +27,7 @@ struct LogiaToLuaResult {
     // per-script cache so `callLifecycle` failures can be translated
     // back to the originating Logia source line.
     LogiaSourceMap sourceMap;
+    std::vector<std::string> dependencies;
 };
 
 // Full front-end + codegen pipeline. Heap-backed; safe to call from

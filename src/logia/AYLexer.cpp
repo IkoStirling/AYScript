@@ -146,9 +146,13 @@ TokenType Lexer::identifierType(const std::string& lexeme)
     static const std::unordered_map<std::string, TokenType> keywords = {
         {"script", TokenType::Script},
         {"var", TokenType::Var},
+        {"state", TokenType::State},
+        {"await", TokenType::Await},
+        {"import", TokenType::Import},
         {"on_start", TokenType::OnStart},
         {"on_update", TokenType::OnUpdate},
         {"on_destroy", TokenType::OnDestroy},
+        {"on_reload", TokenType::OnReload},
         {"run", TokenType::Run},  // S3.8b: Tool host entry point.
         {"function", TokenType::Function},  // 2026-07-11: script-block helper.
         // S4.1 (2026-07-15): per-component signal declaration. `emit`

@@ -2,6 +2,8 @@
 // AYScript/ScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1+)
 
 #include <memory>
+#include <functional>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -9,9 +11,12 @@
 #include "AYScript/logia/Logia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
 namespace ayt::entity { struct ActorScriptComponent; }
+namespace ayt::entity { class World; }
 
 namespace ayt::script
 {
+using ScriptHostValue = std::variant<std::monostate, std::int64_t, double, bool, std::string>;
+using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<ScriptHostValue>&)>;
 
 // S3.6 (LG-06a) — compile pipeline version stamp.
 //
@@ -375,7 +380,7 @@ namespace ayt::script
 //       runtime set_field no-ops ScriptReadOnly.
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
-constexpr std::size_t kLogiaPipelineVersion = 32u;
+constexpr std::size_t kLogiaPipelineVersion = 35u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -536,6 +541,12 @@ public:
 
     // Look up a previously-loaded script.
     [[nodiscard]] bool hasScript(const std::string& scriptName) const;
+    /// Canonical dependency paths from the most recent successful file-backed compile.
+    [[nodiscard]] std::vector<std::string> scriptDependencies(const std::string& scriptName) const;
+    /// Validate and load a portable source package; all declared host providers
+    /// must already exist with exactly matching signatures. Loading never binds
+    /// a World or grants new native capabilities from manifest declarations.
+    bool loadScriptPackage(const std::string& manifestPath, std::vector<logia::CompilerError>& errors);
 
     // === S5 ED-03 (2026-07-15) — Lua-line → Logia-line error translation ===
 
@@ -547,15 +558,16 @@ public:
     // line the bridge has a recorded Logia anchor for; `translated`
     // is true iff `logiaLoc.line > 0`.
     //
-    // The `logiaLoc.file` field is left empty by the bridge — the
-    // originating `.logia` path is not plumbed through `loadScript`
-    // today (loadScript takes a string source, not a path). A
-    // future slice could populate it from the bridge's call-site
-    // context if needed.
+    // `logiaLoc.file` and translated frames retain imported source paths.
+    // Supply LogiaHostContext::sourcePath for the entry file; source-only
+    // callers without a path may receive an empty entry filename.
     struct TranslatedRuntimeError {
         std::string luaMessage;
         logia::SourceLocation logiaLoc;
         bool translated = false;
+        std::string scriptName;
+        struct Frame { logia::SourceLocation location; std::string description; };
+        std::vector<Frame> frames;
     };
 
     // Returns the last Lua runtime error captured by `callLifecycle`
@@ -595,6 +607,29 @@ public:
                             const std::string& methodName,
                             ayt::entity::ActorScriptComponent& actor,
                             void* arg2 = nullptr);
+
+    /// Release a receiver's state, signals and event subscriptions, including
+    /// scripts without on_destroy. Hosts call this before receiver storage dies.
+    void releaseInstance(const std::string& scriptName, void* receiver);
+    /// Clear state after a successful reload when an explicit reset is desired.
+    /// Successful reloads otherwise preserve same-name, same-type state fields.
+    void resetInstanceState(const std::string& scriptName);
+    /// Bind the active World to the controlled entity.* facade. World teardown
+    /// invalidates all tokens automatically. Actor paths are asset-root-relative.
+    void bindWorld(ayt::entity::World* world, const std::string& assetsRoot = {});
+    /// Apply queued structural/field commands outside Entity iteration. New
+    /// entities remain pending until this boundary; destruction is deferred.
+    void flushWorldCommands();
+    /// Advance pending tasks once per variable-rate frame. Waits resume at a
+    /// later task tick; destroy/reload/shutdown cancel their outstanding work.
+    void tickTasks(float deltaTime);
+    /// Register an explicitly authorized scalar facade (e.g. audio.play,
+    /// animation.play, stats.read). Signatures are checked before compilation
+    /// and again at the native boundary; providers own their module lifetimes.
+    bool registerHostFunction(const std::string& qualifiedName,
+                              const logia::HostFunctionSignature& signature,
+                              ScriptHostFunction function);
+    void unregisterHostFunction(const std::string& qualifiedName);
 
     // === S3.5 — ambient API real-time bindings (was: mock in S1) ===
 

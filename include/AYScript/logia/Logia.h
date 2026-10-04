@@ -1,10 +1,10 @@
 #pragma once
-// AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/Logia.h - Logia compiler entry (S0: tokenize + parse)
+// Logia compiler entry: host-aware parsing and semantic validation.
 //
 // S3.0 (LG-03): `LogiaHostContext` is the public handle that tells the
 // compiler which C++ host kind a `script Foo { ... }` is being bound to
 // at load time. The Logia surface syntax is unchanged across host kinds;
-// the context only influences future validation and code emission paths.
+// the context selects validation, exposed capabilities and receiver emission.
 //
 // S2.5 callers (and existing tests) can ignore `LogiaHostContext`
 // entirely — the no-arg `Compiler::compile(source)` overload still
@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace ayt::reflect
 {
@@ -26,8 +27,7 @@ namespace ayt::script::logia
 {
 
 // What kind of C++ host a `script Name { ... }` is being bound to.
-// S3.0 (LG-03) only `Component` has real runtime support; `System`,
-// `Tool`, `EventHandler` are reserved for S3.1+ (see design.md §5.6).
+// Each host kind has runtime dispatch; checked contexts validate its lifecycle.
 enum class LogiaHostKind {
     Component,    // S2.5 / LG-03 — ScriptComponent on Entity
     System,       // S3.1 (LG-04) — ISystem tick
@@ -38,16 +38,20 @@ enum class LogiaHostKind {
 
 // Caller-supplied description of the C++ host a `script` block binds to.
 //
-// S3.0 (LG-03): the analyzer stores the context but does NOT enable
-// new validation. All existing S2.5 diagnostics are preserved verbatim
-// regardless of which fields are set. `hostType == nullptr` means
-// "skip any future subclass check" (the LG-03 default).
+// Legacy contexts preserve their historical validation. checked contexts
+// validate scopes, types, receiver schema and declared host signatures.
 //
 // S3.2 (LG-04b, B-min): when `kind == Component` AND `hostType != nullptr`
 // AND `strictInheritance == true`, the analyzer will hard-reject any
 // `script Name` whose Reflect entry is found but `!isDerivedFrom(Name,
 // hostType)`. The B-min scope is single-chain parent walks only — no
 // full derived-type graph (see design.md §5.6 S3.2).
+struct HostFunctionSignature {
+    std::vector<std::string> parameters;
+    std::string result = "void";
+    bool operator==(const HostFunctionSignature&) const = default;
+};
+
 struct LogiaHostContext {
     LogiaHostKind kind = LogiaHostKind::Component;
     // Expected base type for `script Name` binding. nullptr disables
@@ -63,7 +67,27 @@ struct LogiaHostContext {
     // Reflect type is not derived from `hostType` (Component host only).
     // Default false to preserve S2.5 / LG-03 / LG-04 behavior.
     bool strictInheritance = false;
+    /// Enable the production type/scope contract. Legacy callers retain their
+    /// previous permissive semantics until explicitly migrated.
+    bool strictSemantics = false;
+    /// Actor property schema supplied by the resolved .act asset, never inferred
+    /// from arbitrary assignments. Keys use author-visible names.
+    std::unordered_map<std::string, std::string> actorProperties;
+    /// Explicit host facade signatures; the runtime adds registered providers.
+    std::unordered_map<std::string, HostFunctionSignature> hostFunctions;
+    /// File-backed compilation resolves imports within this authoring root.
+    /// Empty root defaults to sourcePath's directory; in-memory imports fail.
+    std::string sourcePath;
+    std::string assetRoot;
 };
+
+/// Recommended context for newly authored scripts; rejects implicit globals,
+/// incompatible values, invalid callback signatures and escaping local names.
+inline LogiaHostContext checkedLogiaHostContext(LogiaHostContext ctx = {})
+{
+    ctx.strictSemantics = true;
+    return ctx;
+}
 
 // S2.5 / LG-03 default context: Component host, no subclass check, with self.
 inline LogiaHostContext defaultLogiaHostContext()
@@ -130,6 +154,7 @@ struct CompileResult {
     std::vector<CompilerError> errors;          // legacy (S1) — parser + semantic errors
     std::vector<LogiaDiagnostic> diagnostics;   // S2 — full diagnostics w/ severity
     std::unique_ptr<Program> program;
+    std::vector<std::string> dependencies;
 };
 
 void tokenize(const std::string& source, std::vector<Token>& out);
@@ -140,16 +165,15 @@ public:
     explicit Compiler(CompileOptions options);
 
     // Compile-only entry points. When you also need Lua source, call
-    // compileLogiaToLua() (AYScript/logia/AYScript/logia/AYScript/logia/AYScript/logia/LogiaPipeline.h) instead of stacking
+    // compileLogiaToLua() (AYScript/logia/LogiaPipeline.h) instead of stacking
     // Compiler + LuaCodegen in the same frame.
 
     // S2.5 entry — equivalent to `compile(source, defaultLogiaHostContext())`.
     // Preserved verbatim so the 169 existing tests do not need editing.
     CompileResult compile(const std::string& source);
 
-    // S3.0 (LG-03) entry — `ctx` is stored in the analyzer for future
-    // host-aware validation. S3.0 diagnostics remain identical to the
-    // no-ctx overload (no new errors / warnings are introduced).
+    /// Validate against the selected host/language contract. Imports resolve
+    /// from sourcePath within assetRoot; entry text may be unsaved in memory.
     CompileResult compile(const std::string& source, const LogiaHostContext& ctx);
 
     // Read-only access to the last context the compiler was invoked

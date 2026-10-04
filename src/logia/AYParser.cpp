@@ -65,6 +65,19 @@ std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
 
 std::unique_ptr<Stmt> Parser::parseMember()
 {
+    if (match(TokenType::Import)) {
+        const auto token = previous();
+        auto statement = std::make_unique<ImportStmt>();
+        statement->sourceLoc = {"", token.line, token.column};
+        statement->path = consume(TokenType::StringLiteral, "Expected quoted module path").lexeme;
+        match(TokenType::Semicolon);
+        return statement;
+    }
+    if (check(TokenType::State)) {
+        auto statement = parseVarDecl();
+        if (auto* var = dynamic_cast<VarDeclStmt*>(statement.get())) var->instanceState = true;
+        return statement;
+    }
     // S2.5: `export var` is gone — `var` is always a pure local.
     if (check(TokenType::Var)) {
         return parseVarDecl();
@@ -78,6 +91,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
     if (match(TokenType::OnDestroy)) {
         return parseLifecycleFunc(LifecycleKind::OnDestroy, previous());
     }
+    if (match(TokenType::OnReload)) return parseLifecycleFunc(LifecycleKind::OnReload,previous());
     // S3.8b: `run` is the Tool host's run-only entry point. The
     // parser accepts it unconditionally as a member; the semantic
     // analyzer decides whether the host kind allows it (Tool only —
@@ -114,10 +128,10 @@ std::unique_ptr<Stmt> Parser::parseMember()
 
 std::unique_ptr<Stmt> Parser::parseVarDecl()
 {
-    const Token varTok = consume(TokenType::Var, "Expected 'var'");
+    const Token varTok = check(TokenType::State) ? advance() : consume(TokenType::Var, "Expected 'var'");
     const Token name = consumeIdentifier("Expected variable name");
     consume(TokenType::Colon, "Expected ':' after variable name");
-    const Token typeName = consumeIdentifier("Expected variable type");
+    const auto typeName = parseTypeName();
 
     ExprPtr initializer;
     if (match(TokenType::Equal)) {
@@ -129,7 +143,7 @@ std::unique_ptr<Stmt> Parser::parseVarDecl()
     // (per user decision 2026-07-14: var-keyword loc, not initializer
     // loc — statement-level position is more useful than drilling
     // into the RHS).
-    auto v = std::make_unique<VarDeclStmt>(name.lexeme, typeName.lexeme, std::move(initializer));
+    auto v = std::make_unique<VarDeclStmt>(name.lexeme, typeName, std::move(initializer));
     v->sourceLoc.line = varTok.line;
     v->sourceLoc.column = varTok.column;
     return v;
@@ -164,6 +178,7 @@ std::unique_ptr<Stmt> Parser::parseLifecycleFunc(LifecycleKind kind, const Token
     // by the time we get here, `previous()` is the `(`.
     auto fn = std::make_unique<LifecycleFuncDecl>(kind, std::move(legacyParams), std::move(body));
     fn->sourceLoc.line = keywordTok.line;
+    fn->closingLine = previous().line;
     fn->sourceLoc.column = keywordTok.column;
     return fn;
 }
@@ -174,10 +189,30 @@ std::vector<Param> Parser::parseParamList()
     do {
         const Token name = consumeIdentifier("Expected parameter name");
         consume(TokenType::Colon, "Expected ':' after parameter name");
-        const Token typeName = consumeIdentifier("Expected parameter type");
-        params.push_back(Param{name.lexeme, typeName.lexeme});
+        const auto typeName = parseTypeName();
+        params.push_back(Param{name.lexeme, typeName});
     } while (match(TokenType::Comma));
     return params;
+}
+
+std::string Parser::parseTypeName(unsigned depth)
+{
+    auto name = consumeIdentifier("Expected type name").lexeme;
+    if (match(TokenType::Less)) {
+        if (name != "array" || depth >= 8) { error("only bounded array<T> types are supported"); return name; }
+        name += "<" + parseTypeName(depth + 1) + ">";
+        // In a declaration such as array<int>={1}, the lexer correctly
+        // emits >=. Here the > closes the type and = begins its initializer.
+        if (check(TokenType::GreaterEqual)) {
+            auto& token = _tokens[_current];
+            token.type = TokenType::Equal;
+            token.lexeme = "=";
+            ++token.column;
+        } else {
+            consume(TokenType::Greater, "Expected '>' after array element type");
+        }
+    }
+    return name;
 }
 
 // 2026-07-11 audit fix: parse a user-defined script-block-scope
@@ -199,6 +234,11 @@ std::unique_ptr<Stmt> Parser::parseFunctionDeclStmt()
     }
     consume(TokenType::RightParen, "Expected ')' after parameter list");
 
+    std::string returnType;
+    if (match(TokenType::Colon)) {
+        returnType = parseTypeName();
+    }
+
     consume(TokenType::LeftBrace, "Expected '{' before function body");
     std::vector<StmtPtr> body = parseBlockBody();
     consume(TokenType::RightBrace, "Expected '}' after function body");
@@ -208,6 +248,8 @@ std::unique_ptr<Stmt> Parser::parseFunctionDeclStmt()
     // "duplicate function" or "unknown function" diagnostics.
     auto fn = std::make_unique<FunctionDeclStmt>(
         name.lexeme, std::move(params), std::move(body));
+    fn->returnType = std::move(returnType);
+    fn->closingLine = previous().line;
     fn->sourceLoc.line = name.line;
     fn->sourceLoc.column = name.column;
     return fn;
@@ -244,6 +286,14 @@ std::unique_ptr<Stmt> Parser::parseSignalDecl(const Token& /*signalTok*/)
 
 std::unique_ptr<Stmt> Parser::parseStatement()
 {
+    if (match(TokenType::Await)) {
+        const auto token = previous();
+        auto statement = std::make_unique<AwaitStmt>();
+        statement->sourceLoc = {"", token.line, token.column};
+        statement->operation = parseExpression();
+        match(TokenType::Semicolon);
+        return statement;
+    }
     if (match(TokenType::Return)) {
         return parseReturnStmt(previous());
     }
@@ -953,6 +1003,7 @@ void Parser::synchronize()
         case TokenType::OnStart:
         case TokenType::OnUpdate:
         case TokenType::OnDestroy:
+        case TokenType::OnReload:
         case TokenType::Run:
         case TokenType::Function:  // 2026-07-11 audit fix: script-block helper.
         case TokenType::Signal:    // S4.1 (2026-07-15): per-component signal decl.

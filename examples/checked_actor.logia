@@ -1,0 +1,18 @@
+script CheckedActor {
+    import "modules/motion.logia";
+    state notification: int = 0
+
+    function notify_later() {
+        await delay(1.0);
+        log.info("Actor task resumed")
+    }
+    on_start() {
+        notification = tasks.start(notify_later)
+    }
+    on_reload() {
+        notification = tasks.start(notify_later)
+    }
+    on_update(dt: float) {
+        self.transform.position = vec3.add(self.transform.position, displacement(dt))
+    }
+}

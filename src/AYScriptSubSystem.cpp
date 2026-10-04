@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <algorithm>
 
 namespace ayt::script
 {
@@ -62,6 +63,7 @@ struct ScriptSubSystem::HotReloadState {
         std::string scriptName;
         std::string normalizedPath;
         logia::LogiaHostContext ctx;
+        std::vector<std::string> dependencies;
         bool pendingReload = false;
         int64_t debounceStartMs = 0;
     };
@@ -128,8 +130,10 @@ void ScriptSubSystem::update(float deltaTime)
     bindActorHosts();
     pollAndApplyReloads();
     _bridge.tickAmbient(deltaTime);
+    _bridge.tickTasks(deltaTime);
     tickLogiaSystems(_bridge, deltaTime);
     tickComponentHosts(deltaTime);
+    _bridge.flushWorldCommands();
 }
 
 void ScriptSubSystem::fixedUpdate(float fixedDeltaTime)
@@ -156,7 +160,9 @@ void ScriptSubSystem::tick(ayt::game::FramePhase phase,
         // headless host without Entity, this also supplies the component path.
         pollAndApplyReloads();
         _bridge.tickAmbient(context.deltaTime);
+        _bridge.tickTasks(context.deltaTime);
         tickComponentHosts(context.deltaTime);
+        _bridge.flushWorldCommands();
     }
 }
 
@@ -218,6 +224,7 @@ void ScriptSubSystem::setHotReloadEnabled(bool enabled)
 
     _hotReload->watcher = std::make_unique<ayt::io::FileWatcher>();
     for (const auto& kv : _hotReload->byPath) {
+        for (const auto& dependency : kv.second.dependencies) _hotReload->watcher->watch(dependency, nullptr);
         if (!_hotReload->watcher->watch(kv.first, nullptr)) {
             ayt::log::warn("ScriptSubSystem: hot reload watch failed for '%s'",
                            kv.first.c_str());
@@ -260,9 +267,12 @@ bool ScriptSubSystem::watchScriptPath(const std::string& scriptName,
     entry.scriptName = scriptName;
     entry.normalizedPath = normalized;
     entry.ctx = ctx;
+    entry.ctx.sourcePath = filePath;
+    for (const auto& path : _bridge.scriptDependencies(scriptName)) entry.dependencies.push_back(ayt::io::path::normalize(path));
     _hotReload->byPath[normalized] = std::move(entry);
 
     if (_hotReload->enabled && _hotReload->watcher) {
+        for (const auto& path : _hotReload->byPath[normalized].dependencies) _hotReload->watcher->watch(path, nullptr);
         return _hotReload->watcher->watch(normalized, nullptr);
     }
     return true;
@@ -309,10 +319,12 @@ bool ScriptSubSystem::bindAndLoadFromFile(
 void ScriptSubSystem::bindActorHosts()
 {
     if (!_initialized) return;
+    _bridge.bindWorld(&ayt::entity::World::instance());
     for (auto* entity : ayt::entity::World::instance().getAllEntities()) {
         if (!entity || !entity->isValid()) continue;
         auto* instance = entity->getComponent<ayt::entity::ActorInstanceComponent>();
         if (!instance || instance->runtimeBindingAttempted) continue;
+        _bridge.bindWorld(&ayt::entity::World::instance(), instance->assetsRoot);
         instance->runtimeBindingAttempted = true;
         std::string error;
         ayt::entity::ActorClassAsset asset;
@@ -362,7 +374,12 @@ void ScriptSubSystem::bindActorHosts()
                     + asset.id);
             }
             std::vector<logia::CompilerError> errors;
-            const auto context = logia::actorLogiaHostContext();
+            auto context = logia::checkedLogiaHostContext(logia::actorLogiaHostContext());
+            context.sourcePath = scriptPath;
+            context.assetRoot = instance->assetsRoot;
+            for (auto it = properties.begin(); it != properties.end(); ++it)
+                context.actorProperties[it.key()] = it.value().is_boolean() ? "bool"
+                    : it.value().is_number() ? "float" : "string";
             const std::string source = ayt::io::File::readAllText(scriptPath);
             if (source.empty()) throw std::runtime_error(
                 "Actor Logia source is empty or unreadable: " + scriptPath);
@@ -406,15 +423,12 @@ void ScriptSubSystem::pollAndApplyReloads()
 
     for (const ayt::io::FileWatchEvent& ev : events) {
         const std::string norm = ayt::io::path::normalize(ev.path);
-        auto it = _hotReload->byPath.find(norm);
-        if (it == _hotReload->byPath.end()) {
-            continue;
+        for (auto& [path, entry] : _hotReload->byPath) {
+            if (path == norm || std::find(entry.dependencies.begin(), entry.dependencies.end(), norm) != entry.dependencies.end()) {
+                entry.pendingReload = true;
+                entry.debounceStartMs = nowMs;
+            }
         }
-        if (ev.kind == ayt::io::FileWatchEvent::Kind::Deleted) {
-            continue;
-        }
-        it->second.pendingReload = true;
-        it->second.debounceStartMs = nowMs;
     }
 
     for (auto& kv : _hotReload->byPath) {
@@ -442,6 +456,12 @@ void ScriptSubSystem::pollAndApplyReloads()
         std::vector<logia::CompilerError> errors;
         if (_bridge.reloadScript(entry.scriptName, source, entry.ctx, errors)) {
             ++_hotReload->applyCount;
+            entry.dependencies.clear();
+            for (const auto& dependency : _bridge.scriptDependencies(entry.scriptName)) {
+                auto path = ayt::io::path::normalize(dependency);
+                entry.dependencies.push_back(path);
+                _hotReload->watcher->watch(path, nullptr);
+            }
         } else {
             ayt::log::error("Logia reload failed for '%s'; existing script remains unchanged",
                             entry.normalizedPath.c_str());

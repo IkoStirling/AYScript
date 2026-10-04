@@ -1,0 +1,5 @@
+script MotionHelpers {
+    function displacement(seconds: float): vec3 {
+        return vec3.new(seconds, 0.0, 0.0)
+    }
+}

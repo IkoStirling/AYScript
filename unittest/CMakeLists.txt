@@ -46,4 +46,4 @@ target_link_libraries(${TEST_NAME} PRIVATE
 )
 
 ay_add_test_tiers(${TEST_NAME} PREFIX script TIMEOUT 120
-    INTEGRATION_SUITES LogiaCliTests LogiaHotReloadWatcherTests LogiaScriptSubSystemPlayTests)
+    INTEGRATION_SUITES LogiaCliTests LogiaHotReloadWatcherTests LogiaScriptSubSystemPlayTests LogiaModulesAndTools)

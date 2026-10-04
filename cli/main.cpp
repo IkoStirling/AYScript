@@ -23,6 +23,9 @@
 #include "CliCompile.h"
 #include "AYScript/logia/CompilerError.h"
 #include "AYScript/logia/Logia.h"
+#include "AYScript/logia/Tooling.h"
+#include "AYScript/logia/Package.h"
+#include <nlohmann/json.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -38,17 +41,22 @@ const char* kUsage =
     "Usage: ays-logia compile <file.logia> [--host component|actor|system|tool|eventhandler]\n"
     "                                [--strict-inheritance]\n"
     "                                [-o out.lua]\n"
+    "    ays-logia analyze <file.logia> [--host ...] [--asset-root <dir>] [--actor-schema <json>] [--json]\n"
+    "    ays-logia package <file.logia> -o <new-directory> [--host ...] [--asset-root <dir>] [--actor-schema <json>]\n"
+    "    --checked enables lexical/type/return validation for compile. Analyze/package always use it.\n"
     "\n"
     "Compiles a Logia source file into Lua and emits either to stdout\n"
     "(default) or to a file (-o). Exits non-zero on any compile error.\n"
     "Warnings are surfaced on stderr but do not flip the exit code.\n";
 
 struct Args {
+    std::string action = "compile", assetRoot, actorSchema, hostFunctions;
     std::string sourcePath;
     std::string outputPath;
     ayt::script::logia::LogiaHostKind hostKind =
         ayt::script::logia::LogiaHostKind::Component;
     bool strictInheritance = false;
+    bool strictSemantics = false;
 };
 
 void printUsage(FILE* out)
@@ -86,10 +94,11 @@ bool parseArgs(int argc, char** argv, Args& out, std::string& err)
         err = "missing subcommand";
         return false;
     }
-    if (std::strcmp(argv[1], "compile") != 0) {
+    if (std::strcmp(argv[1], "compile") != 0 && std::strcmp(argv[1], "analyze") != 0 && std::strcmp(argv[1], "package") != 0) {
         err = std::string("unknown subcommand '") + argv[1] + "'";
         return false;
     }
+    out.action = argv[1];
     if (argc < 3) {
         err = "missing <file>";
         return false;
@@ -117,6 +126,16 @@ bool parseArgs(int argc, char** argv, Args& out, std::string& err)
             if (!parseHostKind(argv[++i], out.hostKind, err)) return false;
         } else if (a == "--strict-inheritance") {
             out.strictInheritance = true;
+        } else if (a == "--checked") {
+            out.strictSemantics = true;
+        } else if (a == "--json") {
+            // Analyze emits JSON; kept explicit for scripts invoking this command.
+        } else if (a == "--asset-root" || a == "--actor-schema" || a == "--host-functions") {
+            if(i+1>=argc){err=a+" needs a value";return false;}
+            auto value=std::string(argv[++i]);
+            if(a=="--asset-root")out.assetRoot=value;
+            if(a=="--actor-schema")out.actorSchema=value;
+            if(a=="--host-functions")out.hostFunctions=value;
         } else if (a == "-o") {
             if (i + 1 >= argc) { err = "-o needs a value"; return false; }
             out.outputPath = argv[++i];
@@ -194,11 +213,41 @@ int main(int argc, char** argv)
     req.outputPath = args.outputPath;
     req.ctx.kind = args.hostKind;
     req.ctx.strictInheritance = args.strictInheritance;
+    req.ctx.strictSemantics = args.strictSemantics;
     if (args.hostKind == ayt::script::logia::LogiaHostKind::Tool
         || args.hostKind == ayt::script::logia::LogiaHostKind::EventHandler) {
         // Tool / EventHandler never bind a ScriptComponent receiver.
         req.ctx.expectSelf = false;
     }
+    req.ctx.sourcePath = args.sourcePath; req.ctx.assetRoot = args.assetRoot;
+    try {
+        auto readJson=[](const std::string& path){std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("could not read context JSON");return nlohmann::json::parse(file);};
+        if(!args.actorSchema.empty())req.ctx.actorProperties=readJson(args.actorSchema).get<decltype(req.ctx.actorProperties)>();
+        if(!args.hostFunctions.empty()){
+            const auto json=readJson(args.hostFunctions);
+            for(auto i=json.begin();i!=json.end();++i)req.ctx.hostFunctions[i.key()]={i.value().at("parameters").get<std::vector<std::string>>(),i.value().at("result").get<std::string>()};
+        }
+        if(args.action=="package") {
+            if(args.outputPath.empty()){std::fputs("package requires -o <new-directory>\n",stderr);return 2;}
+            auto package=ayt::script::logia::buildLogiaPackage(args.sourcePath,args.outputPath,req.ctx);
+            for(const auto& d:package.diagnostics)std::fputs(formatDiagnostic(d).c_str(),stderr);
+            if(!package.success)return 1;
+            std::printf("%s\n",package.manifestPath.c_str());return 0;
+        }
+        if(args.action=="analyze") {
+            std::ifstream file(args.sourcePath,std::ios::binary);if(!file)throw std::runtime_error("could not read source");
+            auto analysis=ayt::script::logia::analyzeLogia(std::string((std::istreambuf_iterator<char>(file)),{}),req.ctx);
+            auto location=[](const auto& loc){return nlohmann::json{{"file",loc.file},{"line",loc.line},{"column",loc.column}};};
+            nlohmann::json json{{"success",analysis.success},{"dependencies",analysis.dependencies},{"symbols",nlohmann::json::array()},{"references",nlohmann::json::array()},{"diagnostics",nlohmann::json::array()}};
+            for(const auto& symbol:analysis.symbols)json["symbols"].push_back({{"name",symbol.name},{"type",symbol.type},{"kind",symbol.kind},{"definition",location(symbol.definition)},{"scopeBegin",symbol.scopeBegin},{"scopeEnd",symbol.scopeEnd}});
+            for(const auto& reference:analysis.references)json["references"].push_back({{"location",location(reference.location)},{"symbol",reference.symbol}});
+            for(const auto& d:analysis.diagnostics)json["diagnostics"].push_back({{"severity",severityTag(d.severity)},{"message",d.message},{"location",location(d.location)}});
+            auto output=json.dump(2)+"\n";
+            if(args.outputPath.empty())std::fwrite(output.data(),1,output.size(),stdout);
+            else {std::ofstream destination(args.outputPath,std::ios::binary);destination<<output;if(!destination)throw std::runtime_error("could not write analysis");}
+            return analysis.success?0:1;
+        }
+    } catch(const std::exception& error) {std::fprintf(stderr,"ays-logia: %s\n",error.what());return 1;}
 
     ayt::script::logia::CliCompileResult res =
         ayt::script::logia::compileFromCli(req);
