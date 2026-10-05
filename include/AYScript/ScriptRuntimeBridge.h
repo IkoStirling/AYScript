@@ -1,4 +1,5 @@
 #pragma once
+#include <AYMath/MathTypes.h>
 // AYScript/ScriptRuntimeBridge.h - sol2-backed runtime for compiled Logia (S1+)
 
 #include <memory>
@@ -11,11 +12,11 @@
 #include "AYScript/logia/Logia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
 namespace ayt::entity { struct ActorScriptComponent; }
-namespace ayt::entity { class World; }
+namespace ayt::entity { class World; class Entity; }
 
 namespace ayt::script
 {
-using ScriptHostValue = std::variant<std::monostate, std::int64_t, double, bool, std::string>;
+using ScriptHostValue = std::variant<std::monostate, std::int64_t, double, bool, std::string, ayt::math::FVector3>;
 using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<ScriptHostValue>&)>;
 
 // S3.6 (LG-06a) — compile pipeline version stamp.
@@ -380,7 +381,7 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       runtime set_field no-ops ScriptReadOnly.
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
-constexpr std::size_t kLogiaPipelineVersion = 35u;
+constexpr std::size_t kLogiaPipelineVersion = 36u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -547,6 +548,13 @@ public:
     /// must already exist with exactly matching signatures. Loading never binds
     /// a World or grants new native capabilities from manifest declarations.
     bool loadScriptPackage(const std::string& manifestPath, std::vector<logia::CompilerError>& errors);
+    /// Integration-only borrowed access: tokens are invalid after World teardown.
+    /// Gameplay scripts acquire tokens with entity.self()/find(), never native pointers.
+    ayt::entity::Entity* resolveEntityToken(std::int64_t token);
+    std::int64_t entityToken(ayt::entity::Entity* entity);
+    ayt::entity::World* boundWorld() const;
+    std::string boundAssetsRoot() const;
+    std::uint64_t worldGeneration() const;
 
     // === S5 ED-03 (2026-07-15) — Lua-line → Logia-line error translation ===
 
@@ -623,7 +631,7 @@ public:
     /// Advance pending tasks once per variable-rate frame. Waits resume at a
     /// later task tick; destroy/reload/shutdown cancel their outstanding work.
     void tickTasks(float deltaTime);
-    /// Register an explicitly authorized scalar facade (e.g. audio.play,
+    /// Register an explicitly authorized scalar/vec3 facade (e.g. audio.play,
     /// animation.play, stats.read). Signatures are checked before compilation
     /// and again at the native boundary; providers own their module lifetimes.
     bool registerHostFunction(const std::string& qualifiedName,

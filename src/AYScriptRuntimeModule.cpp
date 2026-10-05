@@ -9,7 +9,7 @@
 namespace ayt::script
 {
 
-ScriptRuntimeModule::ScriptRuntimeModule()
+ScriptRuntimeModule::ScriptRuntimeModule(InstallHook hostFunctions)
     : SubSystemModule(
           ayt::module::ModuleDescriptor{
               .id = std::string(kScriptRuntimeModuleId),
@@ -26,7 +26,7 @@ ScriptRuntimeModule::ScriptRuntimeModule()
           "ayt.script.runtime",
           []() {
               return std::make_unique<ScriptSubSystem>();
-          })
+          }, std::move(hostFunctions))
 {
 }
 

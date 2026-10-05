@@ -1815,6 +1815,14 @@ struct LogiaRuntimeBridge::Impl {
     void registerEngineApi()
     {
         worldFacade.install(lua);
+        sol::table entityFunctions = lua["entity"];
+        entityFunctions["self"] = [this]() -> std::int64_t {
+            if (eventOwnerStack.empty()) return 0;
+            for (const auto& [actor,owner] : actorOwners)
+                if (owner == eventOwnerStack.back())
+                    return worldFacade.expose(static_cast<ayt::entity::ActorScriptComponent*>(actor)->getEntity());
+            return 0;
+        };
         // log table → wraps AYLog
         auto logTbl = lua.create_table();
         logTbl["info"]  = [](const std::string& s) {
@@ -2568,7 +2576,7 @@ bool LogiaRuntimeBridge::registerHostFunction(const std::string& name,
     if (!identifier(space) || !identifier(member) || space.starts_with('_') || member.starts_with('_')) return false;
     for (const char* reserved : {"entity", "input", "time", "event", "log", "vec2", "vec3", "quat", "array", "math", "string", "table", "utf8", "tasks"})
         if (space == reserved) return false;
-    auto scalar = [](const std::string& type) { return type == "int" || type == "float" || type == "bool" || type == "string"; };
+    auto scalar = [](const std::string& type) { return type == "int" || type == "float" || type == "bool" || type == "string" || type == "vec3"; };
     for (const auto& type : signature.parameters) if (!scalar(type)) return false;
     if (signature.result != "void" && !scalar(signature.result)) return false;
     _impl->hostFunctions[name] = {signature, std::move(function)};
@@ -2584,9 +2592,24 @@ bool LogiaRuntimeBridge::registerHostFunction(const std::string& name,
         for (size_t i = 0; i < args.size(); ++i) {
             sol::object value = args[i]; const auto& type = entry.signature.parameters[i];
             if (type == "int" && value.is<lua_Integer>()) values.emplace_back(static_cast<std::int64_t>(value.as<lua_Integer>()));
+            else if (type == "int" && value.is<double>() && std::isfinite(value.as<double>())
+                     && std::trunc(value.as<double>()) == value.as<double>()
+                     && value.as<double>() >= -9223372036854775808.0
+                     && value.as<double>() < 9223372036854775808.0)
+                values.emplace_back(static_cast<std::int64_t>(value.as<double>()));
             else if (type == "float" && value.is<double>() && std::isfinite(value.as<double>())) values.emplace_back(value.as<double>());
             else if (type == "bool" && value.is<bool>()) values.emplace_back(value.as<bool>());
             else if (type == "string" && value.is<std::string>()) values.emplace_back(value.as<std::string>());
+            else if (type == "vec3" && value.is<sol::table>()) {
+                auto t = value.as<sol::table>(); ayt::math::FVector3 vector;
+                auto field = [&](const char* key) {
+                    sol::object v=t[key];
+                    if(!v.is<double>() || !std::isfinite(v.as<double>()) || std::abs(v.as<double>())>std::numeric_limits<float>::max())
+                        throw std::runtime_error("Logia host vec3 field is invalid");
+                    return static_cast<float>(v.as<double>());
+                };
+                vector.x=field("x");vector.y=field("y");vector.z=field("z");values.emplace_back(vector);
+            }
             else throw std::runtime_error("Logia host argument type mismatch");
         }
         const auto result = entry.function(values);
@@ -2595,11 +2618,19 @@ bool LogiaRuntimeBridge::registerHostFunction(const std::string& name,
             || (type == "int" && std::holds_alternative<std::int64_t>(result))
             || (type == "float" && std::holds_alternative<double>(result) && std::isfinite(std::get<double>(result)))
             || (type == "bool" && std::holds_alternative<bool>(result))
-            || (type == "string" && std::holds_alternative<std::string>(result));
+            || (type == "string" && std::holds_alternative<std::string>(result))
+            || (type == "vec3" && std::holds_alternative<ayt::math::FVector3>(result)
+                && std::isfinite(std::get<ayt::math::FVector3>(result).x)
+                && std::isfinite(std::get<ayt::math::FVector3>(result).y)
+                && std::isfinite(std::get<ayt::math::FVector3>(result).z));
         if (!valid) throw std::runtime_error("Logia host result violates registered signature");
         return std::visit([this](const auto& value) -> sol::object {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, std::monostate>) return sol::make_object(_impl->lua, sol::nil);
+            else if constexpr (std::is_same_v<T, ayt::math::FVector3>) {
+                auto table = _impl->lua.create_table();table["x"]=value.x;table["y"]=value.y;table["z"]=value.z;
+                return sol::make_object(_impl->lua,table);
+            }
             else return sol::make_object(_impl->lua, value);
         }, result);
     };
@@ -2612,6 +2643,21 @@ void LogiaRuntimeBridge::unregisterHostFunction(const std::string& name)
     if (!_impl || !_impl->requireOwnerThread("unregisterHostFunction")) return;
     _impl->hostFunctions.erase(name);
     clearCompileCache();
+}
+ayt::entity::Entity* LogiaRuntimeBridge::resolveEntityToken(std::int64_t token) {
+    return _impl && _impl->requireOwnerThread("resolveEntityToken") ? _impl->worldFacade.resolve(token) : nullptr;
+}
+std::int64_t LogiaRuntimeBridge::entityToken(ayt::entity::Entity* entity) {
+    return _impl && _impl->requireOwnerThread("entityToken") ? _impl->worldFacade.expose(entity) : 0;
+}
+ayt::entity::World* LogiaRuntimeBridge::boundWorld() const {
+    return _impl && _impl->requireOwnerThread("boundWorld") ? _impl->worldFacade.boundWorld() : nullptr;
+}
+std::string LogiaRuntimeBridge::boundAssetsRoot() const {
+    return _impl && _impl->requireOwnerThread("boundAssetsRoot") ? _impl->worldFacade.boundAssetsRoot() : std::string{};
+}
+std::uint64_t LogiaRuntimeBridge::worldGeneration() const {
+    return _impl && _impl->requireOwnerThread("worldGeneration") ? _impl->worldFacade.generation() : 0;
 }
 void LogiaRuntimeBridge::flushWorldCommands()
 {

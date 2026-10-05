@@ -13,7 +13,8 @@ inline constexpr std::string_view kScriptRuntimeModuleId =
 class ScriptRuntimeModule final : public ayt::game::SubSystemModule
 {
 public:
-    ScriptRuntimeModule();
+    /// Host hook installs its providers before any lifecycle source is loaded.
+    explicit ScriptRuntimeModule(InstallHook hostFunctions = {});
 };
 
 } // namespace ayt::script

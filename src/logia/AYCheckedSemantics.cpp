@@ -869,6 +869,7 @@ const BuiltinFunctionCatalog &checkedBuiltinFunctions()
         {"vec2.normalized", {{"vec2"}, "vec2"}},
         {"event.unsubscribe", {{"int"}, "void"}},
         {"entity.create", {{"string"}, "int"}},
+        {"entity.self", {{}, "int"}},
         {"entity.spawn_actor", {{"string", "string"}, "int"}},
         {"entity.find", {{"string"}, "int"}},
         {"entity.exists", {{"int"}, "bool"}},

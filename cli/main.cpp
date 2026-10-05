@@ -25,6 +25,7 @@
 #include "AYScript/logia/Logia.h"
 #include "AYScript/logia/Tooling.h"
 #include "AYScript/logia/Package.h"
+#include "AYScript/logia/EngineFunctions.h"
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
@@ -44,6 +45,7 @@ const char* kUsage =
     "    ays-logia analyze <file.logia> [--host ...] [--asset-root <dir>] [--actor-schema <json>] [--json]\n"
     "    ays-logia package <file.logia> -o <new-directory> [--host ...] [--asset-root <dir>] [--actor-schema <json>]\n"
     "    --checked enables lexical/type/return validation for compile. Analyze/package always use it.\n"
+    "    --engine-host declares the default application audio/animation/physics/UI interfaces.\n"
     "\n"
     "Compiles a Logia source file into Lua and emits either to stdout\n"
     "(default) or to a file (-o). Exits non-zero on any compile error.\n"
@@ -57,6 +59,7 @@ struct Args {
         ayt::script::logia::LogiaHostKind::Component;
     bool strictInheritance = false;
     bool strictSemantics = false;
+    bool engineHost = false;
 };
 
 void printUsage(FILE* out)
@@ -121,7 +124,8 @@ bool parseArgs(int argc, char** argv, Args& out, std::string& err)
 
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--host") {
+        if (a == "--engine-host") { out.engineHost=true;out.strictSemantics=true; }
+        else if (a == "--host") {
             if (i + 1 >= argc) { err = "--host needs a value"; return false; }
             if (!parseHostKind(argv[++i], out.hostKind, err)) return false;
         } else if (a == "--strict-inheritance") {
@@ -220,6 +224,7 @@ int main(int argc, char** argv)
         req.ctx.expectSelf = false;
     }
     req.ctx.sourcePath = args.sourcePath; req.ctx.assetRoot = args.assetRoot;
+    if(args.engineHost)req.ctx=ayt::script::logia::engineLogiaHostContext(std::move(req.ctx));
     try {
         auto readJson=[](const std::string& path){std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("could not read context JSON");return nlohmann::json::parse(file);};
         if(!args.actorSchema.empty())req.ctx.actorProperties=readJson(args.actorSchema).get<decltype(req.ctx.actorProperties)>();

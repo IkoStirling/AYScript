@@ -33,6 +33,7 @@ void ScriptWorldFacade::beforeShutdown(ayt::entity::World &ending) noexcept
 }
 void ScriptWorldFacade::clear()
 {
+    ++epoch;
     world = nullptr;
     entities.clear();
     commands.clear();
@@ -59,6 +60,7 @@ std::int64_t ScriptWorldFacade::expose(ayt::entity::Entity *entity)
     if (!entity || !world)
         return 0;
     auto handle = world->getEntityHandle(entity->getId());
+    if (world->getEntityByHandle(handle) != entity) return 0;
     for (const auto &[token, entry] : entities)
         if (!entry.pending && entry.handle == handle)
             return token;

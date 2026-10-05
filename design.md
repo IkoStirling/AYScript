@@ -3107,3 +3107,12 @@ buildLogiaPackage 校验入口及闭包，在新的 staging 目录写完整源�
 readLogiaPackage 检查版本、相对路径、文件数量/大小、FNV-1a 64 指纹、宿主契约与依赖闭包。
 指纹仅用于检测内容变化，不是安全签名。loadScriptPackage 要求所有声明 provider 已注册且签名完全匹配，
 不从清单自动注册原生功能。包为可移动源码包，仍在运行时编译；不生成独立字节码或替代项目 cooked 资源。
+
+## 默认引擎接口契约（2026-10-06）
+
+EngineFunctions 保存 26 个共享 HostFunctionSignature，供 CLI/Editor 与 AYApplication provider 使用。
+元数据不安装 Lua 回调。registerHostFunction 新增 vec3 的 x/y/z table 与 FVector3 双向封送，
+逐字段验证有限值/float 范围，复检返回类型；pipeline version 为 36，失效旧编译缓存。
+ScriptRuntimeModule 的可选 InstallHook 在源码装载前安装函数，不把 Audio/UI 等依赖引入 AYScript。
+entity.self 通过正在调用的 Actor receiver 映射到 ScriptWorldFacade 的 generation-checked World 令牌；
+外部 Actor 或未绑定 World 返回 0。原生集成的 resolveEntityToken 只借用当前 World 实体，不能跨帧保存指针。

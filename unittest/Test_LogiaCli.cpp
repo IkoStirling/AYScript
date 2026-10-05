@@ -537,4 +537,15 @@ TEST_CASE(cli_s5ed03_codegen_output_unchanged_by_sourcemap_refactor) {
     std::remove(outPath.c_str());
 }
 
+TEST_CASE(cli_engine_host_shared_signatures_check_compile_and_analysis)
+{
+    const auto bin=locateBinary();REQUIRE_CLI_BIN(bin);
+    const std::string path="_cli_engine_host.logia";
+    {std::ofstream file(path);file<<"script Engine { on_start() { audio.play(\"a.ayaudio\",1.0,false) physics.raycast(vec3.new(0,0,0),vec3.new(1,0,0),10.0,1) } }";}
+    CHECK(runCommand(makeCliCommand(bin,"compile "+path+" --host actor --engine-host")).exitCode==0);
+    CHECK(runCommand(makeCliCommand(bin,"analyze "+path+" --host actor --engine-host --json")).exitCode==0);
+    {std::ofstream file(path);file<<"script Engine { on_start() { audio.play(true,1.0,false) } }";}
+    CHECK(runCommand(makeCliCommand(bin,"compile "+path+" --host actor --engine-host")).exitCode!=0);
+    std::remove(path.c_str());
+}
 TEST_SUITE_END
