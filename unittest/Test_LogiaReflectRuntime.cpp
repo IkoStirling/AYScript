@@ -781,11 +781,10 @@ TEST_CASE(lg12_ay_method_macro_void_increments_state) {
     LogiaRuntimeBridge bridge;
     ensureMacroPlayerRegistered();
     MacroPlayer obj;
-    // Note: hp is registered via AY_PROPERTY and has no in-class
-    // initializer (the AY_PROPERTY macro just declares `int hp;`).
-    // We don't pre-check the initial value because heap state
-    // depends on the test process; the test only cares that
-    // `self.heal(25)` mutates the field to 25.
+    // AY_PROPERTY declares an uninitialized int. Give the receiver a known
+    // starting value so both Debug and optimized builds exercise heal(25)
+    // without undefined reads or accidentally triggering the maxHp clamp.
+    obj.hp = 0;
 
     auto* ti = ayt::reflect::TypeRegistryImpl::instance().findType("MacroPlayer");
     CHECK(ti != nullptr);
@@ -810,11 +809,10 @@ script MacroPlayer {
     bool loaded = bridge.loadScript("MacroPlayer_heal", src, ctx, errors);
     CHECK(loaded);
     CHECK(errors.empty());
-    int hpBefore = obj.hp;
     bool called = bridge.callLifecycle("MacroPlayer_heal",
                                        "on_start", &obj, nullptr);
     CHECK(called);
-    CHECK(obj.hp == hpBefore + 25);
+    CHECK(obj.hp == 25);
 }
 
 TEST_CASE(lg12_ay_method_macro_const_return_round_trip) {

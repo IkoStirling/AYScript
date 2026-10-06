@@ -324,4 +324,40 @@ TEST_CASE(checked_contract_diagnoses_expression_statements_and_legacy_new_syntax
     CHECK(!logia::compileLogiaToLua("script Main { function f():int { return 1 } }").success);
     CHECK(!logia::compileLogiaToLua("script Main { function f() { await delay(1) } }").success);
 }
+TEST_CASE(imported_payload_bindings_keep_original_source_and_survive_portable_package_loading)
+{
+    Workspace files;
+    files.put("helpers/event.logia", R"logia(script Helpers {
+    function receive(base:int) {
+        await wait_event("script_test_ping") into (n:int)
+        self.hp=base+n
+    }
+})logia");
+    const char *source = "script Main { import \"helpers/event.logia\" on_start() { tasks.start(receive,5) } }";
+    files.put("main.logia", source);
+    auto ctx = files.context();
+    auto analysis = logia::analyzeLogia(source, ctx);
+    CHECK(analysis.success);
+    const auto helper = (files.root / "helpers/event.logia").generic_string();
+    auto symbols = analysis.complete("n", helper, 4);
+    CHECK(symbols.size() == 1);
+    auto definition = analysis.definitionAt({helper, 4, 22});
+    CHECK(definition.has_value());
+    if (definition) { CHECK(definition->file == helper); CHECK(definition->line == 3); }
+    auto package = logia::buildLogiaPackage(ctx.sourcePath, (files.root / "published").generic_string(), ctx);
+    CHECK(package.success);
+    if (!package.success) return;
+    std::filesystem::remove(files.root / "main.logia");
+    std::filesystem::remove(files.root / "helpers/event.logia");
+    LogiaRuntimeBridge bridge;
+    std::vector<logia::CompilerError> errors;
+    CHECK(bridge.loadScriptPackage(package.manifestPath, errors));
+    ayt::entity::ActorScriptComponent actor;
+    actor.properties["hp"] = 0.0;
+    CHECK(bridge.callActorLifecycle("Main", "on_start", actor));
+    bridge.tickTasks(0);
+    ayt::event::EventBus::instance().emit(ayt::event::ScriptTestPingEvent{17});
+    bridge.tickTasks(0);
+    CHECK_FLOAT_EQ(std::get<double>(actor.properties["hp"]), 22.0, 0.001);
+}
 TEST_SUITE_END

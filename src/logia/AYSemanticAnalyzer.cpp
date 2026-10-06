@@ -899,30 +899,37 @@ void ensureAYEntityTypesRegistered()
         reg.registerTypeInfo("FQuaternion", fQuat);
     }
 
-    // Transform — always re-register so its field types are non-null.
-    {
+    // Reuse the registry descriptor and add only missing fields. The registry
+    // discards duplicate type descriptors, whose non-owning FieldInfo pointers
+    // would otherwise leak on every checked compile.
+    auto* transformInfo = reg.findType<ayt::entity::Transform>();
+    if (!transformInfo) {
         auto* info = new ayt::reflect::TypeInfoImpl<ayt::entity::Transform>(
             "Transform",
             ayt::reflect::detail::defaultCreate<ayt::entity::Transform>,
             ayt::reflect::detail::defaultDestroy<ayt::entity::Transform>,
             ayt::reflect::detail::defaultCopy<ayt::entity::Transform>);
-        if (fVec3) {
-            info->addField(new ayt::reflect::FieldInfoImpl(
+        transformInfo = reg.registerTypeInfo("Transform", info);
+    }
+    if (transformInfo) {
+        if (fVec3 && !transformInfo->findField("position")) {
+            transformInfo->addField(new ayt::reflect::FieldInfoImpl(
                 "position", fVec3,
                 offsetof(ayt::entity::Transform, position),
                 ayt::reflect::FieldAttribute::Serialize));
-            info->addField(new ayt::reflect::FieldInfoImpl(
+        }
+        if (fVec3 && !transformInfo->findField("scale")) {
+            transformInfo->addField(new ayt::reflect::FieldInfoImpl(
                 "scale", fVec3,
                 offsetof(ayt::entity::Transform, scale),
                 ayt::reflect::FieldAttribute::Serialize));
         }
-        if (fQuat) {
-            info->addField(new ayt::reflect::FieldInfoImpl(
+        if (fQuat && !transformInfo->findField("rotation")) {
+            transformInfo->addField(new ayt::reflect::FieldInfoImpl(
                 "rotation", fQuat,
                 offsetof(ayt::entity::Transform, rotation),
                 ayt::reflect::FieldAttribute::Serialize));
         }
-        reg.registerTypeInfo("Transform", info);
     }
 
     if (!reg.findType("HealthComponent")) {

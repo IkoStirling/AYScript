@@ -14,7 +14,7 @@ Actor 自动加载、编辑器作者分析和使用新语法的文档采用 chec
 | 实例状态 | `state name: type = value`；`var` 仍在同一模块内共享。销毁释放，成功重载保留同名同类型状态；`resetInstanceState` 显式重置。 |
 | 受控世界操作 | `bindWorld` 后使用 `entity.*` 令牌；创建、销毁、组件/字段修改排队，`flushWorldCommands` 在迭代边界应用。World 关闭使旧令牌失效。 |
 | 模块宿主接口 | `registerHostFunction` 注册标量/vec3 provider；编译与调用均校验。默认 Application/Editor 装配安装基础音频、动画、物理与游戏 UI 函数；独立宿主显式安装。 |
-| 异步任务 | `tasks.start(helper)`，helper 内 `await delay(seconds)` / `await wait_event(alias)`；后续变量帧恢复，销毁、替换和 shutdown 取消。 |
+| 异步任务 | `tasks.start(helper, args...)` 类型检查并捕获参数；`await wait_event("alias") into (name: type, ...)` 接收首个标量 payload。后续变量帧恢复，销毁、替换和 shutdown 取消。 |
 | 模块与数据 | `import "relative.logia"` 引入 helper；`array<T>` 支持嵌套、length/push/pop，1-based 索引有边界保护；vec3/quat 使用 AYMath 的左手坐标与弧度约定。 |
 | 作者工具与发布 | `analyzeLogia` 提供诊断、符号补全和定义引用；错误包含原始文件与调用帧。`buildLogiaPackage` 打包源码依赖闭包，`loadScriptPackage` 校验后加载。 |
 
@@ -69,3 +69,29 @@ ays-logia analyze examples/engine_host.logia --host actor --engine-host --json
 原生 provider 支持标量与有限 vec3。独立 bridge 仍需显式安装 provider；元数据不授予运行权限。
 正常 ProjectBuild 自动收集、校验并以 raw/loose 发布 import 闭包。详见
 [默认接口与发布契约](../../AYDocs/LOGIA-CHECKED-CAPABILITIES.md#4-默认引擎宿主函数)。
+
+## 异步事件工作流
+
+[async_events.logia](examples/async_events.logia) 展示同步事件 handler 向任务传参和类型化 payload 等待。
+`into` 声明当前词法块内的局部变量；位置、数量和类型必须与已知 alias 的签名完全匹配。
+Scene alias 的借用指针只允许同步 `event.subscribe` 消费。无 `into` 的等待继续仅用作通知。
+等待不缓存订阅建立前的事件；同一等待取第一个到达事件，其余事件丢弃，不提供事件队列或超时。
+标量参数按启动时值传递，array/table/vector 保持引用语义。helper 必须返回 void；含 await 的 helper
+仍不能普通调用或直接作为事件 handler。每帧最多恢复 256 个任务，轮转 ID 防止 1024 上限内的饥饿。
+
+```powershell
+ays-logia compile examples/async_events.logia --host actor --checked
+ays-logia analyze examples/async_events.logia --host actor --json
+# 默认模型测试受限于 32 轮；显式长时验收直接运行可执行文件，避免 CTest 的 120 秒超时。
+$env:AY_LOGIA_ASYNC_STRESS_SECONDS = '3600'
+$env:AY_LOGIA_ASYNC_STRESS_SEED = '20261007'
+out/build/windows-debug-vs2026-insider/AYRuntime/AYScript/unittest/AYScript_AsyncStressTests.exe
+Remove-Item Env:AY_LOGIA_ASYNC_STRESS_SECONDS, Env:AY_LOGIA_ASYNC_STRESS_SEED
+```
+
+压力测试逐操作比较原生模型与 Logia 的状态，交错延时、首事件、实例释放、失败/成功重载和重启。
+它接受 0–18000 秒，0 为默认 32 轮；失败输出 seed/round/step 便于确定性重放。
+Windows Debug 另用 CRT 堆快照检查 256 次编译/运行时重建后的存活原生分配，覆盖重复注册
+Transform 字段元数据导致的泄漏；长时测试的 Lua 预算不能替代这项原生堆检查。
+MSVC AddressSanitizer 验收时，匹配编译器版本的 `clang_rt.asan_dynamic-x86_64.dll` 须能被
+测试程序和 CLI 定位；运行库未装载的启动超时不属于脚本测试通过。

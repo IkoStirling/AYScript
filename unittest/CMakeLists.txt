@@ -47,3 +47,11 @@ target_link_libraries(${TEST_NAME} PRIVATE
 
 ay_add_test_tiers(${TEST_NAME} PREFIX script TIMEOUT 120
     INTEGRATION_SUITES LogiaCliTests LogiaHotReloadWatcherTests LogiaScriptSubSystemPlayTests LogiaModulesAndTools)
+
+# Keep long randomized scheduling runs isolated from the normal regression.
+# Default runs are bounded; an explicit duration is used only for soak acceptance.
+add_executable(AYScript_AsyncStressTests main.cpp stress/Test_AsyncModel.cpp)
+target_link_libraries(AYScript_AsyncStressTests PRIVATE AYScript AYTest AYEntity AYReflect)
+ay_add_test(AYScript_AsyncStressTests CASE_REPORT
+    LABELS "script;script-stress;script-full;stress" TIMEOUT 120 RUN_SERIAL)
+add_dependencies(${TEST_NAME} AYScript_AsyncStressTests)

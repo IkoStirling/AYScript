@@ -57,7 +57,11 @@ void stamp(std::vector<StmtPtr> &statements, const std::string &file)
         if (auto *e = dynamic_cast<ExprStmt *>(statement.get()))
             stampExpr(e->expr.get(), file);
         if (auto *a = dynamic_cast<AwaitStmt *>(statement.get()))
+        {
             stampExpr(a->operation.get(), file);
+            for (auto &binding : a->bindings)
+                binding.sourceLoc.file = file;
+        }
         if (auto *f = dynamic_cast<FunctionDeclStmt *>(statement.get()))
             stamp(f->body, file);
         if (auto *f = dynamic_cast<LifecycleFuncDecl *>(statement.get()))

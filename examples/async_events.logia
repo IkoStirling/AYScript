@@ -1,0 +1,33 @@
+script AsyncEvents {
+    state pending_action: int = 0
+    state resize_wait: int = 0
+
+    function delayed_action(action_id: int, pressed: bool) {
+        await delay(0.1)
+        if pressed && action_id >= 0 {
+            log.info("Action task resumed with captured arguments")
+        }
+    }
+    function on_action(action_id: int, pressed: bool) {
+        tasks.cancel(pending_action)
+        pending_action = tasks.start(delayed_action, action_id, pressed)
+    }
+    function wait_for_resize() {
+        await wait_event("window_resize") into (width: int, height: int)
+        if width > 0 && height > 0 {
+            log.info("Resize payload resumed on a later frame")
+        }
+    }
+    on_start() {
+        event.subscribe("device_action", on_action)
+        resize_wait = tasks.start(wait_for_resize)
+    }
+    on_reload() {
+        event.subscribe("device_action", on_action)
+        resize_wait = tasks.start(wait_for_resize)
+    }
+    on_destroy() {
+        tasks.cancel(pending_action)
+        tasks.cancel(resize_wait)
+    }
+}

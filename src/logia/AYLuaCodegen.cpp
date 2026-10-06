@@ -518,8 +518,20 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     if (auto* wait = dynamic_cast<const AwaitStmt*>(&stmt)) {
         auto* call = dynamic_cast<const CallExpr*>(wait->operation.get());
         auto* name = call ? dynamic_cast<const IdentifierExpr*>(call->callee.get()) : nullptr;
-        if (name && call->args.size() == 1)
-            writeLine(std::string(name->name == "delay" ? "__ay_wait_delay(" : "__ay_wait_event(") + emitExpr(*call->args[0]) + ")");
+        if (name && call->args.size() == 1) {
+            std::string line;
+            if (!wait->bindings.empty()) {
+                line = "local ";
+                for (size_t i = 0; i < wait->bindings.size(); ++i) {
+                    if (i) line += ", ";
+                    line += wait->bindings[i].name;
+                }
+                line += " = ";
+            }
+            line += name->name == "delay" ? "__ay_wait_delay(" : "__ay_wait_event(";
+            line += emitExpr(*call->args[0]) + ")";
+            writeLine(line);
+        }
         return;
     }
 

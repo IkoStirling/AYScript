@@ -206,7 +206,15 @@ public:
 
 class AwaitStmt : public Stmt {
 public:
+    /// Optional lexical declarations for a known EventBus alias's positional payload.
+    /// `await wait_event("task_complete") into (id: int, ok: bool)`.
+    struct Binding {
+        std::string name;
+        std::string typeName;
+        SourceLocation sourceLoc;
+    };
     ExprPtr operation;
+    std::vector<Binding> bindings;
 };
 class ImportStmt : public Stmt {
 public:

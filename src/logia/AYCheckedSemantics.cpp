@@ -386,16 +386,27 @@ struct Checker
                 }
                 if (name == "tasks.start")
                 {
-                    auto *handler = c.args.size() == 1
+                    auto *handler = !c.args.empty()
                                         ? dynamic_cast<IdentifierExpr *>(c.args[0].get())
                                         : nullptr;
                     auto fn = handler ? functions.find(handler->name) : functions.end();
-                    if (fn == functions.end() || !fn->second->params.empty() ||
+                    if (fn == functions.end() ||
                         (!fn->second->returnType.empty() && fn->second->returnType != "void"))
                         error(c.sourceLoc,
-                              "tasks.start requires a declared zero-parameter void function");
-                    else
+                              "tasks.start requires a declared void function followed by its arguments");
+                    else {
+                        handler->resolvedDecl = fn->second;
                         handler->resolvedFunction = fn->second;
+                        if (c.args.size() != fn->second->params.size() + 1)
+                            error(c.sourceLoc, "task argument count mismatch");
+                        for (size_t i = 1; i < c.args.size(); ++i) {
+                            if (i <= fn->second->params.size())
+                                require(canonical(fn->second->params[i - 1].typeName),
+                                        c.args[i].get(), c.args[i]->sourceLoc);
+                            else
+                                expr(c.args[i].get());
+                        }
+                    }
                     return "int";
                 }
                 if (name == "array.length" || name == "array.push" || name == "array.pop")
@@ -440,17 +451,7 @@ struct Checker
                                         ? dynamic_cast<IdentifierExpr *>(c.args[1].get())
                                         : nullptr;
                     auto fn = handler ? functions.find(handler->name) : functions.end();
-                    static const std::unordered_map<std::string, std::vector<std::string>> events{
-                        {"window_resize", {"int", "int"}},
-                        {"window_close", {}},
-                        {"resource_ready", {"int", "int", "bool"}},
-                        {"script_test_ping", {"int"}},
-                        {"device_action", {"int", "bool"}},
-                        {"task_complete", {"int", "bool"}},
-                        {"physics_collision", {"int", "int", "int"}},
-                        {"scene_current_changed", {"Scene"}},
-                        {"scene_begin_play", {"Scene"}},
-                        {"scene_end_play", {"Scene"}}};
+                    const auto &events = checkedEventPayloads();
                     auto *literal =
                         c.args.empty() ? nullptr : dynamic_cast<LiteralExpr *>(c.args[0].get());
                     auto *alias = literal ? std::get_if<std::string>(&literal->value) : nullptr;
@@ -662,6 +663,29 @@ struct Checker
             else
                 require(name->name == "delay" ? "float" : "string", call->args[0].get(),
                         wait->sourceLoc);
+            if (!wait->bindings.empty()) {
+                if (!name || name->name != "wait_event" || call->args.size() != 1)
+                    error(wait->sourceLoc, "into bindings require wait_event(alias)");
+                else {
+                    auto *literal = dynamic_cast<LiteralExpr *>(call->args[0].get());
+                    auto *alias = literal ? std::get_if<std::string>(&literal->value) : nullptr;
+                    const auto &events = checkedEventPayloads();
+                    auto event = alias ? events.find(*alias) : events.end();
+                    if (event == events.end())
+                        error(wait->sourceLoc, "event payload await requires a known literal alias");
+                    else if (std::find(event->second.begin(), event->second.end(), "Scene") != event->second.end())
+                        error(wait->sourceLoc, "borrowed Scene payload requires a synchronous event.subscribe handler");
+                    else {
+                        if (wait->bindings.size() != event->second.size())
+                            error(wait->sourceLoc, "event payload binding count mismatch");
+                        for (size_t i = 0; i < std::min(wait->bindings.size(), event->second.size()); ++i)
+                            if (canonical(wait->bindings[i].typeName) != event->second[i])
+                                error(wait->bindings[i].sourceLoc, "event payload binding type mismatch");
+                    }
+                }
+                for (auto &binding : wait->bindings)
+                    declare(binding.name, canonical(binding.typeName), &binding, binding.sourceLoc);
+            }
             return false;
         }
         if (auto *var = dynamic_cast<VarDeclStmt *>(&s))
@@ -884,6 +908,21 @@ const BuiltinFunctionCatalog &checkedBuiltinFunctions()
         {"tasks.cancel", {{"int"}, "bool"}},
         {"tasks.pending", {{"int"}, "bool"}}};
     return builtins;
+}
+const std::unordered_map<std::string, std::vector<std::string>> &checkedEventPayloads()
+{
+    static const std::unordered_map<std::string, std::vector<std::string>> events{
+        {"window_resize", {"int", "int"}},
+        {"window_close", {}},
+        {"resource_ready", {"int", "int", "bool"}},
+        {"script_test_ping", {"int"}},
+        {"device_action", {"int", "bool"}},
+        {"task_complete", {"int", "bool"}},
+        {"physics_collision", {"int", "int", "int"}},
+        {"scene_current_changed", {"Scene"}},
+        {"scene_begin_play", {"Scene"}},
+        {"scene_end_play", {"Scene"}}};
+    return events;
 }
 std::vector<LogiaDiagnostic> checkLogiaSemantics(Program &program, const LogiaHostContext &ctx,
                                                  const std::string &fileName)

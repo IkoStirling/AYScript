@@ -3078,8 +3078,9 @@ Actor 属性及 position/scale/rotation 在 lifecycle、事件和任务边界同
 任务是隐藏 Lua coroutine：脚本不能获取 coroutine 库。每 bridge 最多 1024 个任务，
 每 tick 最多恢复 256 个；每次恢复仍有 100 万指令与 bridge 64 MiB Lua 分配预算。
 零延时也等待后续任务 tick；事件只标记待恢复，不在 EventBus callback 内重入任务。
-等待事件暂不返回 payload；需要 payload 时使用经过签名检查的 event.subscribe。
-delay 接受非负有限秒数；task helper 无参数、void，含 await 的 helper 不能普通调用。
+等待事件可用 `into (name: type, ...)` 声明首事件的标量 payload；位置类型与已知 alias 完全匹配，
+Scene 的借用指针仍使用同步 event.subscribe。无 into 的等待仅作通知，动态 alias 保持运行时校验。
+delay 接受非负有限秒数；task helper 接受与声明匹配的参数、返回 void，含 await 的 helper 不能普通调用。
 cancel/pending 操作任务 ID；receiver 销毁、成功替换和 shutdown 取消等待及临时订阅。
 
 import 必须在 checked、file-backed 编译中使用；相对路径限制在 assetRoot（默认主文件目录）内。
@@ -3116,3 +3117,25 @@ EngineFunctions 保存 26 个共享 HostFunctionSignature，供 CLI/Editor 与 A
 ScriptRuntimeModule 的可选 InstallHook 在源码装载前安装函数，不把 Audio/UI 等依赖引入 AYScript。
 entity.self 通过正在调用的 Actor receiver 映射到 ScriptWorldFacade 的 generation-checked World 令牌；
 外部 Actor 或未绑定 World 返回 0。原生集成的 resolveEntityToken 只借用当前 World 实体，不能跨帧保存指针。
+
+## 类型化异步事件任务（2026-10-07）
+
+当前管线版本为 37。`tasks.start(helper, args...)` 校验参数数量/类型与 void 返回；
+参数在启动时求值，标量按值、Lua 数组/表/向量按引用传递，不承诺深拷贝。
+任务首帧恢复与事件/零延时恢复都必须跨 tick。事件 callback 只保存首事件参数和可恢复帧，
+不直接 resume；同一等待的后续事件丢弃。订阅建立前的事件也不排队。
+
+AwaitStmt 的 into bindings 携带各自 SourceLocation，声明身份进入 checked 词法作用域与 tooling
+补全/定义导航。绑定必须完整匹配 `checkedEventPayloads`，不允许动态 alias、部分字段或借用 Scene 指针；
+window_close 无 payload，使用不绑定的旧 await。`into` 只在 typed binding 列表前作为上下文关键字，
+变量名不全局保留，await 后无分号的旧 `into(...)` helper 调用也保持兼容。
+
+调度器常数时间维护 1024 个槽位上限；256 次恢复预算按 ID 轮转，避免长期零延时任务饿死后续任务。
+运行中的任务自行 cancel 后，不再创建新等待订阅。原生 owner 清理无需执行 Lua，耗尽指令预算
+不阻止销毁/重载；任务、已捕获 payload 和订阅同时释放。定向测试见 Test_LogiaAsync.cpp；
+独立 AsyncStressTests 逐操作对照原生模型，默认 32 轮，显式秒数用于长时验收。
+
+编译器类型引导复用已有 Transform 描述符，只补充缺失字段。AYReflect 拒绝重复类型注册，
+而字段指针为非拥有语义；在每次分析时构造完整重复描述符会留下未释放字段元数据。
+Windows Debug CRT 用例在预热后比较 256 次编译/执行/关闭的存活原生堆分配，防止此类
+逐次重建泄漏重新出现。它与 Lua 分配预算及随机模型分别覆盖不同的资源与行为边界。

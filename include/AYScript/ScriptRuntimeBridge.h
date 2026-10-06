@@ -381,7 +381,8 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       runtime set_field no-ops ScriptReadOnly.
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
-constexpr std::size_t kLogiaPipelineVersion = 36u;
+// 2026-10-07: typed task arguments and lexical await payload bindings.
+constexpr std::size_t kLogiaPipelineVersion = 37u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -630,6 +631,10 @@ public:
     void flushWorldCommands();
     /// Advance pending tasks once per variable-rate frame. Waits resume at a
     /// later task tick; destroy/reload/shutdown cancel their outstanding work.
+    /// `tasks.start(helper, args...)` captures arguments at start (mutable
+    /// table/array values retain reference semantics). Payload-binding event
+    /// waits capture the first scalar event and expose typed lexical locals.
+    /// At most 256 tasks resume per tick in a rotating fair ID order.
     void tickTasks(float deltaTime);
     /// Register an explicitly authorized scalar/vec3 facade (e.g. audio.play,
     /// animation.play, stats.read). Signatures are checked before compilation

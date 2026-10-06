@@ -172,6 +172,12 @@ LogiaAnalysis analyzeLogia(const std::string &source, LogiaHostContext ctx)
         {
             if (auto *v = dynamic_cast<VarDeclStmt *>(s.get()))
                 variable(*v, false);
+            if (auto *wait = dynamic_cast<AwaitStmt *>(s.get()))
+                for (auto &binding : wait->bindings) {
+                    const auto r = scope(binding.sourceLoc);
+                    bindings[&binding] = add(binding.name, binding.typeName, "event-payload",
+                                             binding.sourceLoc, binding.sourceLoc.line, r.end);
+                }
             if (auto *b = dynamic_cast<IfStmt *>(s.get()))
             {
                 declarations(b->thenBranch);

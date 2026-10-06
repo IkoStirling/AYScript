@@ -291,6 +291,25 @@ std::unique_ptr<Stmt> Parser::parseStatement()
         auto statement = std::make_unique<AwaitStmt>();
         statement->sourceLoc = {"", token.line, token.column};
         statement->operation = parseExpression();
+        // A typed binding list is unambiguous with an ordinary `into(...)`
+        // helper call in old scripts (including optional statement semicolons).
+        if (check(TokenType::Identifier) && current().lexeme == "into" &&
+            _current + 3 < static_cast<int>(_tokens.size()) &&
+            _tokens[_current + 1].type == TokenType::LeftParen &&
+            _tokens[_current + 2].type == TokenType::Identifier &&
+            _tokens[_current + 3].type == TokenType::Colon) {
+            advance();
+            consume(TokenType::LeftParen, "Expected '(' after await into");
+            if (!check(TokenType::RightParen)) {
+                do {
+                    const auto name = consumeIdentifier("Expected event payload binding name");
+                    consume(TokenType::Colon, "Expected ':' after event payload binding name");
+                    statement->bindings.push_back({name.lexeme, parseTypeName(),
+                                                  {"", name.line, name.column}});
+                } while (match(TokenType::Comma));
+            }
+            consume(TokenType::RightParen, "Expected ')' after event payload bindings");
+        }
         match(TokenType::Semicolon);
         return statement;
     }
