@@ -3120,8 +3120,11 @@ entity.self 通过正在调用的 Actor receiver 映射到 ScriptWorldFacade 的
 
 ## 类型化异步事件任务（2026-10-07）
 
-当前管线版本为 37。`tasks.start(helper, args...)` 校验参数数量/类型与 void 返回；
+当前管线版本为 38。`tasks.start(helper, args...)` 校验参数数量/类型与 void 返回；
 参数在启动时求值，标量按值、Lua 数组/表/向量按引用传递，不承诺深拷贝。
+声明为 Scene/Entity 的借用参数及其嵌套数组不能进入任务；同步回调仍接受 Scene。
+table 内容的生命周期由调用者负责，不允许通过表跨帧保留借用指针。版本 38 使此前
+允许直接借用参数捕获的编译缓存失效；Entity World 令牌为可传递的 int。
 任务首帧恢复与事件/零延时恢复都必须跨 tick。事件 callback 只保存首事件参数和可恢复帧，
 不直接 resume；同一等待的后续事件丢弃。订阅建立前的事件也不排队。
 

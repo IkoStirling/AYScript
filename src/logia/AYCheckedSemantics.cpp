@@ -400,10 +400,16 @@ struct Checker
                         if (c.args.size() != fn->second->params.size() + 1)
                             error(c.sourceLoc, "task argument count mismatch");
                         for (size_t i = 1; i < c.args.size(); ++i) {
-                            if (i <= fn->second->params.size())
-                                require(canonical(fn->second->params[i - 1].typeName),
+                            if (i <= fn->second->params.size()) {
+                                const auto type = canonical(fn->second->params[i - 1].typeName);
+                                auto element = type;
+                                while (arrayType(element)) element = elementType(element);
+                                if (element == "Scene" || element == "Entity")
+                                    error(c.args[i]->sourceLoc,
+                                          "borrowed Scene/Entity pointers cannot be task arguments; consume them synchronously");
+                                require(type,
                                         c.args[i].get(), c.args[i]->sourceLoc);
-                            else
+                            } else
                                 expr(c.args[i].get());
                         }
                     }

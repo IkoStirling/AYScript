@@ -381,8 +381,8 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       runtime set_field no-ops ScriptReadOnly.
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
-// 2026-10-07: typed task arguments and lexical await payload bindings.
-constexpr std::size_t kLogiaPipelineVersion = 37u;
+// 2026-10-07: typed task/payload bindings; invalidate borrowed-pointer captures.
+constexpr std::size_t kLogiaPipelineVersion = 38u;
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -634,6 +634,8 @@ public:
     /// `tasks.start(helper, args...)` captures arguments at start (mutable
     /// table/array values retain reference semantics). Payload-binding event
     /// waits capture the first scalar event and expose typed lexical locals.
+    /// Declared Scene/Entity pointer parameters (including arrays) require
+    /// synchronous use; table contents must obey the borrowed-data lifetime.
     /// At most 256 tasks resume per tick in a rotating fair ID order.
     void tickTasks(float deltaTime);
     /// Register an explicitly authorized scalar/vec3 facade (e.g. audio.play,

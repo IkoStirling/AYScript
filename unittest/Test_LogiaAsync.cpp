@@ -40,6 +40,15 @@ TEST_CASE(task_arguments_are_checked_against_the_declared_helper)
     CHECK(!accepts("script A { function work():int { return 7 } on_start() { tasks.start(work) } }"));
     CHECK(!accepts("script A { on_start() { tasks.start(missing,7) } }"));
 }
+TEST_CASE(task_arguments_reject_declared_borrowed_pointers_and_their_arrays)
+{
+    CHECK(accepts("script A { function receive(scene:Scene) {} on_start() { event.subscribe(\"scene_begin_play\",receive) } }"));
+    CHECK(!accepts("script A { function work(scene:Scene) { await delay(0) } function receive(scene:Scene) { tasks.start(work,scene) } on_start() { event.subscribe(\"scene_begin_play\",receive) } }"));
+    CHECK(!accepts("script A { function work(scene:Scene) {} function receive(scene:Scene) { tasks.start(work,scene) } }"));
+    CHECK(!accepts("script A { function work(entity:Entity) {} function receive(entity:Entity) { tasks.start(work,entity) } }"));
+    CHECK(!accepts("script A { function work(values:array<array<Scene>>) {} function receive(values:array<array<Scene>>) { tasks.start(work,values) } }"));
+    CHECK(accepts("script A { function work(token:int) { await delay(0) } on_start() { tasks.start(work,entity.self()) } }"));
+}
 TEST_CASE(task_arguments_capture_scalar_values_at_start_and_keep_receivers_separate)
 {
     LogiaRuntimeBridge bridge;

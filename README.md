@@ -75,6 +75,8 @@ ays-logia analyze examples/engine_host.logia --host actor --engine-host --json
 [async_events.logia](examples/async_events.logia) 展示同步事件 handler 向任务传参和类型化 payload 等待。
 `into` 声明当前词法块内的局部变量；位置、数量和类型必须与已知 alias 的签名完全匹配。
 Scene alias 的借用指针只允许同步 `event.subscribe` 消费。无 `into` 的等待继续仅用作通知。
+task 参数声明为 Scene/Entity 或其嵌套数组时拒绝编译；Entity 的稳定 World 令牌使用 int。
+table 内容由调用者保持有效，不能通过表跨帧保存借用指针。
 等待不缓存订阅建立前的事件；同一等待取第一个到达事件，其余事件丢弃，不提供事件队列或超时。
 标量参数按启动时值传递，array/table/vector 保持引用语义。helper 必须返回 void；含 await 的 helper
 仍不能普通调用或直接作为事件 handler。每帧最多恢复 256 个任务，轮转 ID 防止 1024 上限内的饥饿。
