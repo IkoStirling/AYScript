@@ -1,0 +1,14 @@
+script GameplayFlow {
+    // World IDs and UI signals come from the project's authored documents.
+    function enter_level(action_id: int, pressed: bool) {
+        if pressed {
+            if gameflow.available() { gameflow.request("game.play") }
+            else { world.request("level") }
+        }
+    }
+    on_start() {
+        event.subscribe("device_action", enter_level)
+        ui.emit_signal("menu.ready")
+    }
+    on_reload() { event.subscribe("device_action", enter_level) }
+}

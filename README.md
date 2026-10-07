@@ -56,7 +56,10 @@ Logia 语法、宿主接口和跨模块事件边界见 [design.md](design.md)。
 
 ## 默认引擎函数与项目发布
 
-默认 Client/Server/Editor 的 Script 装配由 AYApplication 安装 26 个基础 audio/animation/physics/ui 函数。
+默认 Client/Server/Editor 的 Script 装配由 AYApplication 安装 37 个 audio/animation/physics/ui/world/gameflow 函数。
+`world.request(id)` 在 Egress 切换；`gameflow.request(intent)` 排队提交空 payload 意图；
+`ui.emit_signal(id)` 驱动 UIFlow 信号或应用命令。请求返回接受状态，实际切换在后续运行时 tick。
+示例：[gameplay_flow.logia](examples/gameplay_flow.logia)。
 缺少可选服务时 available 返回 false，创建返回 0，修改返回 false；无效参数与过期查询读取报告运行时错误。
 `entity.self()` 返回当前 Actor 的 World 令牌；使用 state 保存 voice/hit 令牌，销毁时 stop/release。
 `engineLogiaHostContext` 仅提供作者签名；CLI `--engine-host` 开启 checked 并使用同一份签名。

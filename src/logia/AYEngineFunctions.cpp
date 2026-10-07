@@ -29,7 +29,18 @@ const std::unordered_map<std::string, HostFunctionSignature> &engineLogiaFunctio
         {"ui.exists", {{"string"}, "bool"}},
         {"ui.set_text", {{"string", "string"}, "bool"}},
         {"ui.set_visible", {{"string", "bool"}, "bool"}},
-        {"ui.set_enabled", {{"string", "bool"}, "bool"}}};
+        {"ui.set_enabled", {{"string", "bool"}, "bool"}},
+        {"ui.emit_signal", {{"string"}, "bool"}},
+        {"world.available", {{}, "bool"}},
+        {"world.current", {{}, "string"}},
+        {"world.pending", {{}, "string"}},
+        {"world.request", {{"string"}, "bool"}},
+        {"world.error", {{}, "string"}},
+        {"gameflow.available", {{}, "bool"}},
+        {"gameflow.current", {{}, "string"}},
+        {"gameflow.request", {{"string"}, "bool"}},
+        {"gameflow.cancel", {{}, "bool"}},
+        {"gameflow.error", {{}, "string"}}};
     return functions;
 }
 LogiaHostContext engineLogiaHostContext(LogiaHostContext context)

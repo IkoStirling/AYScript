@@ -20,14 +20,17 @@ TEST_SUITE(LogiaEngineFunctionsTests)
 TEST_CASE(shared_engine_metadata_checks_arguments_without_granting_runtime_access)
 {
     auto ctx = logia::engineLogiaHostContext(context());
-    CHECK(logia::engineLogiaFunctions().size() == 26u);
+    CHECK(logia::engineLogiaFunctions().size() == 37u);
     CHECK(logia::compileLogiaToLua("script A { on_start() { audio.play(\"a.audio\",1.0,false) "
                                    "physics.raycast(vec3.new(0,0,0),vec3.new(1,0,0),10.0,1) "
-                                   "ui.set_text(\"hud/hp\",\"7\") } }",
+                                   "ui.set_text(\"hud/hp\",\"7\") ui.emit_signal(\"start\") "
+                                   "world.request(\"level\") gameflow.request(\"play\") } }",
                                    ctx)
               .success);
     CHECK(!logia::compileLogiaToLua("script A { on_start() { audio.play(true,1.0,false) } }", ctx)
                .success);
+    CHECK(!logia::compileLogiaToLua("script A { on_start() { world.request(1) } }", ctx).success);
+    CHECK(!logia::compileLogiaToLua("script A { on_start() { gameflow.request(false) } }", ctx).success);
     LogiaRuntimeBridge bridge;
     std::vector<logia::CompilerError> errors;
     CHECK(bridge.loadScript("A", "script A { on_start() { audio.available() } }", ctx, errors));
