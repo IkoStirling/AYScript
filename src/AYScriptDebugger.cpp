@@ -49,7 +49,9 @@ void ScriptDebugger::hook(lua_State* L, lua_Debug* info) {
     if(debugger->shouldPause(info))lua_yield(L,0);
 }
 bool ScriptDebugger::shouldPause(lua_Debug* info) {
-    lua_getinfo(thread,"S",info);
+    lua_getinfo(thread,"nS",info);
+    if(info->name && (std::string_view(info->name)=="_get_state" || std::string_view(info->name)=="__ay_connect" ||
+       std::string_view(info->name)=="__ay_disconnect" || std::string_view(info->name)=="__ay_emit"))return false;
     if(!info->source || std::string_view(info->source)!="logia:"+name)return false;
     auto location=map.lookup(info->currentline);
     if(location.line<=0)return false;
@@ -89,6 +91,8 @@ LogiaDebugSnapshot ScriptDebugger::snapshot() const {
         lua_getinfo(thread,"nSl",&frame);
         if(!frame.source || std::string_view(frame.source)!="logia:"+name)continue;
         LogiaDebugFrame view; view.location=map.lookup(frame.currentline); view.function=frame.name?frame.name:"lifecycle";
+        if(view.function.starts_with("__ay_behavior_")) { const auto separator=view.function.find('_',14);
+            if(separator!=std::string::npos)view.function=view.function.substr(separator+1); }
         for(int local=1;local<=128;++local) {
             const char* key=lua_getlocal(thread,&frame,local); if(!key)break;
             if(key[0]!='(' && std::string_view(key)!="__state")view.locals.push_back(valueAt(thread,-1,key));

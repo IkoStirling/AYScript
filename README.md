@@ -132,3 +132,15 @@ Quiesce normal lifecycle/task/event dispatch, keep the Actor alive, then stopDeb
 or releaseInstance before destruction. Load/reload/shutdown stop the session.
 Async helpers run in the normal scheduler, not the debug lifecycle coroutine.
 See unittest/Test_LogiaDebug.cpp and the AYEditor Actor preview toolbar.
+
+### Reusable behaviors
+
+Checked import modules may declare helpers, immutable assets, state/persist fields,
+signals and lifecycle hooks. They share one checked declaration namespace: choose
+behavior-specific exported names; collisions fail rather than override. Mutable
+script-block var exports are rejected. Each canonical file is included once in a
+depth-first source traversal; start/update/reload/restore hooks run in that order
+and destroy runs in reverse. Each hook retains independent return/local scope.
+The entry owns the persistent version/migrate policy; imported version headers
+above 1 are rejected. Actor inheritance still replaces a script, while imports
+compose behavior explicitly. See examples/composed_actor.logia and behaviors/health.logia.

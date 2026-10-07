@@ -404,6 +404,7 @@ public:
     LifecycleFuncDecl(LifecycleKind kind, std::vector<Param> params, std::vector<StmtPtr> body)
         : kind(kind), params(std::move(params)), body(std::move(body)) {}
     LifecycleKind kind;
+    bool behaviorHook = false;
     std::vector<Param> params;
     std::vector<StmtPtr> body;
 };
@@ -429,6 +430,7 @@ public:
     /// Empty annotations retain legacy behavior; checked scripts default to void.
     std::string returnType;
     bool asynchronous = false;
+    bool lifecycleHook = false;
     std::vector<Param> params;
     std::vector<StmtPtr> body;
 };

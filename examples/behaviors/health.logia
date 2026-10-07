@@ -1,0 +1,14 @@
+// Reusable behavior; consuming Actor schema declares hp:float.
+script HealthBehavior {
+    persist health:int=100
+    state damage_connection:int=0
+    signal health_changed(value:int)
+    function apply_damage(amount:int) {
+        health-=amount
+        if health<0 { health=0 }
+        self.hp=health
+        emit("health_changed",health)
+    }
+    on_start() { self.hp=health }
+    on_restore() { self.hp=health }
+}

@@ -383,7 +383,7 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
 // 2026-10-07: typed task/payload bindings; invalidate borrowed-pointer captures.
-constexpr std::size_t kLogiaPipelineVersion = 40u; // explicit resource declarations/closure
+constexpr std::size_t kLogiaPipelineVersion = 41u; // reusable behavior lifecycle composition
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -430,6 +430,9 @@ public:
     //
     // Returns true on success. On failure, `errors` is populated with the
     // Logia compiler errors and `hasScript(name)` returns false.
+    /// Checked imports compose helpers/assets, per-instance state/persist fields,
+    /// signals and lifecycle hooks. Hooks run depth-first in source order, destroy
+    /// in reverse; each keeps its return/local scope. Collisions are errors.
     //
     // S3.6 (LG-06a): when the cached Lua source for
     // (source, hostContext, pipelineVersion) matches, this skips

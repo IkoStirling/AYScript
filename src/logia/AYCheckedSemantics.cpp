@@ -854,7 +854,7 @@ struct Checker
         {
             if (auto *fn = dynamic_cast<FunctionDeclStmt *>(item.get()))
             {
-                inHelper = true;
+                inHelper = !fn->lifecycleHook;
                 function(fn->params, fn->body,
                          fn->returnType.empty() ? "void" : canonical(fn->returnType),
                          fn->sourceLoc);

@@ -3189,3 +3189,19 @@ One session belongs to one Actor. Release/load/shutdown discard its coroutine
 before module/receiver/VM lifetime ends. Normal lifecycle/task dispatch pauses;
 the embedding Host also quiesces event delivery and prevents Actor destruction.
 Task inspection reads scheduler metadata without resuming tasks.
+
+## Stateful behavior composition
+
+Module expansion retains canonical-file diamond deduplication and source anchors.
+Besides helpers/assets, imports admit instance state, persistence, signals and
+lifecycle hooks, while rejecting shared mutable exports. Imported hooks are
+marked internally. Only lifecycle kinds that contain imported hooks are composed;
+multiple entry declarations and duplicate hooks in one module remain errors.
+Composition extracts each hook into a checked void helper with an internal name
+and emits a lifecycle calling it. This keeps returns/locals independent, unlike
+concatenated statement blocks. Parameter types must match; hook parameter names
+are forwarded from the canonical lifecycle. Destroy reverses traversal order.
+Generated helpers are excluded from completion and cannot await as lifecycle
+hooks. Persistence schema/version belong to the entry module; existing reload,
+restore, source map, package and ProjectBuild contracts apply to the expanded body.
+Pipeline 41 invalidates the prior generated shape.

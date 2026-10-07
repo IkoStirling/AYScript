@@ -1,0 +1,5 @@
+script ComposedActor version 1 {
+    import "behaviors/health.logia"
+    on_start() { apply_damage(5) }
+    on_update() { self.hp=health }
+}

@@ -81,7 +81,7 @@ TEST_CASE(modules_share_helpers_but_recompile_changed_dependency)
     CHECK(bridge.callActorLifecycle("Main", "on_start", actor));
     CHECK_FLOAT_EQ(std::get<double>(actor.properties["hp"]), 9.0, 0.001);
 }
-TEST_CASE(module_rejects_cycle_escape_missing_and_stateful_exports)
+TEST_CASE(module_rejects_cycle_escape_missing_and_shared_exports)
 {
     Workspace files;
     files.put("a.logia", "script A { import \"b.logia\"; }");
@@ -92,7 +92,7 @@ TEST_CASE(module_rejects_cycle_escape_missing_and_stateful_exports)
                .success);
     CHECK(!logia::compileLogiaToLua("script Main { import \"missing.logia\"; }", files.context())
                .success);
-    files.put("a.logia", "script A { state hp: int=1 }");
+    files.put("a.logia", "script A { var hp: int=1 }");
     CHECK(
         !logia::compileLogiaToLua("script Main { import \"a.logia\"; }", files.context()).success);
     CHECK(!logia::compileLogiaToLua("script Main { import \"a.logia\"; }", context()).success);
@@ -359,5 +359,61 @@ TEST_CASE(imported_payload_bindings_keep_original_source_and_survive_portable_pa
     ayt::event::EventBus::instance().emit(ayt::event::ScriptTestPingEvent{17});
     bridge.tickTasks(0);
     CHECK_FLOAT_EQ(std::get<double>(actor.properties["hp"]), 22.0, 0.001);
+}
+TEST_CASE(reusable_behaviors_compose_hooks_state_persistence_and_reverse_teardown)
+{
+    Workspace files;
+    files.put("counter.logia",R"(script Counter {
+        persist count:int=1
+        signal changed(value:int)
+        function increase() { count+=1 emit("changed",count) }
+        on_start() { var local_value:int=7 self.hp=local_value return }
+        on_destroy() { self.hp=self.hp*10+1 }
+    })");
+    files.put("feedback.logia",R"(script Feedback {
+        import "counter.logia"
+        state extra:int=0
+        on_start() { var local_value:int=3 self.hp=self.hp+local_value }
+        on_destroy() { self.hp=self.hp*10+2 }
+    })");
+    const char* main=R"(script Main version 2 {
+        import "counter.logia"
+        import "feedback.logia"
+        on_start() { self.hp=self.hp+1 increase() }
+        on_update() { self.hp=count+extra }
+        on_destroy() { self.hp=3 }
+    })";
+    files.put("main.logia",main); LogiaRuntimeBridge bridge; std::vector<logia::CompilerError> errors;
+    CHECK(bridge.loadScript("Main",main,files.context(),errors));
+    ayt::entity::ActorScriptComponent first,second; first.properties["hp"]=0.0;second.properties["hp"]=0.0;
+    CHECK(bridge.callActorLifecycle("Main","on_start",first));
+    CHECK_FLOAT_EQ(std::get<double>(first.properties["hp"]),11.0,0.001);
+    CHECK(bridge.callActorLifecycle("Main","on_update",first));
+    CHECK_FLOAT_EQ(std::get<double>(first.properties["hp"]),2.0,0.001);
+    CHECK(bridge.callActorLifecycle("Main","on_update",second));
+    CHECK_FLOAT_EQ(std::get<double>(second.properties["hp"]),1.0,0.001);
+    auto saved=bridge.snapshotPersistentState("Main",&first); CHECK(saved.success);
+    CHECK(saved.json.find("count")!=std::string::npos);
+    CHECK(bridge.callActorLifecycle("Main","on_destroy",first));
+    CHECK_FLOAT_EQ(std::get<double>(first.properties["hp"]),321.0,0.001);
+    auto package=logia::buildLogiaPackage((files.root/"main.logia").generic_string(),(files.root/"package").generic_string(),files.context());
+    CHECK(package.success);
+    LogiaRuntimeBridge published; CHECK(published.loadScriptPackage(package.manifestPath,errors));
+    CHECK(published.callActorLifecycle("Main","on_start",first));
+    published.releaseInstance("Main",&first);bridge.releaseInstance("Main",&second);
+}
+TEST_CASE(behavior_conflicts_and_invalid_lifecycle_contracts_fail_at_compile_time)
+{
+    Workspace files;
+    files.put("bad.logia","script Bad { on_update(dt:int){} }");
+    CHECK(!logia::compileLogiaToLua("script Main { import \"bad.logia\" }",files.context()).success);
+    files.put("bad.logia","script Bad { on_start(){ await delay(0) } }");
+    CHECK(!logia::compileLogiaToLua("script Main { import \"bad.logia\" }",files.context()).success);
+    files.put("bad.logia","script Bad { on_start(){} on_start(){} }");
+    CHECK(!logia::compileLogiaToLua("script Main { import \"bad.logia\" }",files.context()).success);
+    files.put("bad.logia","script Bad { state same:int=1 }");
+    CHECK(!logia::compileLogiaToLua("script Main { import \"bad.logia\" state same:int=2 }",files.context()).success);
+    files.put("bad.logia","script Bad version 2 { state count:int=0 }");
+    CHECK(!logia::compileLogiaToLua("script Main { import \"bad.logia\" }",files.context()).success);
 }
 TEST_SUITE_END

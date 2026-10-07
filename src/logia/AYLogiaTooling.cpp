@@ -208,7 +208,7 @@ LogiaAnalysis analyzeLogia(const std::string &source, LogiaHostContext ctx)
                 std::vector<std::string> types;
                 for (auto &p : fn->params)
                     types.push_back(p.typeName);
-                bindings[fn] = add(
+                if(!fn->lifecycleHook)bindings[fn] = add(
                     fn->name, signature(types, fn->returnType.empty() ? "void" : fn->returnType),
                     fn->asynchronous ? "task" : "function", fn->sourceLoc);
                 params = &fn->params;
