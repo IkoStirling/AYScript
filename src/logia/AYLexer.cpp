@@ -148,6 +148,7 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         {"var", TokenType::Var},
         {"state", TokenType::State},
         {"persist", TokenType::Persist},
+        {"asset", TokenType::Asset},
         {"await", TokenType::Await},
         {"import", TokenType::Import},
         {"on_start", TokenType::OnStart},

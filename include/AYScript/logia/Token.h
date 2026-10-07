@@ -12,6 +12,7 @@ enum class TokenType : uint8_t {
     Var,
     State,          // Per-receiver state, distinct from module-shared var.
     Persist,        // Opt-in durable per-receiver state.
+    Asset,          // Explicit immutable asset-root-relative resource path.
     Await,
     Import,
     OnStart,

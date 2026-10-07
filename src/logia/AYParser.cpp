@@ -93,6 +93,11 @@ std::unique_ptr<Stmt> Parser::parseMember()
         }
         return statement;
     }
+    if (check(TokenType::Asset)) {
+        auto statement=parseVarDecl();
+        if(auto* var=dynamic_cast<VarDeclStmt*>(statement.get())) var->resourceReference=true;
+        return statement;
+    }
     // S2.5: `export var` is gone — `var` is always a pure local.
     if (check(TokenType::Var)) {
         return parseVarDecl();
@@ -144,7 +149,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
 
 std::unique_ptr<Stmt> Parser::parseVarDecl()
 {
-    const Token varTok = (check(TokenType::State) || check(TokenType::Persist)) ? advance() : consume(TokenType::Var, "Expected 'var'");
+    const Token varTok = (check(TokenType::State) || check(TokenType::Persist) || check(TokenType::Asset)) ? advance() : consume(TokenType::Var, "Expected 'var'");
     const Token name = consumeIdentifier("Expected variable name");
     consume(TokenType::Colon, "Expected ':' after variable name");
     const auto typeName = parseTypeName();
@@ -1041,6 +1046,7 @@ void Parser::synchronize()
         case TokenType::OnReload:
         case TokenType::OnRestore:
         case TokenType::Persist:
+        case TokenType::Asset:
         case TokenType::Run:
         case TokenType::Function:  // 2026-07-11 audit fix: script-block helper.
         case TokenType::Signal:    // S4.1 (2026-07-15): per-component signal decl.

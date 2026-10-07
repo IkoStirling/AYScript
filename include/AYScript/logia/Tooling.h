@@ -12,6 +12,7 @@ struct LogiaAnalysis {
     bool success = false;
     std::vector<LogiaDiagnostic> diagnostics;
     std::vector<std::string> dependencies;
+    std::vector<std::string> resourceDependencies;
     std::vector<LogiaSymbol> symbols;
     std::vector<LogiaReference> references;
     /// Prefix may include self., a facade namespace, or a local vector name.

@@ -76,7 +76,8 @@ CompileResult Compiler::compile(const std::string& source,
     if (parserOk) {
         auto moduleContext = ctx;
         if (moduleContext.sourcePath.empty()) moduleContext.sourcePath = _options.fileName;
-        auto moduleDiagnostics = expandLogiaModules(*result.program, moduleContext, result.dependencies);
+        auto moduleDiagnostics = expandLogiaModules(*result.program, moduleContext, result.dependencies,
+                                                    &result.resourceDependencies);
         for (auto& d : moduleDiagnostics) {
             result.errors.push_back(d.toCompilerError()); result.diagnostics.push_back(std::move(d));
         }

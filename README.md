@@ -39,7 +39,7 @@ ays-logia analyze examples/checked_actor.logia --host actor --json
 ays-logia package examples/checked_actor.logia --host actor -o out/checked-actor
 ```
 
-包目录含 `logia-package.json` v1 和完整 `.logia` 源码闭包；可以独立移动，运行时仍编译源码。
+包目录含 `logia-package.json` v2、完整 `.logia` 源码闭包和显式声明资源；可以独立移动，运行时仍编译源码。
 清单记录宿主/属性 schema、所需 provider 签名、相对文件路径和内容指纹。已有输出目录不会被覆盖。
 它不替代项目 Actor/Scene 的 raw/loose 发布规则，也不打包宿主原生代码或外部资源。
 
@@ -112,3 +112,13 @@ Windows Debug 另用 CRT 堆快照检查 256 次编译/运行时重建后的存�
 Transform 字段元数据导致的泄漏；长时测试的 Lua 预算不能替代这项原生堆检查。
 MSVC AddressSanitizer 验收时，匹配编译器版本的 `clang_rt.asan_dynamic-x86_64.dll` 须能被
 测试程序和 CLI 定位；运行库未装载的启动超时不属于脚本测试通过。
+
+## Explicit resources
+
+Checked 脚本以 `asset sound:string="audio/start.ayaudio"` 声明 immutable 的 asset-root-relative 路径。
+编译器/CLI analysis 记录 resourceDependencies；import 模块也可导出 asset 常量。
+普通字符串保持动态语义，不自动收集。运行时允许 DB/pak 虚拟资源；路径以 AYIO PathSafety 检查根边界。
+脚本包 v2 原样复制声明资源并记录内容指纹，读取器兼容无资源的 v1；单资源 64 MiB，总资源 256 MiB，最多 128 项。
+缺失资源、指纹不符、路径越界、清单冲突拒绝发布/加载。包只复制资源，不替代 cook；目标 Host 仍须有对应 loader。
+ProjectBuild 的 resourceDependencies 独立记录资源边，使用项目 transform/storage 规则，排除/缺失引用为错误。
+执行前重新检查依赖集合，变更须重新规划；失败不替换上一份输出。示例：examples/resource_refs.logia。

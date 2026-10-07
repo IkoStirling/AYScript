@@ -1,5 +1,6 @@
 #include "AYScript/logia/Modules.h"
 #include "AYScript/logia/Parser.h"
+#include <AYIO/PathSafety.h>
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -99,7 +100,8 @@ std::string key(const std::filesystem::path &path)
 }
 } // namespace
 std::vector<LogiaDiagnostic> expandLogiaModules(Program &program, const LogiaHostContext &ctx,
-                                                std::vector<std::string> &dependencies)
+                                                std::vector<std::string> &dependencies,
+                                                std::vector<std::string>* resources)
 {
     namespace fs = std::filesystem;
     std::vector<LogiaDiagnostic> diagnostics;
@@ -214,8 +216,10 @@ std::vector<LogiaDiagnostic> expandLogiaModules(Program &program, const LogiaHos
             }
             else
             {
-                if (module && !dynamic_cast<FunctionDeclStmt *>(statement.get()))
-                    error(statement->sourceLoc, "modules may export only helper functions");
+                const auto* variable=dynamic_cast<VarDeclStmt*>(statement.get());
+                if (module && !dynamic_cast<FunctionDeclStmt *>(statement.get()) &&
+                    !(variable && variable->resourceReference))
+                    error(statement->sourceLoc, "modules may export only helper functions and asset constants");
                 output.push_back(std::move(statement));
             }
         }
@@ -223,6 +227,32 @@ std::vector<LogiaDiagnostic> expandLogiaModules(Program &program, const LogiaHos
     };
     for (auto &script : program.scripts)
         expand(script->members, ctx.sourcePath, 0, false);
+    std::unordered_set<std::string> referenced;
+    for(const auto& script:program.scripts) for(const auto& member:script->members) {
+        auto* variable=dynamic_cast<VarDeclStmt*>(member.get());
+        if(!variable || !variable->resourceReference) continue;
+        auto* literal=dynamic_cast<LiteralExpr*>(variable->initializer.get());
+        if(!ctx.strictSemantics || variable->typeName!="string" || !literal ||
+           !std::holds_alternative<std::string>(literal->value)) {
+            error(variable->sourceLoc,"asset requires checked literal string declaration"); continue;
+        }
+        const auto& path=std::get<std::string>(literal->value);
+        fs::path relative(path);
+        bool portable=ayt::io::path::isPortableRelative(path) && !relative.filename().empty();
+        for(const auto& part:relative) if(part==".") portable=false;
+        if(!portable) { error(variable->sourceLoc,"asset path must be portable and asset-root-relative"); continue; }
+        if(!root.empty()) {
+            fs::path resolved; std::string failure;
+            if(!ayt::io::path::resolveWithinRoot(root,relative,resolved,failure)) {
+                error(variable->sourceLoc,"asset reference escapes authoring root: "+failure); continue;
+            }
+        }
+        if(referenced.size()>=128 && !referenced.contains(path)) {
+            error(variable->sourceLoc,"asset reference limit exceeded"); continue;
+        }
+        if(referenced.insert(path).second && resources) resources->push_back(path);
+    }
+    if(resources) std::sort(resources->begin(),resources->end());
     return diagnostics;
 }
 } // namespace ayt::script::logia

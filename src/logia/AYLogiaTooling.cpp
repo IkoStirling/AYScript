@@ -61,6 +61,7 @@ LogiaAnalysis analyzeLogia(const std::string &source, LogiaHostContext ctx)
     result.success = compiled.success;
     result.diagnostics = std::move(compiled.diagnostics);
     result.dependencies = std::move(compiled.dependencies);
+    result.resourceDependencies = std::move(compiled.resourceDependencies);
     auto add = [&](std::string name, std::string type, std::string kind, SourceLocation loc = {},
                    int begin = 0, int end = 0) {
         result.symbols.push_back(
@@ -156,7 +157,7 @@ LogiaAnalysis analyzeLogia(const std::string &source, LogiaHostContext ctx)
     std::unordered_map<const void *, size_t> bindings;
     auto variable = [&](VarDeclStmt &var, bool global) {
         auto r = scope(var.sourceLoc);
-        auto id = add(var.name, var.typeName, var.instanceState ? "state" : "variable",
+        auto id = add(var.name, var.typeName, var.resourceReference ? "asset" : var.instanceState ? "state" : "variable",
                       var.sourceLoc, global ? 0 : var.sourceLoc.line, global ? 0 : r.end);
         bindings[&var] = id;
         for (const char *axis : {"x", "y", "z", "w"})

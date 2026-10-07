@@ -54,6 +54,7 @@ struct Symbol
     std::string type;
     const void *decl = nullptr;
     bool instanceState = false;
+    bool immutable = false;
 };
 struct Checker
 {
@@ -524,6 +525,7 @@ struct Checker
         {
             if (auto *s = symbol(id->name))
             {
+                if(writing && s->immutable) error(id->sourceLoc,"asset references are immutable");
                 if (sharedInitializer && s->instanceState)
                     error(id->sourceLoc, "shared variables cannot read instance state");
                 id->resolvedDecl = s->decl;
@@ -713,6 +715,7 @@ struct Checker
             if (var->initializer)
                 require(type, var->initializer.get(), var->sourceLoc);
             declare(var->name, type, var, var->sourceLoc);
+            if(auto* entry=symbol(var->name)) entry->immutable=var->resourceReference;
             var->resolvedType = lookupType(type);
             if (var->instanceState)
             {

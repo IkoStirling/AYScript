@@ -236,6 +236,7 @@ public:
     ExprPtr initializer;
     bool instanceState = false;
     bool persistent = false;
+    bool resourceReference = false;
 
     // ---- S2: SemanticAnalyzer resolves `typeName` to a registered type. ----
     // nullptr when unresolved (built-in or unregistered — analyzer reports

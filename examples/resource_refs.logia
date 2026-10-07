@@ -1,0 +1,8 @@
+script ResourceRefs {
+    asset start_sound: string = "audio/start.ayaudio"
+    asset idle_clip: string = "animations/idle.ayanm"
+    on_start() {
+        if audio.available() { audio.play(start_sound,0.5,false) }
+        if animation.available() { animation.play(entity.self(),idle_clip,true) }
+    }
+}

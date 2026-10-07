@@ -243,7 +243,7 @@ int main(int argc, char** argv)
             std::ifstream file(args.sourcePath,std::ios::binary);if(!file)throw std::runtime_error("could not read source");
             auto analysis=ayt::script::logia::analyzeLogia(std::string((std::istreambuf_iterator<char>(file)),{}),req.ctx);
             auto location=[](const auto& loc){return nlohmann::json{{"file",loc.file},{"line",loc.line},{"column",loc.column}};};
-            nlohmann::json json{{"success",analysis.success},{"dependencies",analysis.dependencies},{"symbols",nlohmann::json::array()},{"references",nlohmann::json::array()},{"diagnostics",nlohmann::json::array()}};
+            nlohmann::json json{{"success",analysis.success},{"dependencies",analysis.dependencies},{"resourceDependencies",analysis.resourceDependencies},{"symbols",nlohmann::json::array()},{"references",nlohmann::json::array()},{"diagnostics",nlohmann::json::array()}};
             for(const auto& symbol:analysis.symbols)json["symbols"].push_back({{"name",symbol.name},{"type",symbol.type},{"kind",symbol.kind},{"definition",location(symbol.definition)},{"scopeBegin",symbol.scopeBegin},{"scopeEnd",symbol.scopeEnd}});
             for(const auto& reference:analysis.references)json["references"].push_back({{"location",location(reference.location)},{"symbol",reference.symbol}});
             for(const auto& d:analysis.diagnostics)json["diagnostics"].push_back({{"severity",severityTag(d.severity)},{"message",d.message},{"location",location(d.location)}});

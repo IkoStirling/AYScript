@@ -155,6 +155,8 @@ struct CompileResult {
     std::vector<LogiaDiagnostic> diagnostics;   // S2 — full diagnostics w/ severity
     std::unique_ptr<Program> program;
     std::vector<std::string> dependencies;
+    /// Portable explicit resource paths; no inference from arbitrary strings.
+    std::vector<std::string> resourceDependencies;
 };
 
 void tokenize(const std::string& source, std::vector<Token>& out);

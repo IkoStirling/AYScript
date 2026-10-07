@@ -37,6 +37,14 @@ std::string read(const fs::path &path)
         throw std::runtime_error("could not read package source");
     return std::string((std::istreambuf_iterator<char>(in)), {});
 }
+std::string readResource(const fs::path& path)
+{
+    if(!fs::is_regular_file(path) || fs::file_size(path)>64*1024*1024)
+        throw std::runtime_error("package resource size/type limit");
+    std::ifstream in(path,std::ios::binary);
+    if(!in) throw std::runtime_error("could not read declared resource");
+    return std::string((std::istreambuf_iterator<char>(in)),{});
+}
 std::string fingerprint(const std::string &source)
 {
     std::uint64_t h = 14695981039346656037ull;
@@ -86,13 +94,14 @@ LogiaPackageResult buildLogiaPackage(const std::string &sourcePath, const std::s
             files.emplace_back(file);
         auto relativeEntry = fs::relative(entry, root).generic_string();
         Json manifest{{"format", "logia-source-package"},
-                      {"version", 1},
+                      {"version", 2},
                       {"entry", relativeEntry},
                       {"script", out.scriptName},
                       {"host", static_cast<int>(ctx.kind)},
                       {"expectSelf", ctx.expectSelf},
                       {"actorProperties", ctx.actorProperties},
                       {"files", Json::array()},
+                      {"resources", Json::array()},
                       {"hostFunctions", Json::object()}};
         for (const auto &[name, signature] : ctx.hostFunctions)
             manifest["hostFunctions"][name] = {{"parameters", signature.parameters},
@@ -122,6 +131,22 @@ LogiaPackageResult buildLogiaPackage(const std::string &sourcePath, const std::s
                 throw std::runtime_error("could not write package source");
             manifest["files"].push_back(
                 {{"path", relative.generic_string()}, {"fingerprint", fingerprint(text)}});
+        }
+        std::size_t resourceBytes=0;
+        for(const auto& logical:compiled.resourceDependencies) {
+            if(pathKey(fs::path(logical))=="logia-package.json")
+                throw std::runtime_error("declared resource conflicts with package manifest");
+            auto path=fs::canonical(root/fs::path(logical));
+            if(!inside(root,path)) throw std::runtime_error("declared resource escapes root");
+            auto content=readResource(path);
+            resourceBytes+=content.size();
+            if(resourceBytes>256*1024*1024) throw std::runtime_error("package resource total size limit");
+            auto dest=staging/fs::path(logical);
+            fs::create_directories(dest.parent_path());
+            std::ofstream output(dest,std::ios::binary);
+            output.write(content.data(),static_cast<std::streamsize>(content.size()));
+            if(!output) throw std::runtime_error("could not write package resource");
+            manifest["resources"].push_back({{"path",logical},{"fingerprint",fingerprint(content)}});
         }
         {
             std::ofstream output(staging / "logia-package.json", std::ios::binary);
@@ -160,8 +185,9 @@ LogiaPackageResult readLogiaPackage(const std::string &manifestPath)
         auto manifest = fs::canonical(manifestPath);
         auto root = manifest.parent_path();
         auto json = Json::parse(read(manifest));
-        if (json.at("format").get<std::string>() != "logia-source-package" ||
-            json.at("version").get<int>() != 1)
+        if (!json.at("version").is_number_integer() ||
+            json.at("format").get<std::string>() != "logia-source-package" ||
+            (json.at("version").get<int>() != 1 && json.at("version").get<int>() != 2))
             throw std::runtime_error("unsupported Logia package format");
         auto safe = [&](const std::string &relative) {
             fs::path p(relative);
@@ -187,6 +213,25 @@ LogiaPackageResult readLogiaPackage(const std::string &manifestPath)
             if (bytes > 5 * 1024 * 1024 ||
                 fingerprint(source) != file.at("fingerprint").get<std::string>())
                 throw std::runtime_error("package content mismatch or size limit");
+        }
+        std::unordered_set<std::string> resources;
+        if(json.at("version").get<int>()==2) {
+            const auto& declared=json.at("resources");
+            if(!declared.is_array() || declared.size()>128) throw std::runtime_error("invalid package resource count");
+            std::size_t total=0;
+            for(const auto& resource:declared) {
+                const auto logical=resource.at("path").get<std::string>();
+                const fs::path relative(logical);
+                bool valid=!logical.empty() && !relative.is_absolute() && !relative.has_root_name() &&
+                    logical.find(':')==std::string::npos && logical.find('\\')==std::string::npos && logical.find(char(0))==std::string::npos;
+                for(const auto& part:relative) if(part=="." || part=="..") valid=false;
+                if(!valid || !resources.insert(logical).second) throw std::runtime_error("invalid/duplicate package resource path");
+                auto path=fs::canonical(root/relative);
+                if(!inside(root,path)) throw std::runtime_error("package resource escapes root");
+                auto content=readResource(path);total+=content.size();
+                if(total>256*1024*1024 || fingerprint(content)!=resource.at("fingerprint").get<std::string>())
+                    throw std::runtime_error("package resource mismatch or total size limit");
+            }
         }
         auto entry = safe(json.at("entry"));
         if (!listed.contains(pathKey(entry)))
@@ -224,6 +269,10 @@ LogiaPackageResult readLogiaPackage(const std::string &manifestPath)
                 throw std::runtime_error("unlisted imported dependency");
         if (listed.size() != compiled.dependencies.size() + 1)
             throw std::runtime_error("package contains unused source files");
+        for(const auto& resource:compiled.resourceDependencies)
+            if(!resources.contains(resource)) throw std::runtime_error("unlisted declared resource dependency");
+        if(resources.size()!=compiled.resourceDependencies.size()) throw std::runtime_error("package contains unused resources");
+        out.resourceDependencies=std::move(compiled.resourceDependencies);
         out.dependencies = std::move(compiled.dependencies);
         out.manifestPath = manifest.generic_string();
         out.success = true;

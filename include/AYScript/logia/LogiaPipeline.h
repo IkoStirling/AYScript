@@ -28,6 +28,7 @@ struct LogiaToLuaResult {
     // back to the originating Logia source line.
     LogiaSourceMap sourceMap;
     std::vector<std::string> dependencies;
+    std::vector<std::string> resourceDependencies;
 };
 
 // Full front-end + codegen pipeline. Heap-backed; safe to call from

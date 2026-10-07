@@ -382,7 +382,7 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
 // 2026-10-07: typed task/payload bindings; invalidate borrowed-pointer captures.
-constexpr std::size_t kLogiaPipelineVersion = 39u; // opt-in persistent state/schema + restore lifecycle
+constexpr std::size_t kLogiaPipelineVersion = 40u; // explicit resource declarations/closure
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component

@@ -25,6 +25,7 @@ LogiaToLuaResult compileLogiaToLua(const std::string& source,
     CompileResult compiled = compiler->compile(source, ctx);
     result.diagnostics = std::move(compiled.diagnostics);
     result.dependencies = std::move(compiled.dependencies);
+    result.resourceDependencies = std::move(compiled.resourceDependencies);
     if (!compiled.success || !compiled.program) {
         result.errors = std::move(compiled.errors);
         result.success = false;
