@@ -122,3 +122,13 @@ Checked 脚本以 `asset sound:string="audio/start.ayaudio"` 声明 immutable �
 缺失资源、指纹不符、路径越界、清单冲突拒绝发布/加载。包只复制资源，不替代 cook；目标 Host 仍须有对应 loader。
 ProjectBuild 的 resourceDependencies 独立记录资源边，使用项目 transform/storage 规则，排除/缺失引用为错误。
 执行前重新检查依赖集合，变更须重新规划；失败不替换上一份输出。示例：examples/resource_refs.logia。
+
+### Source debugger
+
+Owner-thread hosts use startDebugActorLifecycle, setDebugBreakpoints, resumeDebug
+and debugSnapshot for real coroutine pause/Continue/Into/Over/Out. Snapshots copy
+frames, bounded local values, receiver state and inspectTasks wait information.
+Quiesce normal lifecycle/task/event dispatch, keep the Actor alive, then stopDebug
+or releaseInstance before destruction. Load/reload/shutdown stop the session.
+Async helpers run in the normal scheduler, not the debug lifecycle coroutine.
+See unittest/Test_LogiaDebug.cpp and the AYEditor Actor preview toolbar.

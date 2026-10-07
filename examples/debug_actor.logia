@@ -1,0 +1,13 @@
+// Actor property schema: hp:float. Set a breakpoint on self.hp=score.
+script DebugActor {
+    state score:int=0
+    function add(value:int):int {
+        var result:int=value+2
+        return result
+    }
+    on_start() {
+        var input:int=3
+        score=add(input)
+        self.hp=score
+    }
+}

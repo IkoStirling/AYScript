@@ -1,6 +1,7 @@
 #include "ScriptTasks.h"
 #include <AYEventSystem/EventBus.h>
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
 namespace ayt::script
 {
@@ -96,9 +97,11 @@ function S.tick(delta)
                 S.error_owner = item.owner; S.error_message = kind; remove(id)
             elseif done then remove(id)
             elseif kind == "delay" and type(value) == "number" and value >= 0 and value < math.huge then
+                item.wait = "delay"; item.event = nil
                 item.due = S.now + value
                 item.eligible_tick = S.tick_index + 1
             elseif kind == "event" and type(value) == "string" then
+                item.wait = "event"; item.event = value
                 item.due = nil
                 S.enter(item.owner)
                 item.connection = event.subscribe(value, function(...)
@@ -213,6 +216,19 @@ void ScriptTasks::clear()
         (void)clear();
     }
     state = sol::table{};
+}
+std::vector<LogiaTaskInspection> ScriptTasks::inspect() const {
+    std::vector<LogiaTaskInspection> result;
+    if(!state.valid())return result;
+    sol::table items=state["items"]; double now=state.get_or("now",0.0);
+    for(const auto& entry:items) {
+        sol::table item=entry.second.as<sol::table>(); LogiaTaskInspection view;
+        view.id=entry.first.as<lua_Integer>(); view.owner=item.get_or("owner",std::string{});
+        view.wait=item.get_or("wait",std::string{"ready"}); view.event=item.get_or("event",std::string{});
+        sol::optional<double> due=item["due"]; if(due)view.remainingSeconds=(std::max)(0.0,*due-now);
+        result.push_back(std::move(view));
+    }
+    std::sort(result.begin(),result.end(),[](const auto&a,const auto&b){return a.id<b.id;});return result;
 }
 std::string ScriptTasks::errorOwner() const
 {

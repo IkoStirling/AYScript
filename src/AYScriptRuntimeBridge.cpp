@@ -10,6 +10,7 @@
 #include "AYScript/ScriptRuntimeBridge.h"
 #include "ScriptWorldFacade.h"
 #include "ScriptTasks.h"
+#include "ScriptDebugger.h"
 #include "ScriptMath.h"
 #include "ScriptActorSync.h"
 #include "ScriptPersistence.h"
@@ -1607,6 +1608,9 @@ struct LogiaRuntimeBridge::Impl {
 
     // sol::state is non-copyable and non-movable; pimpl it.
     sol::state lua;
+    ScriptDebugger debugger;
+    ayt::entity::ActorScriptComponent* debugActor = nullptr;
+    std::string debugScript;
     ScriptWorldFacade worldFacade;
     ScriptTasks tasks;
     struct HostEntry { logia::HostFunctionSignature signature; ScriptHostFunction function; };
@@ -2072,7 +2076,8 @@ bool LogiaRuntimeBridge::initialize()
 
 void LogiaRuntimeBridge::shutdown()
 {
-    if (!_impl || !_impl->requireOwnerThread("shutdown")) return;
+    if (!_impl || !_impl->requireOwnerThread("shutdown") || _impl->debugger.executing()) return;
+    stopDebug();
     _impl->tasks.clear();
     // EventBus is process-global and can otherwise retain protected Lua
     // functions after the VM has been reset or destroyed.
@@ -2142,6 +2147,8 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
                             0, 0);
         return false;
     }
+    if (_impl->debugger.executing()) { errors.clear(); errors.emplace_back(logia::ErrorCode::InvalidOperation, "cannot load scripts inside debug execution",0,0); return false; }
+    stopDebug();
     auto ctx = requestedContext;
     for (const auto& [name, entry] : _impl->hostFunctions) ctx.hostFunctions[name] = entry.signature;
     _impl->ensureLua();
@@ -2571,6 +2578,7 @@ bool LogiaRuntimeBridge::callActorLifecycle(
 void LogiaRuntimeBridge::releaseInstance(const std::string& scriptName, void* receiver)
 {
     if (!_impl || !_impl->requireOwnerThread("releaseInstance") || !receiver) return;
+    if (_impl->debugActor == receiver) stopDebug();
     _impl->tasks.cancelOwner(scriptName + "/instance/"
         + std::to_string(reinterpret_cast<std::uintptr_t>(receiver)));
     auto it = _impl->scripts.find(scriptName);
@@ -2586,6 +2594,52 @@ void LogiaRuntimeBridge::releaseInstance(const std::string& scriptName, void* re
     _impl->actorOwners.erase(receiver);
     _impl->unsubscribeEventConnections(scriptName + "/instance/"
         + std::to_string(reinterpret_cast<std::uintptr_t>(receiver)));
+}
+
+
+void LogiaRuntimeBridge::stopDebug() {
+    if (!_impl || !_impl->requireOwnerThread("stopDebug"))return;
+    if(_impl->debugger.executing())return;
+    _impl->debugger.stop(); _impl->debugActor=nullptr; _impl->debugScript.clear();
+}
+void LogiaRuntimeBridge::setDebugBreakpoints(std::vector<LogiaDebugBreakpoint> points) {
+    if (_impl && _impl->requireOwnerThread("setDebugBreakpoints"))_impl->debugger.breakpoints=std::move(points);
+}
+bool LogiaRuntimeBridge::startDebugActorLifecycle(const std::string& name,const std::string& method,
+                                                 ayt::entity::ActorScriptComponent& actor) {
+    if(!_impl || !_impl->requireOwnerThread("startDebugActorLifecycle") || !_impl->_luaLive)return false;
+    auto module=_impl->scripts.find(name); if(module==_impl->scripts.end())return false;
+    sol::protected_function fn=module->second[method]; if(!fn.valid() || method=="run")return false;
+    stopDebug();
+    auto [it,inserted]=_impl->actorSelf.try_emplace(&actor,_impl->lua.create_table());
+    refreshActorSelf(_impl->lua,it->second,actor);
+    const auto owner=name+"/instance/"+std::to_string(reinterpret_cast<std::uintptr_t>(&actor));
+    _impl->actorOwners[&actor]=owner; _impl->debugActor=&actor; _impl->debugScript=name;
+    _impl->enterEventOwner(owner);
+    bool result=_impl->debugger.start(_impl->lua,fn,sol::make_object(_impl->lua,it->second),name,_impl->sourceMaps[name]);
+    _impl->leaveEventOwner(); return result;
+}
+bool LogiaRuntimeBridge::resumeDebug(LogiaDebugCommand command) {
+    if(!_impl || !_impl->requireOwnerThread("resumeDebug") || !_impl->debugActor)return false;
+    const auto owner=_impl->debugScript+"/instance/"+std::to_string(reinterpret_cast<std::uintptr_t>(_impl->debugActor));
+    _impl->enterEventOwner(owner); bool result=_impl->debugger.resume(command); _impl->leaveEventOwner(); return result;
+}
+std::vector<LogiaTaskInspection> LogiaRuntimeBridge::inspectTasks() const {
+    return _impl && _impl->requireOwnerThread("inspectTasks") ? _impl->tasks.inspect() : std::vector<LogiaTaskInspection>{};
+}
+LogiaDebugSnapshot LogiaRuntimeBridge::debugSnapshot() const {
+    if(!_impl || !_impl->requireOwnerThread("debugSnapshot"))return {};
+    auto result=_impl->debugger.snapshot(); result.tasks=_impl->tasks.inspect();
+    if(_impl->debugActor) {
+        auto module=_impl->scripts.find(_impl->debugScript);
+        auto self=_impl->actorSelf.find(_impl->debugActor);
+        if(module!=_impl->scripts.end() && self!=_impl->actorSelf.end()) {
+            sol::object states=module->second["_instanceState"];
+            if(states.is<sol::table>()) { sol::object bag=states.as<sol::table>()[self->second];
+                if(bag.is<sol::table>())result.state=ScriptDebugger::inspectTable(bag.as<sol::table>()); }
+        }
+    }
+    return result;
 }
 
 void LogiaRuntimeBridge::bindWorld(ayt::entity::World* world, const std::string& assetsRoot)
@@ -2726,6 +2780,7 @@ LogiaRuntimeBridge::PersistentStateResult LogiaRuntimeBridge::restorePersistentS
         return {false, {}, "persistence requires the live runtime owner thread"};
     auto found=_impl->scripts.find(name);
     if(found==_impl->scripts.end() || !receiver) return {false, {}, "unknown script or receiver"};
+    if(_impl->debugger.active()) return {false, {}, "stop the debug session before persistent restore"};
     if(_impl->restoringState) return {false, {}, "recursive persistent restore is forbidden"};
     _impl->restoringState=true;
     struct Guard { bool& active; ~Guard(){active=false;} } guard{_impl->restoringState};
@@ -2760,6 +2815,7 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
         || !_impl->_luaLive) {
         return false;
     }
+    if (_impl->debugger.active()) return false;
     struct DestroyGuard {
         LogiaRuntimeBridge* bridge; const std::string& script; void* receiver;
         ~DestroyGuard() { if (receiver) bridge->releaseInstance(script, receiver); }
@@ -2943,6 +2999,7 @@ logia::SourceLocation translateLuaErrorToLogia(
 void LogiaRuntimeBridge::tickTasks(float deltaTime)
 {
     if (!_impl || !_impl->requireOwnerThread("tickTasks") || !_impl->_luaLive) return;
+    if (_impl->debugger.active()) return;
     _impl->resetExecutionBudget();
     for (const auto& [receiver, table] : _impl->actorSelf) refreshActorSelf(_impl->lua, table, *static_cast<ayt::entity::ActorScriptComponent*>(receiver));
     try { _impl->tasks.tick(deltaTime); }

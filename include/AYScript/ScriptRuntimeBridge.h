@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "AYScript/logia/CompilerError.h"
+#include "AYScript/logia/Debug.h"
 #include "AYScript/logia/Logia.h"  // S3.6: LogiaHostContext for loadScript overload + cache key
 
 namespace ayt::entity { struct ActorScriptComponent; }
@@ -620,6 +621,18 @@ public:
     /// Release a receiver's state, signals and event subscriptions, including
     /// scripts without on_destroy. Hosts call this before receiver storage dies.
     void releaseInstance(const std::string& scriptName, void* receiver);
+
+    /// Debug an Actor lifecycle on the owner thread. Pauses before its first
+    /// mapped source statement. The Host must quiesce normal dispatch/event
+    /// delivery during a session and keep the Actor alive until stop/release.
+    /// Async helpers remain scheduler work; inspectTasks reports their waits.
+    bool startDebugActorLifecycle(const std::string& scriptName, const std::string& method,
+                                 ayt::entity::ActorScriptComponent& actor);
+    void setDebugBreakpoints(std::vector<LogiaDebugBreakpoint> points);
+    bool resumeDebug(LogiaDebugCommand command);
+    LogiaDebugSnapshot debugSnapshot() const;
+    std::vector<LogiaTaskInspection> inspectTasks() const;
+    void stopDebug();
     /// Clear state after a successful reload when an explicit reset is desired.
     /// Successful reloads otherwise preserve same-name, same-type state fields.
     void resetInstanceState(const std::string& scriptName);
