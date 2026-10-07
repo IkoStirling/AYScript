@@ -383,7 +383,7 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
 // 2026-10-07: typed task/payload bindings; invalidate borrowed-pointer captures.
-constexpr std::size_t kLogiaPipelineVersion = 41u; // reusable behavior lifecycle composition
+constexpr std::size_t kLogiaPipelineVersion = 42u; // timeout/join and project event schemas
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -636,6 +636,15 @@ public:
     LogiaDebugSnapshot debugSnapshot() const;
     std::vector<LogiaTaskInspection> inspectTasks() const;
     void stopDebug();
+    /// Register a scalar project event contract on the runtime owner thread.
+    /// Source project_event declarations share this registry. Schemas remain
+    /// fixed until shutdown; builtin aliases cannot be replaced.
+    bool registerProjectEvent(const std::string& alias,const std::vector<std::string>& types);
+    /// Emit an owned scalar payload to this runtime's project-event subscribers.
+    /// Checked native boundaries reject count/type/size mismatches; workers must
+    /// queue delivery to the runtime owner thread. Debug pauses reject delivery.
+    bool emitProjectEvent(const std::string& alias,std::vector<ScriptHostValue> values);
+    std::string projectEventError() const;
     /// Clear state after a successful reload when an explicit reset is desired.
     /// Successful reloads otherwise preserve same-name, same-type state fields.
     void resetInstanceState(const std::string& scriptName);

@@ -25,6 +25,7 @@ struct LogiaEventHooks {
     std::function<void(ayt::event::ConnectionId)> onUnsubscribed;
     std::function<void(const std::string&)> enterOwner;
     std::function<void()> leaveOwner;
+    std::function<bool()> executionBudgetExhausted;
 };
 
 /// Register builtin aliases on `bus` (idempotent).

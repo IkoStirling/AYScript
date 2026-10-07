@@ -163,6 +163,17 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
     // LG-05 / S3.3: record the host type name for `self.<field>`
     // reflect-call rewrites. Scope is per-script — reset on exit.
     _currentHostTypeName = script.hostTypeName;
+    auto schemas=_options.hostContext.projectEventSchemas;
+    for(const auto& member:script.members)if(auto* event=dynamic_cast<const ProjectEventDeclStmt*>(member.get())) {
+        std::vector<std::string> types;for(const auto& param:event->params)types.push_back(param.typeName);
+        schemas[event->name]=std::move(types);
+    }
+    writeNoAnchor("M._projectEventSchemas = {}");
+    for(const auto& [name,types]:schemas) {
+        std::string line="M._projectEventSchemas[\""+name+"\"] = {";
+        for(size_t i=0;i<types.size();++i) { if(i)line+=", ";line+="\""+types[i]+"\""; }
+        writeNoAnchor(line+"}");
+    }
     if (_options.hostContext.strictSemantics) {
         for (const auto& member : script.members) {
             if (auto* var = dynamic_cast<const VarDeclStmt*>(member.get()); var && !var->instanceState) {
@@ -522,7 +533,7 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
     if (auto* wait = dynamic_cast<const AwaitStmt*>(&stmt)) {
         auto* call = dynamic_cast<const CallExpr*>(wait->operation.get());
         auto* name = call ? dynamic_cast<const IdentifierExpr*>(call->callee.get()) : nullptr;
-        if (name && call->args.size() == 1) {
+        if (name && !call->args.empty()) {
             std::string line;
             if (!wait->bindings.empty()) {
                 line = "local ";
@@ -532,8 +543,18 @@ void LuaCodegen::emitStmt(const Stmt& stmt)
                 }
                 line += " = ";
             }
-            line += name->name == "delay" ? "__ay_wait_delay(" : "__ay_wait_event(";
-            line += emitExpr(*call->args[0]) + ")";
+            line += name->name == "delay" ? "__ay_wait_delay(" : name->name=="join" ? "__ay_wait_join(" : "__ay_wait_event(";
+            line += emitExpr(*call->args[0]);
+            if(call->args.size()>1)line+=", "+emitExpr(*call->args[1]);
+            if(name->name=="wait_event" && call->args.size()==2) {
+                line+=", {";
+                for(size_t i=1;i<wait->bindings.size();++i) {
+                    if(i>1)line+=", ";const auto& type=wait->bindings[i].typeName;
+                    line+=type=="bool"?"false":type=="string"?"\"\"":"0";
+                }
+                line+="}";
+            }
+            line += ")";
             writeLine(line);
         }
         return;

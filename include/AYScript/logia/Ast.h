@@ -449,6 +449,11 @@ public:
 // this form when called from `parseScriptMembers`; inside lifecycle
 // bodies or anywhere else the lexer sees `signal`, the parser
 // rejects with an explicit error (see `parseStatement`).
+class ProjectEventDeclStmt : public Stmt {
+public:
+    std::string name;
+    std::vector<Param> params;
+};
 class SignalDeclStmt : public Stmt {
 public:
     SignalDeclStmt(std::string name, std::vector<Param> params)

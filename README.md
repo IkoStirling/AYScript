@@ -144,3 +144,14 @@ and destroy runs in reverse. Each hook retains independent return/local scope.
 The entry owns the persistent version/migrate policy; imported version headers
 above 1 are rejected. Actor inheritance still replaces a script, while imports
 compose behavior explicitly. See examples/composed_actor.logia and behaviors/health.logia.
+
+
+## Async coordination and project events (pipeline 42)
+
+Declare scalar payload contracts with `project_event progress(value:int,label:string)`. Imports may export these declarations. Native hosts can instead call `registerProjectEvent(alias, types)` before loading and `emitProjectEvent(alias, values)` on the runtime owner thread. Identical schemas can be shared by scripts; changing a live schema requires shutdown. Events are scoped to one runtime, delivered synchronously, and subscriptions follow instance ownership. No payload queue or borrowed pointer is retained.
+
+`await wait_event("progress",0.5) into(received:bool,value:int,label:string)` returns the first delivery or, on timeout, false plus typed zero/false/empty defaults. Untimed waits preserve their previous payload signature. Timeouts use scheduler time and resume on a later tick. A delivery already captured wins over a later deadline.
+
+`await join(id,1.0) into(done:bool,ok:bool)` returns true and the completion result, or false/false on timeout. Invalid IDs and cyclic joins fail the task. `tasks.status(id)` reports pending/running/completed/failed/cancelled/expired/unknown. The latest 1024 terminal outcomes are retained; an expired outcome joins as true/false. Explicit completion, failure and cancellation emit `logia_task_complete(int,bool)`; teardown remains quiet. This differs from the native `task_complete` alias.
+
+Schemas permit 128 custom aliases, 16 scalar fields, 64 KiB per string and 256 KiB total strings per delivery. Runtime validation rejects wrong payloads and reports `projectEventError()` / `event.error()`. Callback failures propagate to the emitter; nested callbacks share the instruction budget. Subscriptions created by tasks or debugger coroutines are rooted on the main Lua state. See `examples/async_coordination.logia` and `Test_LogiaAsyncContracts.cpp`.

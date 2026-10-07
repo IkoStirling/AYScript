@@ -201,6 +201,10 @@ LogiaAnalysis analyzeLogia(const std::string &source, LogiaHostContext ctx)
         {
             if (auto *v = dynamic_cast<VarDeclStmt *>(s.get()))
                 variable(*v, true);
+            if (auto *event = dynamic_cast<ProjectEventDeclStmt *>(s.get())) {
+                std::vector<std::string> types;for (const auto &param : event->params) types.push_back(param.typeName);
+                add(event->name, signature(types, "void"), "project-event", event->sourceLoc);
+            }
             std::vector<Param> *params = nullptr;
             std::vector<StmtPtr> *body = nullptr;
             if (auto *fn = dynamic_cast<FunctionDeclStmt *>(s.get()))

@@ -76,6 +76,15 @@ std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
 
 std::unique_ptr<Stmt> Parser::parseMember()
 {
+    if (match(TokenType::ProjectEvent)) {
+        auto declaration=std::make_unique<ProjectEventDeclStmt>();
+        const auto name=consumeIdentifier("Expected project event name");
+        declaration->name=name.lexeme;declaration->sourceLoc={"",name.line,name.column};
+        consume(TokenType::LeftParen,"Expected '(' after project event name");
+        if(!check(TokenType::RightParen))declaration->params=parseParamList();
+        consume(TokenType::RightParen,"Expected ')' after project event parameters");match(TokenType::Semicolon);
+        return declaration;
+    }
     if (match(TokenType::Import)) {
         const auto token = previous();
         auto statement = std::make_unique<ImportStmt>();

@@ -106,6 +106,7 @@ LogiaPackageResult buildLogiaPackage(const std::string &sourcePath, const std::s
         for (const auto &[name, signature] : ctx.hostFunctions)
             manifest["hostFunctions"][name] = {{"parameters", signature.parameters},
                                                {"result", signature.result}};
+        manifest["projectEventSchemas"]=ctx.projectEventSchemas;
         // Unique sibling staging directory, then a single rename publishes the closure.
         staging = target;
         staging += ".staging-" +
@@ -255,6 +256,7 @@ LogiaPackageResult readLogiaPackage(const std::string &manifestPath)
             ctx.hostFunctions[it.key()] = {
                 it.value().at("parameters").get<std::vector<std::string>>(),
                 it.value().at("result").get<std::string>()};
+        if(json.contains("projectEventSchemas"))ctx.projectEventSchemas=json.at("projectEventSchemas").get<decltype(ctx.projectEventSchemas)>();
         out.source = read(entry);
         Compiler compiler;
         auto compiled = compiler.compile(out.source, ctx);

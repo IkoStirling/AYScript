@@ -3205,3 +3205,16 @@ Generated helpers are excluded from completion and cannot await as lifecycle
 hooks. Persistence schema/version belong to the entry module; existing reload,
 restore, source map, package and ProjectBuild contracts apply to the expanded body.
 Pipeline 41 invalidates the prior generated shape.
+
+
+## Async coordination and project events (pipeline 42)
+
+Declare scalar payload contracts with `project_event progress(value:int,label:string)`. Imports may export these declarations. Native hosts can instead call `registerProjectEvent(alias, types)` before loading and `emitProjectEvent(alias, values)` on the runtime owner thread. Identical schemas can be shared by scripts; changing a live schema requires shutdown. Events are scoped to one runtime, delivered synchronously, and subscriptions follow instance ownership. No payload queue or borrowed pointer is retained.
+
+`await wait_event("progress",0.5) into(received:bool,value:int,label:string)` returns the first delivery or, on timeout, false plus typed zero/false/empty defaults. Untimed waits preserve their previous payload signature. Timeouts use scheduler time and resume on a later tick. A delivery already captured wins over a later deadline.
+
+`await join(id,1.0) into(done:bool,ok:bool)` returns true and the completion result, or false/false on timeout. Invalid IDs and cyclic joins fail the task. `tasks.status(id)` reports pending/running/completed/failed/cancelled/expired/unknown. The latest 1024 terminal outcomes are retained; an expired outcome joins as true/false. Explicit completion, failure and cancellation emit `logia_task_complete(int,bool)`; teardown remains quiet. This differs from the native `task_complete` alias.
+
+Schemas permit 128 custom aliases, 16 scalar fields, 64 KiB per string and 256 KiB total strings per delivery. Runtime validation rejects wrong payloads and reports `projectEventError()` / `event.error()`. Callback failures propagate to the emitter; nested callbacks share the instruction budget. Subscriptions created by tasks or debugger coroutines are rooted on the main Lua state. See `examples/async_coordination.logia` and `Test_LogiaAsyncContracts.cpp`.
+
+Task terminal notification invokes its protected emitter through a C++ owner guard, including explicit cancellation inside a coroutine. A failed completion handler cannot leave a stale execution owner that blocks later loads; Test_LogiaAsyncContracts covers a budget-failing handler followed by a healthy reload.

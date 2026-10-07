@@ -79,6 +79,9 @@ struct LogiaHostContext {
     /// Empty root defaults to sourcePath's directory; in-memory imports fail.
     std::string sourcePath;
     std::string assetRoot;
+    /// Runtime/project-owned scalar event signatures; source project_event may
+    /// declare the same signature. A live runtime cannot change an alias type.
+    std::unordered_map<std::string,std::vector<std::string>> projectEventSchemas;
 };
 
 /// Recommended context for newly authored scripts; rejects implicit globals,

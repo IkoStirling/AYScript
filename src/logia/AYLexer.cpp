@@ -165,6 +165,7 @@ TokenType Lexer::identifierType(const std::string& lexeme)
         // `connect` continue to work elsewhere. Mirrors the input /
         // log / time ambient recognition surface.
         {"signal", TokenType::Signal},
+        {"project_event", TokenType::ProjectEvent},
         // NOTE: `local` is intentionally NOT reserved (would break
         // the 15 R3/R4 tests that write `local s = ...` and rely on
         // the implicit-global declaration). SemanticAnalyzer emits a

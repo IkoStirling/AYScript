@@ -354,13 +354,16 @@ void installLogiaEventAmbient(sol::state& lua,
         return false;
     };
 
-    eventTbl["subscribe"] = [&bus, hooks](const std::string& alias,
+    eventTbl["subscribe"] = [&bus, hooks, main=lua.lua_state()](const std::string& alias,
                                           sol::protected_function fn) -> lua_Integer {
         if (!fn.valid()) {
             ayt::log::warn("[INT-04] event.subscribe(\"%s\"): invalid handler", alias.c_str());
             return 0;
         }
 
+        // A callback registered from an async/debug coroutine must anchor its
+        // registry reference on the main state before that coroutine retires.
+        fn.push(main);fn=sol::protected_function(main,-1);lua_pop(main,1);
         auto holder = std::make_shared<OwnedEventHandler>();
         holder->function = std::move(fn);
         holder->owner = hooks.currentOwner ? hooks.currentOwner() : std::string{};

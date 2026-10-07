@@ -11,6 +11,7 @@
 #include "ScriptWorldFacade.h"
 #include "ScriptTasks.h"
 #include "ScriptDebugger.h"
+#include "ScriptProjectEvents.h"
 #include "ScriptMath.h"
 #include "ScriptActorSync.h"
 #include "ScriptPersistence.h"
@@ -87,6 +88,11 @@ std::size_t hashLogiaHostContext(const logia::LogiaHostContext& ctx)
         for (const auto& parameter : signature.parameters) entry = entry * 31 + std::hash<std::string>{}(parameter);
         h ^= entry;
     }
+    for(const auto& [name,types]:ctx.projectEventSchemas) {
+        std::size_t entry=std::hash<std::string>{}(name);
+        for(const auto& type:types)entry=entry*31+std::hash<std::string>{}(type);
+        h^=entry;
+    }
     return h;
 }
 
@@ -109,6 +115,7 @@ struct CompileCacheKey {
     bool strictSemantics = false;
     std::unordered_map<std::string, std::string> actorProperties;
     std::unordered_map<std::string, logia::HostFunctionSignature> hostFunctions;
+    std::unordered_map<std::string,std::vector<std::string>> projectEventSchemas;
     std::string sourcePath;
     std::string assetRoot;
     std::size_t pipelineVersion = kLogiaPipelineVersion;
@@ -124,6 +131,7 @@ struct CompileCacheKeyHash {
         ctx.strictSemantics = key.strictSemantics;
         ctx.actorProperties = key.actorProperties;
         ctx.hostFunctions = key.hostFunctions;
+        ctx.projectEventSchemas=key.projectEventSchemas;
         ctx.sourcePath = key.sourcePath; ctx.assetRoot = key.assetRoot;
         std::size_t hash = hashLogiaSource(key.source);
         hash ^= hashLogiaHostContext(ctx) + 0x9E3779B97F4A7C15ULL
@@ -138,7 +146,7 @@ CompileCacheKey makeCacheKey(const std::string& src,
                              const logia::LogiaHostContext& ctx)
 {
     return CompileCacheKey{src, ctx.kind, ctx.hostType, ctx.expectSelf,
-                           ctx.strictInheritance, ctx.strictSemantics, ctx.actorProperties, ctx.hostFunctions, ctx.sourcePath, ctx.assetRoot, kLogiaPipelineVersion};
+                           ctx.strictInheritance, ctx.strictSemantics, ctx.actorProperties, ctx.hostFunctions, ctx.projectEventSchemas, ctx.sourcePath, ctx.assetRoot, kLogiaPipelineVersion};
 }
 
 } // namespace
@@ -1568,6 +1576,7 @@ struct LogiaRuntimeBridge::Impl {
     struct LuaMemoryBudget {
         std::size_t used = 0;
         std::size_t peak = 0;
+        bool instructionExhausted = false;
     } memoryBudget;
 
     static void* luaAllocator(void* userData, void* ptr,
@@ -1597,11 +1606,13 @@ struct LogiaRuntimeBridge::Impl {
 
     static void instructionBudgetHook(lua_State* L, lua_Debug*)
     {
+        void* data=nullptr;lua_getallocf(L,&data);static_cast<LuaMemoryBudget*>(data)->instructionExhausted=true;
         luaL_error(L, "Logia execution instruction budget exceeded");
     }
 
     void resetExecutionBudget()
     {
+        memoryBudget.instructionExhausted=false;
         lua_sethook(lua.lua_state(), &instructionBudgetHook,
                     LUA_MASKCOUNT, kLuaInstructionBudget);
     }
@@ -1613,6 +1624,7 @@ struct LogiaRuntimeBridge::Impl {
     std::string debugScript;
     ScriptWorldFacade worldFacade;
     ScriptTasks tasks;
+    ScriptProjectEvents projectEvents;
     struct HostEntry { logia::HostFunctionSignature signature; ScriptHostFunction function; };
     std::unordered_map<std::string, HostEntry> hostFunctions;
 
@@ -1989,7 +2001,8 @@ struct LogiaRuntimeBridge::Impl {
         // deferred to INT-04b.
         LogiaEventHooks eventHooks;
         eventHooks.isRuntimeThread = [this] { return isOwnerThread(); };
-        eventHooks.resetExecutionBudget = [this] { resetExecutionBudget(); };
+        eventHooks.resetExecutionBudget = [this] { if(eventOwnerStack.empty())resetExecutionBudget(); };
+        eventHooks.executionBudgetExhausted=[this]{return memoryBudget.instructionExhausted;};
         eventHooks.currentOwner = [this] { return currentEventOwner(); };
         eventHooks.onSubscribed = [this](const std::string& owner,
                                          ayt::event::ConnectionId id) {
@@ -2002,8 +2015,8 @@ struct LogiaRuntimeBridge::Impl {
             enterEventOwner(owner);
         };
         eventHooks.leaveOwner = [this] { leaveEventOwner(); };
-        installLogiaEventAmbient(lua, ayt::event::EventBus::instance(),
-                                 std::move(eventHooks));
+        installLogiaEventAmbient(lua, ayt::event::EventBus::instance(),eventHooks);
+        projectEvents.install(lua,std::move(eventHooks));
         tasks.install(lua, ScriptTaskHooks{
             [this] { return currentEventOwner(); },
             [this](const std::string& owner) { enterEventOwner(owner); },
@@ -2082,6 +2095,7 @@ void LogiaRuntimeBridge::shutdown()
     // EventBus is process-global and can otherwise retain protected Lua
     // functions after the VM has been reset or destroyed.
     _impl->unsubscribeAllEventConnections();
+    _impl->projectEvents.clear();
     _impl->scripts.clear();
     _impl->actorSelf.clear();
     _impl->actorOwners.clear();
@@ -2153,6 +2167,13 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
     for (const auto& [name, entry] : _impl->hostFunctions) ctx.hostFunctions[name] = entry.signature;
     _impl->ensureLua();
     errors.clear();
+    for(const auto& [name,types]:_impl->projectEvents.schemas) {
+        auto old=ctx.projectEventSchemas.find(name);
+        if(old!=ctx.projectEventSchemas.end() && old->second!=types) {
+            errors.emplace_back(logia::ErrorCode::TypeMismatch,"project event context conflicts with live schema",0,0);return false;
+        }
+        ctx.projectEventSchemas[name]=types;
+    }
     // Imported files are re-read on each load/reload. Never reuse a main-source
     // cache hit while an imported source may have changed independently.
     if (logiaSource.find("import") != std::string::npos) _impl->_compileCache.erase(makeCacheKey(logiaSource, ctx));
@@ -2271,6 +2292,18 @@ bool LogiaRuntimeBridge::loadScript(const std::string& scriptName,
         // error path above — no module table, drop the source map.
         _impl->sourceMaps.erase(scriptName);
         return false;
+    }
+    sol::table module=returned.as<sol::table>();
+    sol::object schemas=module["_projectEventSchemas"];
+    const auto previousSchemas=_impl->projectEvents.schemas;
+    if(schemas.is<sol::table>())for(const auto& entry:schemas.as<sol::table>()) {
+        sol::table fields=entry.second.as<sol::table>();std::vector<std::string> types;
+        for(size_t i=1;i<=fields.size();++i)types.push_back(fields.get<std::string>(i));
+        if(!_impl->projectEvents.registerSchema(entry.first.as<std::string>(),types)) {
+            _impl->projectEvents.schemas=previousSchemas;
+            errors.emplace_back(logia::ErrorCode::TypeMismatch,_impl->projectEvents.error,0,0);
+            _impl->scripts.erase(scriptName);_impl->sourceMaps.erase(scriptName);return false;
+        }
     }
     _impl->scripts[scriptName] = returned;
     // S5 ED-03 (2026-07-15): store the source map alongside the
@@ -2642,6 +2675,19 @@ LogiaDebugSnapshot LogiaRuntimeBridge::debugSnapshot() const {
     return result;
 }
 
+bool LogiaRuntimeBridge::registerProjectEvent(const std::string& alias,const std::vector<std::string>& types) {
+    if(!_impl || !_impl->requireOwnerThread("registerProjectEvent"))return false;
+    _impl->ensureLua();return _impl->projectEvents.registerSchema(alias,types);
+}
+bool LogiaRuntimeBridge::emitProjectEvent(const std::string& alias,std::vector<ScriptHostValue> values) {
+    if(!_impl || !_impl->requireOwnerThread("emitProjectEvent") || !_impl->_luaLive)return false;
+    if(_impl->debugger.active()) { _impl->projectEvents.error="stop debug before external event delivery";return false; }
+    if(_impl->eventOwnerStack.empty())_impl->resetExecutionBudget();
+    return _impl->projectEvents.emit(alias,std::move(values));
+}
+std::string LogiaRuntimeBridge::projectEventError() const {
+    return _impl && _impl->requireOwnerThread("projectEventError")?_impl->projectEvents.error:std::string{};
+}
 void LogiaRuntimeBridge::bindWorld(ayt::entity::World* world, const std::string& assetsRoot)
 {
     if (_impl && _impl->requireOwnerThread("bindWorld")) _impl->worldFacade.bind(world, assetsRoot);

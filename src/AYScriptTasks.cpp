@@ -38,13 +38,20 @@ int resumeTask(lua_State *state)
 constexpr const char *schedulerSource = R"lua(
 local co = coroutine
 local resume = __ay_resume_task
-local S = { items = {}, next = 1, now = 0, tick_index = 0, count = 0, last_resumed = 0 }
-local function remove(id)
+local S = { items = {}, next = 1, now = 0, tick_index = 0, count = 0, last_resumed = 0, outcomes = {}, finished = {} }
+local function record(id, ok, status)
+    S.outcomes[id] = { ok = ok, status = status }
+    S.finished[#S.finished+1] = id
+    if #S.finished > 1024 then S.outcomes[table.remove(S.finished,1)] = nil end
+end
+local function remove(id, status, ok)
     local item = S.items[id]
     if not item then return false end
     S.items[id] = nil
     S.count = S.count - 1
     if item.connection then event.unsubscribe(item.connection) end
+    record(id, ok == true, status or "cancelled")
+    if not S.silent then S.complete(item.owner,id,ok==true) end
     return true
 end
 function S.start(fn, owner, ...)
@@ -57,6 +64,11 @@ function S.start(fn, owner, ...)
 end
 S.cancel = remove
 function S.pending(id) return S.items[id] ~= nil end
+function S.status(id)
+    if S.items[id] then return id==S.current and "running" or "pending" end
+    local outcome=S.outcomes[id]; if outcome then return outcome.status end
+    return type(id)=="number" and id>=1 and id<S.next and "expired" or "unknown"
+end
 function S.cancel_owner(owner)
     local ids = {}
     for id, item in pairs(S.items) do
@@ -65,12 +77,25 @@ function S.cancel_owner(owner)
     for _, id in ipairs(ids) do remove(id) end
 end
 function S.clear()
+    S.silent=true
     local ids = {}; for id in pairs(S.items) do ids[#ids + 1] = id end
     for _, id in ipairs(ids) do remove(id) end
+    S.outcomes={};S.finished={};S.silent=false
 end
 function S.tick(delta)
     S.now = S.now + delta; S.error_owner = nil; S.error_message = nil
     S.tick_index = S.tick_index + 1
+    for _, item in pairs(S.items) do
+        if not item.due then
+            local outcome=item.join and S.outcomes[item.join]
+            if item.join and (outcome or not S.items[item.join]) then
+                item.arguments=table.pack(true,outcome and outcome.ok or false);item.due=S.now
+            elseif item.deadline and item.deadline<=S.now then
+                item.arguments=item.join and table.pack(false,false) or table.pack(false,table.unpack(item.defaults or {}))
+                item.due=S.now
+            end
+        end
+    end
     local ids = {}; for id in pairs(S.items) do ids[#ids + 1] = id end
     -- Resume in ascending ID order, rotating after the last resumed ID so
     -- recurring zero-delay work cannot starve tasks beyond the per-tick cap.
@@ -86,38 +111,46 @@ function S.tick(delta)
             resumed = resumed + 1
             S.last_resumed = id
             if item.connection then event.unsubscribe(item.connection); item.connection = nil end
+            S.current=id
             S.enter(item.owner)
             local arguments = item.arguments or { n = 0 }
             item.arguments = nil
-            local ok, done, kind, value = resume(item.thread, table.unpack(arguments, 1, arguments.n))
+            local ok, done, kind, value, timeout, defaults = resume(item.thread, table.unpack(arguments, 1, arguments.n))
             S.leave()
+            S.current=nil
+            item.deadline=nil;item.join=nil;item.defaults=nil;item.timed=nil
             if S.items[id] ~= item then
                 -- Cancellation during the task body must not create a new subscription.
             elseif not ok then
-                S.error_owner = item.owner; S.error_message = kind; remove(id)
-            elseif done then remove(id)
+                S.error_owner = item.owner; S.error_message = kind; remove(id,"failed",false)
+            elseif done then remove(id,"completed",true)
             elseif kind == "delay" and type(value) == "number" and value >= 0 and value < math.huge then
                 item.wait = "delay"; item.event = nil
                 item.due = S.now + value
                 item.eligible_tick = S.tick_index + 1
             elseif kind == "event" and type(value) == "string" then
                 item.wait = "event"; item.event = value
+                item.deadline=timeout and (S.now+timeout) or nil;item.defaults=defaults
+                item.timed=timeout~=nil
                 item.due = nil
                 S.enter(item.owner)
                 item.connection = event.subscribe(value, function(...)
                     -- First delivery wins; never resume inside an EventBus callback.
                     if S.items[id] and not item.due then
-                        item.arguments = table.pack(...)
+                        if item.timed then item.arguments=table.pack(true,...) else item.arguments=table.pack(...) end
                         item.due = S.now
                         item.eligible_tick = S.tick_index + 1
                     end
                 end)
                 S.leave()
                 if not item.connection or item.connection == 0 then
-                    S.error_owner = item.owner; S.error_message = "unknown event alias: " .. value; remove(id)
+                    S.error_owner = item.owner; S.error_message = "unknown event alias: " .. value; remove(id,"failed",false)
                 end
+            elseif kind=="join" and type(value)=="number" then
+                item.wait="join";item.event=nil;item.join=value;item.due=nil
+                item.deadline=timeout and (S.now+timeout) or nil;item.eligible_tick=S.tick_index+1
             else
-                S.error_owner = item.owner; S.error_message = "invalid task wait operation"; remove(id)
+                S.error_owner = item.owner; S.error_message = "invalid task wait operation"; remove(id,"failed",false)
             end
         end
     end
@@ -127,9 +160,25 @@ function S.delay(seconds)
     if type(seconds) ~= "number" or seconds < 0 or seconds >= math.huge then error("delay must be finite and nonnegative") end
     return co.yield("delay", seconds)
 end
-function S.wait_event(alias)
+local function check_timeout(seconds)
+    if seconds~=nil and (type(seconds)~="number" or seconds<0 or seconds>=math.huge or seconds~=seconds) then error("timeout must be finite and nonnegative") end
+end
+function S.wait_event(alias,timeout,defaults)
     if not co.isyieldable() then error("await requires tasks.start") end
-    return co.yield("event", alias)
+    check_timeout(timeout)
+    return co.yield("event", alias, timeout, defaults)
+end
+function S.join(id,timeout)
+    if not co.isyieldable() then error("await requires tasks.start") end
+    if type(id)~="number" or id%1~=0 or id<1 or id>=S.next then error("join requires a created task ID") end
+    check_timeout(timeout)
+    local cursor=id
+    for _=1,1024 do
+        if cursor==S.current then error("task join cycle") end
+        local item=S.items[cursor];if not item or not item.join then break end
+        cursor=item.join
+    end
+    return co.yield("join",id,timeout)
 end
 return S
 )lua";
@@ -145,6 +194,14 @@ void ScriptTasks::install(sol::state &lua, ScriptTaskHooks hooks)
         throw error;
     }
     state = result.get<sol::table>();
+    state["complete"] = [&lua, enter = hooks.enter, leave = hooks.leave](const std::string& owner, lua_Integer id, bool ok, sol::this_state current) {
+        enter(owner);
+        struct Guard { const std::function<void()>& leave; ~Guard() { leave(); } } guard{leave};
+        sol::table events=lua["event"];sol::protected_function emit=events["emit"];
+        lua_State* L=current;emit.push(L);sol::protected_function local(L,-1);lua_pop(L,1);
+        auto result=local("logia_task_complete",id,ok);
+        if(!result.valid()){sol::error failure=result;throw failure;}
+    };
     state["enter"] = hooks.enter;
     state["leave"] = hooks.leave;
     auto table = lua.create_table();
@@ -163,9 +220,11 @@ void ScriptTasks::install(sol::state &lua, ScriptTaskHooks hooks)
     };
     table["cancel"] = state["cancel"];
     table["pending"] = state["pending"];
+    table["status"] = state["status"];
     lua["tasks"] = table;
     lua["__ay_wait_delay"] = state["delay"];
     lua["__ay_wait_event"] = state["wait_event"];
+    lua["__ay_wait_join"] = state["join"];
     lua["__ay_resume_task"] = sol::nil;
     lua["coroutine"] = sol::nil;
 }
@@ -226,6 +285,8 @@ std::vector<LogiaTaskInspection> ScriptTasks::inspect() const {
         view.id=entry.first.as<lua_Integer>(); view.owner=item.get_or("owner",std::string{});
         view.wait=item.get_or("wait",std::string{"ready"}); view.event=item.get_or("event",std::string{});
         sol::optional<double> due=item["due"]; if(due)view.remainingSeconds=(std::max)(0.0,*due-now);
+        view.joinedTask=item.get_or("join",lua_Integer{0});
+        sol::optional<double> deadline=item["deadline"];if(deadline)view.timeoutSeconds=(std::max)(0.0,*deadline-now);
         result.push_back(std::move(view));
     }
     std::sort(result.begin(),result.end(),[](const auto&a,const auto&b){return a.id<b.id;});return result;

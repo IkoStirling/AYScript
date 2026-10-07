@@ -228,7 +228,7 @@ std::vector<LogiaDiagnostic> expandLogiaModules(Program &program, const LogiaHos
                         error(hook->sourceLoc,"duplicate lifecycle in behavior module");
                 }
                 if (module && !dynamic_cast<FunctionDeclStmt *>(statement.get()) && !hook &&
-                    !dynamic_cast<SignalDeclStmt*>(statement.get()) &&
+                    !dynamic_cast<SignalDeclStmt*>(statement.get()) && !dynamic_cast<ProjectEventDeclStmt*>(statement.get()) &&
                     !(variable && (variable->resourceReference || variable->instanceState)))
                     error(statement->sourceLoc, "behaviors export helpers, asset constants, instance state, signals and lifecycle hooks; shared var is forbidden");
                 output.push_back(std::move(statement));
@@ -281,6 +281,8 @@ std::vector<LogiaDiagnostic> expandLogiaModules(Program &program, const LogiaHos
         std::erase_if(script->members,[](const auto& item){return !item;});
         for(auto& member:composed)script->members.push_back(std::move(member));
     }
+    for(const auto& script:program.scripts)for(const auto& member:script->members)
+        if(dynamic_cast<ProjectEventDeclStmt*>(member.get()) && !ctx.strictSemantics)error(member->sourceLoc,"project_event requires checked semantics");
     std::unordered_set<std::string> referenced;
     for(const auto& script:program.scripts) for(const auto& member:script->members) {
         auto* variable=dynamic_cast<VarDeclStmt*>(member.get());

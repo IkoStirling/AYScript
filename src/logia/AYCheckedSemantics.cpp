@@ -4,6 +4,7 @@
 #include "AYScript/logia/CheckedSemantics.h"
 #include "AYScript/logia/SemanticAnalyzer.h"
 #include <algorithm>
+#include <cctype>
 #include <functional>
 #include <unordered_set>
 
@@ -67,6 +68,8 @@ struct Checker
     const ayt::reflect::ITypeInfo *host = nullptr;
     std::string returnType = "void";
     bool inHelper = false;
+    std::unordered_map<std::string,std::vector<std::string>> events=checkedEventPayloads();
+    std::unordered_set<std::string> projectAliases;
     bool sharedInitializer = false;
     std::unordered_set<int> lifecycleKinds;
 
@@ -455,8 +458,15 @@ struct Checker
                         error(c.sourceLoc, "event.emit requires alias");
                     else
                         require("string", c.args[0].get(), c.sourceLoc);
-                    for (size_t i = 1; i < c.args.size(); ++i)
-                        expr(c.args[i].get());
+                    auto* literal=c.args.empty()?nullptr:dynamic_cast<LiteralExpr*>(c.args[0].get());
+                    auto* alias=literal?std::get_if<std::string>(&literal->value):nullptr;
+                    if(alias && (projectAliases.contains(*alias) || *alias=="logia_task_complete")) {
+                        auto schema=events.find(*alias);
+                        if(schema!=events.end()) {
+                            if(c.args.size()!=schema->second.size()+1)error(c.sourceLoc,"project event payload count mismatch");
+                            for(size_t i=0;i<schema->second.size() && i+1<c.args.size();++i)require(schema->second[i],c.args[i+1].get(),c.sourceLoc);
+                        }
+                    } else for (size_t i = 1; i < c.args.size(); ++i)expr(c.args[i].get());
                     return "bool";
                 }
                 if (name == "event.subscribe")
@@ -469,7 +479,6 @@ struct Checker
                                         ? dynamic_cast<IdentifierExpr *>(c.args[1].get())
                                         : nullptr;
                     auto fn = handler ? functions.find(handler->name) : functions.end();
-                    const auto &events = checkedEventPayloads();
                     auto *literal =
                         c.args.empty() ? nullptr : dynamic_cast<LiteralExpr *>(c.args[0].get());
                     auto *alias = literal ? std::get_if<std::string>(&literal->value) : nullptr;
@@ -676,34 +685,32 @@ struct Checker
                 error(wait->sourceLoc, "await is only allowed in task helper functions");
             auto *call = dynamic_cast<CallExpr *>(wait->operation.get());
             auto *name = call ? dynamic_cast<IdentifierExpr *>(call->callee.get()) : nullptr;
-            if (!name || (name->name != "delay" && name->name != "wait_event") ||
-                call->args.size() != 1)
-                error(wait->sourceLoc, "await expects delay(seconds) or wait_event(alias)");
-            else
-                require(name->name == "delay" ? "float" : "string", call->args[0].get(),
-                        wait->sourceLoc);
+            const bool delay=name && name->name=="delay";
+            const bool event=name && name->name=="wait_event";
+            const bool join=name && name->name=="join";
+            const bool timed=call && call->args.size()==2;
+            bool valid=call && (delay || event || join) && (call->args.size()==1 || (timed && !delay));
+            if(!valid)error(wait->sourceLoc,"await expects delay(seconds), wait_event(alias[,timeout]) or join(id[,timeout])");
+            else {
+                require(delay?"float":join?"int":"string",call->args[0].get(),wait->sourceLoc);
+                if(timed)require("float",call->args[1].get(),wait->sourceLoc);
+            }
             if (!wait->bindings.empty()) {
-                if (!name || name->name != "wait_event" || call->args.size() != 1)
-                    error(wait->sourceLoc, "into bindings require wait_event(alias)");
-                else {
-                    auto *literal = dynamic_cast<LiteralExpr *>(call->args[0].get());
-                    auto *alias = literal ? std::get_if<std::string>(&literal->value) : nullptr;
-                    const auto &events = checkedEventPayloads();
-                    auto event = alias ? events.find(*alias) : events.end();
-                    if (event == events.end())
-                        error(wait->sourceLoc, "event payload await requires a known literal alias");
-                    else if (std::find(event->second.begin(), event->second.end(), "Scene") != event->second.end())
-                        error(wait->sourceLoc, "borrowed Scene payload requires a synchronous event.subscribe handler");
-                    else {
-                        if (wait->bindings.size() != event->second.size())
-                            error(wait->sourceLoc, "event payload binding count mismatch");
-                        for (size_t i = 0; i < std::min(wait->bindings.size(), event->second.size()); ++i)
-                            if (canonical(wait->bindings[i].typeName) != event->second[i])
-                                error(wait->bindings[i].sourceLoc, "event payload binding type mismatch");
-                    }
-                }
-                for (auto &binding : wait->bindings)
-                    declare(binding.name, canonical(binding.typeName), &binding, binding.sourceLoc);
+                std::vector<std::string> payload;
+                if(join)payload={"bool","bool"};
+                else if(event && valid) {
+                    auto* literal=dynamic_cast<LiteralExpr*>(call->args[0].get());
+                    auto* alias=literal?std::get_if<std::string>(&literal->value):nullptr;
+                    auto schema=alias?events.find(*alias):events.end();
+                    if(schema==events.end())error(wait->sourceLoc,"event payload await requires a known literal alias");
+                    else if(std::find(schema->second.begin(),schema->second.end(),"Scene")!=schema->second.end())
+                        error(wait->sourceLoc,"borrowed Scene payload requires synchronous event.subscribe");
+                    else { payload=schema->second;if(timed)payload.insert(payload.begin(),"bool"); }
+                } else error(wait->sourceLoc,"into requires event or join waiting");
+                if(wait->bindings.size()!=payload.size())error(wait->sourceLoc,"await payload binding count mismatch");
+                for(size_t i=0;i<wait->bindings.size() && i<payload.size();++i)
+                    if(canonical(wait->bindings[i].typeName)!=payload[i])error(wait->bindings[i].sourceLoc,"await payload binding type mismatch");
+                for(auto& binding:wait->bindings)declare(binding.name,canonical(binding.typeName),&binding,binding.sourceLoc);
             }
             return false;
         }
@@ -792,6 +799,24 @@ struct Checker
     }
     void script(ScriptDecl &s)
     {
+        auto registerSchema=[&](const std::string& name,const std::vector<std::string>& types,SourceLocation loc,bool source) {
+            bool valid=!name.empty() && name.size()<=128 && (std::isalpha(static_cast<unsigned char>(name[0]))||name[0]=='_');
+            for(char c:name)valid&=std::isalnum(static_cast<unsigned char>(c))||c=='_'||c=='.';
+            if(!valid || types.size()>16)error(loc,"invalid project event alias or payload limit");
+            for(const auto& type:types)if(type!="int" && type!="float" && type!="bool" && type!="string")error(loc,"project events require scalar payload types");
+            auto builtin=checkedEventPayloads().find(name);
+            if(builtin!=checkedEventPayloads().end() && (source || builtin->second!=types))error(loc,"project event alias conflicts with a builtin");
+            auto old=events.find(name);if(old!=events.end() && old->second!=types)error(loc,"project event schema conflicts with the live project contract");
+            if(builtin==checkedEventPayloads().end() && projectAliases.size()>=128 && !projectAliases.contains(name))error(loc,"project event schema limit exceeded");
+            events[name]=types;if(builtin==checkedEventPayloads().end())projectAliases.insert(name);
+        };
+        for(const auto& [name,types]:ctx.projectEventSchemas)registerSchema(name,types,s.sourceLoc,false);
+        std::unordered_set<std::string> declared;
+        for(const auto& item:s.members)if(auto* declaration=dynamic_cast<ProjectEventDeclStmt*>(item.get())) {
+            if(!declared.insert(declaration->name).second)error(declaration->sourceLoc,"duplicate project event declaration");
+            std::vector<std::string> types;for(const auto& param:declaration->params)types.push_back(canonical(param.typeName));
+            registerSchema(declaration->name,types,declaration->sourceLoc,true);
+        }
         scopes.clear();
         scopes.emplace_back();
         functions.clear();
@@ -969,6 +994,8 @@ const BuiltinFunctionCatalog &checkedBuiltinFunctions()
         {"entity.set_number", {{"int", "string", "string", "float"}, "bool"}},
         {"tasks.cancel", {{"int"}, "bool"}},
         {"tasks.pending", {{"int"}, "bool"}},
+        {"tasks.status", {{"int"}, "string"}},
+        {"event.error", {{}, "string"}},
         {"storage.snapshot", {{}, "string"}},
         {"storage.restore", {{"string"}, "bool"}},
         {"storage.version", {{}, "int"}},
@@ -984,6 +1011,7 @@ const std::unordered_map<std::string, std::vector<std::string>> &checkedEventPay
         {"script_test_ping", {"int"}},
         {"device_action", {"int", "bool"}},
         {"task_complete", {"int", "bool"}},
+        {"logia_task_complete", {"int", "bool"}},
         {"physics_collision", {"int", "int", "int"}},
         {"scene_current_changed", {"Scene"}},
         {"scene_begin_play", {"Scene"}},

@@ -1,0 +1,12 @@
+script AsyncCoordination {
+    project_event progress(value:int,label:string)
+    state worker:int=0
+    function produce(){await delay(0.1) event.emit("progress",7,"ready")}
+    function consume(){
+        await wait_event("progress",1.0) into(received:bool,value:int,label:string)
+        if received {log.info(label)} else {log.info("progress timed out")}
+        await join(worker,1.0) into(done:bool,ok:bool)
+        if done && ok {log.info("worker completed")}
+    }
+    on_start(){tasks.start(consume) worker=tasks.start(produce)}
+}

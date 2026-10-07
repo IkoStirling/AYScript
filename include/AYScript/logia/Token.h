@@ -27,6 +27,7 @@ enum class TokenType : uint8_t {
                     // lifecycle body it produces a hard error
                     // ("function declarations only allowed as
                     // script members").
+    ProjectEvent,
     Signal,         // S4.1 (2026-07-15): per-component signal
                     // declaration `signal NAME(params)?;`. Parser
                     // restricts to ScriptDecl members; inside a
