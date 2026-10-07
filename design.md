@@ -3142,3 +3142,27 @@ window_close 无 payload，使用不绑定的旧 await。`into` 只在 typed bin
 而字段指针为非拥有语义；在每次分析时构造完整重复描述符会留下未释放字段元数据。
 Windows Debug CRT 用例在预热后比较 256 次编译/执行/关闭的存活原生堆分配，防止此类
 逐次重建泄漏重新出现。它与 Lua 分配预算及随机模型分别覆盖不同的资源与行为边界。
+
+## §6 持久脚本状态
+
+Checked 脚本使用 `script Player version 2` 指定正整数版本（省略为 1），以 `persist score:int=0` 声明持久字段。
+普通 `state` 与共享 `var` 不进入快照。`storage.snapshot():string`、`restore(json:string):bool`、
+`version():int`、`error():string` 仅用于接收者宿主，当前执行 owner 决定实例。快照 format v1 包含
+稳定脚本名、脚本版本、字段 schema 和字段数据，禁止持久化 transient World/voice/hit/task 令牌。
+支持 int/float/bool/string、vec2/vec3/quat 和最多 8 层的 typed array；动态 table/对象引用不能声明 persist。
+快照上限 1 MiB、65536 个值，JSON nesting 上限 16；数字必须有限，整数受 int64 范围约束。
+
+`save.write(slot,storage.snapshot())` 把快照交给项目 SaveGameService 的原子槽，`save.read(slot)` 读取，
+缺失/失败返回空字符串，错误见 `save.error()`；读取可按原服务策略从有效备份恢复。SaveGame 外层
+payload envelope 使用 v1，独立于脚本的 `version`。`save.remove` 移除主槽和备份。
+
+旧脚本版本需要纯 helper `migrate(from:int,data:table):table`，返回当前持久字段表；允许纯数学/数组
+运算，不允许模块状态/self/time、Host 调用、其他 helper 或 await。缺少 migrator、未来版本、
+不匹配 schema/类型、损坏 JSON 均拒绝提交。校验与迁移全部成功后才覆盖字段，并重置临时 state，
+取消旧任务/订阅，再调用无参 `on_restore()`。该 hook 用于重建运行期行为；hook 失败发生于状态提交后，
+通过 storage.error/getLastError 报告。递归 restore 拒绝。与外部 Host 的 receiver 存储生命周期保持一致，
+使用完成后 releaseInstance；恢复到另一 World 时先创建新的实例，再恢复稳定游戏数据。
+
+示例：[persistent_actor.logia](examples/persistent_actor.logia)。原生宿主入口
+为 snapshotPersistentState/restorePersistentState。回归覆盖坏数据拒绝、旧任务取消、订阅重建、
+迁移纯度、版本拒绝、数组恢复、双实例隔离和真实项目存档槽。

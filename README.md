@@ -2,6 +2,18 @@
 
 AYScript 是 Logia 脚本语言与运行时模块，提供 Lexer/Parser/语义分析/Lua 代码生成、反射桥、输入桥和 EventBus ambient API。
 
+## Durable script state
+
+Checked 脚本用 `script Player version 2 { persist score: int = 0 ... }` 显式声明存档版本和字段。
+普通 `state` 保持临时状态；任务、订阅、voice/entity/hit/context 令牌应放在临时字段。
+`storage.snapshot():string` 生成当前实例的 JSON；`storage.restore(json):bool` 校验并恢复当前实例。
+默认 Host 的 `save.write(slot,json)` / `save.read(slot)` / `save.remove(slot)` 使用项目 SaveGameService。
+旧数据必须经纯 helper `migrate(from:int,data:table):table` 转换，再按当前 schema 验证。
+成功恢复重置临时字段、取消旧任务和订阅，然后运行 `on_restore()`；作者在此重新绑定运行期行为。
+失败的校验/迁移不提交字段。hook 失败发生在提交后，通过 storage.error/getLastError 报告。
+格式 1 限制 1 MiB、65536 个值、typed array 8 层；标量/向量/typed array 可保存，动态 table/借用对象拒绝。
+示例：[persistent_actor.logia](examples/persistent_actor.logia)。C++ 宿主使用 snapshotPersistentState/restorePersistentState。
+
 ## Checked Logia
 
 生产新脚本使用 `checkedLogiaHostContext(...)`。旧 Component/System/Tool 调用默认保留兼容语义；
@@ -56,7 +68,7 @@ Logia 语法、宿主接口和跨模块事件边界见 [design.md](design.md)。
 
 ## 默认引擎函数与项目发布
 
-默认 Client/Server/Editor 的 Script 装配由 AYApplication 安装 37 个 audio/animation/physics/ui/world/gameflow 函数。
+默认 Client/Server/Editor 的 Script 装配由 AYApplication 安装 42 个 audio/animation/physics/ui/world/gameflow/save 函数。
 `world.request(id)` 在 Egress 切换；`gameflow.request(intent)` 排队提交空 payload 意图；
 `ui.emit_signal(id)` 驱动 UIFlow 信号或应用命令。请求返回接受状态，实际切换在后续运行时 tick。
 示例：[gameplay_flow.logia](examples/gameplay_flow.logia)。

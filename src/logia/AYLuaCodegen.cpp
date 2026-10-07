@@ -174,10 +174,14 @@ void LuaCodegen::emitScript(const ScriptDecl& script)
     if (_options.hostContext.strictSemantics && _options.hostContext.expectSelf) {
         writeLine("M._instanceState = {}");
         writeLine("M._stateSchema = {}");
+        writeLine("M._persistentSchema = {}");
+        writeLine("M._persistenceVersion = " + std::to_string(script.persistenceVersion));
         for (const auto& member : script.members) {
             auto* var = dynamic_cast<const VarDeclStmt*>(member.get());
             if (var && var->instanceState)
                 writeLine("M._stateSchema[\"" + var->name + "\"] = \"" + var->typeName + "\"");
+            if (var && var->persistent)
+                writeLine("M._persistentSchema[\"" + var->name + "\"] = \"" + var->typeName + "\"");
         }
         writeLine("function M._get_state(self)");
         writeLine("    local bag = M._instanceState[self]");

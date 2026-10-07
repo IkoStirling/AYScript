@@ -11,12 +11,14 @@ enum class TokenType : uint8_t {
     Script,         // S2.5: was Component. Top-level `script Name { ... }`.
     Var,
     State,          // Per-receiver state, distinct from module-shared var.
+    Persist,        // Opt-in durable per-receiver state.
     Await,
     Import,
     OnStart,
     OnUpdate,
     OnDestroy,
     OnReload,
+    OnRestore,
     Run,            // S3.8b: Tool host run-only entry point.
     Function,       // 2026-07-11 audit fix: script-block-scope helper
                     // `function NAME(params) { BODY }`. Parser

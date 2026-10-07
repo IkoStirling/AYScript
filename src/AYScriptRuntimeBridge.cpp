@@ -12,6 +12,7 @@
 #include "ScriptTasks.h"
 #include "ScriptMath.h"
 #include "ScriptActorSync.h"
+#include "ScriptPersistence.h"
 
 #include "AYScript/LogiaEventBridge.h"
 #include "AYScript/logia/Logia.h"
@@ -1616,6 +1617,21 @@ struct LogiaRuntimeBridge::Impl {
     std::unordered_map<void*, sol::table> actorSelf;
     std::unordered_map<void*, std::string> actorOwners;
     std::unordered_map<std::string, std::vector<std::string>> dependencies;
+    LogiaRuntimeBridge* bridge = nullptr;
+    std::string persistenceError;
+    bool restoringState = false;
+    std::pair<std::string, void*> persistentOwner() const {
+        const auto owner=currentEventOwner();
+        const auto marker=owner.rfind("/instance/");
+        if(marker==std::string::npos) throw std::runtime_error("storage requires a receiver execution owner");
+        return {owner.substr(0,marker),reinterpret_cast<void*>(static_cast<std::uintptr_t>(
+            std::stoull(owner.substr(marker+10))))};
+    }
+    sol::object persistentSelf(void* receiver) {
+        if(!receiver) throw std::runtime_error("persistence requires a receiver");
+        const auto actor=actorSelf.find(receiver);
+        return actor==actorSelf.end() ? sol::make_object(lua,receiver) : sol::make_object(lua,actor->second);
+    }
 
     // S5 ED-03 (2026-07-15): per-script LogiaSourceMap indexed by
     // scriptName — paired with `scripts` so a `callLifecycle` Lua
@@ -1944,6 +1960,23 @@ struct LogiaRuntimeBridge::Impl {
         };
         lua["vec2"] = vec2Tbl;
         registerScriptMathAndArrays(lua);
+        auto storage=lua.create_table();
+        storage["snapshot"]=[this]() {
+            auto [name,receiver]=persistentOwner();
+            auto result=bridge->snapshotPersistentState(name,receiver);
+            persistenceError=result.error; return result.json;
+        };
+        storage["restore"]=[this](const std::string& json) {
+            auto [name,receiver]=persistentOwner();
+            auto result=bridge->restorePersistentState(name,receiver,json);
+            persistenceError=result.error; return result.success;
+        };
+        storage["version"]=[this]() -> lua_Integer {
+            auto [name,receiver]=persistentOwner(); (void)receiver;
+            return scripts.at(name).get<lua_Integer>("_persistenceVersion");
+        };
+        storage["error"]=[this]() { return persistenceError; };
+        lua["storage"]=storage;
 
         // INT-04: ambient event.emit / subscribe / unsubscribe →
         // EventBus string aliases. Does NOT route S4.1 signal/emit/
@@ -2021,7 +2054,7 @@ struct LogiaRuntimeBridge::Impl {
 // ------------------------------------------------------------
 
 LogiaRuntimeBridge::LogiaRuntimeBridge()
-    : _impl(std::make_unique<Impl>()) {}
+    : _impl(std::make_unique<Impl>()) { _impl->bridge=this; }
 
 LogiaRuntimeBridge::~LogiaRuntimeBridge()
 {
@@ -2674,6 +2707,50 @@ void LogiaRuntimeBridge::resetInstanceState(const std::string& scriptName)
     it->second["_previousSchema"] = sol::nil;
 }
 
+LogiaRuntimeBridge::PersistentStateResult LogiaRuntimeBridge::snapshotPersistentState(
+    const std::string& name, void* receiver)
+{
+    if (!_impl || !_impl->requireOwnerThread("snapshotPersistentState") || !_impl->_luaLive)
+        return {false, {}, "persistence requires the live runtime owner thread"};
+    auto found=_impl->scripts.find(name);
+    if(found==_impl->scripts.end() || !receiver) return {false, {}, "unknown script or receiver"};
+    try {
+        if(_impl->eventOwnerStack.empty()) _impl->resetExecutionBudget();
+        return captureScriptState(_impl->lua,found->second,_impl->persistentSelf(receiver),name);
+    } catch(const std::exception& error) { return {false, {}, error.what()}; }
+}
+LogiaRuntimeBridge::PersistentStateResult LogiaRuntimeBridge::restorePersistentState(
+    const std::string& name, void* receiver, const std::string& json)
+{
+    if (!_impl || !_impl->requireOwnerThread("restorePersistentState") || !_impl->_luaLive)
+        return {false, {}, "persistence requires the live runtime owner thread"};
+    auto found=_impl->scripts.find(name);
+    if(found==_impl->scripts.end() || !receiver) return {false, {}, "unknown script or receiver"};
+    if(_impl->restoringState) return {false, {}, "recursive persistent restore is forbidden"};
+    _impl->restoringState=true;
+    struct Guard { bool& active; ~Guard(){active=false;} } guard{_impl->restoringState};
+    const auto owner=name+"/instance/"+std::to_string(reinterpret_cast<std::uintptr_t>(receiver));
+    _impl->enterEventOwner(owner);
+    struct OwnerGuard { Impl* impl; ~OwnerGuard(){impl->leaveEventOwner();} } ownerGuard{_impl.get()};
+    PersistentStateResult result;
+    try {
+        if(_impl->eventOwnerStack.size()==1) _impl->resetExecutionBudget();
+        result=applyScriptState(_impl->lua,found->second,_impl->persistentSelf(receiver),name,json);
+    } catch(const std::exception& error) { return {false, {}, error.what()}; }
+    if(!result.success) return result;
+    _impl->tasks.cancelOwner(owner);
+    _impl->unsubscribeEventConnections(owner);
+    sol::object hook=found->second["on_restore"];
+    if(hook.is<sol::function>()) {
+        const bool actor=_impl->actorSelf.contains(receiver);
+        if(!callLifecycleImpl(name,"on_restore",receiver,nullptr,
+            actor ? static_cast<ayt::entity::ActorScriptComponent*>(receiver) : nullptr)) {
+            result.success=false;
+            result.error="state restored but on_restore failed: "+getLastError().luaMessage;
+        }
+    }
+    return result;
+}
 bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
                                            const std::string& methodName,
                                            void* receiver, void* arg2,
@@ -2723,7 +2800,7 @@ bool LogiaRuntimeBridge::callLifecycleImpl(const std::string& scriptName,
     // argument from the scriptName string (S1 placeholder) to the
     // actual receiver pointer — sol2 5.5+ pushes a raw typed pointer
     // through lua_pushlightuserdata without an explicit wrapper.
-    _impl->resetExecutionBudget();
+    if(!_impl->restoringState) _impl->resetExecutionBudget();
     sol::protected_function_result r;
     if (methodName == "on_update") {
         // on_update(self, dt) — second param from arg2 pointer.

@@ -382,7 +382,7 @@ using ScriptHostFunction = std::function<ScriptHostValue(const std::vector<Scrip
 //       Actor class integration: bump 31 -> 32. Bare multi-hop Lua
 //       assignment no longer duplicates intermediate member names.
 // 2026-10-07: typed task/payload bindings; invalidate borrowed-pointer captures.
-constexpr std::size_t kLogiaPipelineVersion = 38u;
+constexpr std::size_t kLogiaPipelineVersion = 39u; // opt-in persistent state/schema + restore lifecycle
 
 // S3.6 — fold LogiaHostContext fields into the compile cache key so
 // that the same source compiled under different host kinds (Component
@@ -623,6 +623,22 @@ public:
     /// Clear state after a successful reload when an explicit reset is desired.
     /// Successful reloads otherwise preserve same-name, same-type state fields.
     void resetInstanceState(const std::string& scriptName);
+    struct PersistentStateResult {
+        bool success = false;
+        std::string json, error;
+        bool migrated = false;
+    };
+    /// Owner-thread snapshot of declared `persist` fields only; format/schema
+    /// and script version are explicit. Tasks/subscriptions are never serialized;
+    /// runtime handles belong in transient state, never in durable integer fields.
+    /// Receiver must have an initialized checked instance.
+    PersistentStateResult snapshotPersistentState(const std::string& scriptName, void* receiver);
+    /// Validate/migrate before applying. `migrate(from:int,data:table):table`
+    /// converts old field data to the current schema. Successful restore resets
+    /// transient state, cancels old tasks/subscriptions and invokes on_restore.
+    /// Hook failure is reported after the state commit (as with on_reload).
+    PersistentStateResult restorePersistentState(const std::string& scriptName, void* receiver,
+                                                const std::string& json);
     /// Bind the active World to the controlled entity.* facade. World teardown
     /// invalidates all tokens automatically. Actor paths are asset-root-relative.
     void bindWorld(ayt::entity::World* world, const std::string& assetsRoot = {});

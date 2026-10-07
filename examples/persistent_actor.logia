@@ -1,0 +1,25 @@
+script PersistentActor version 2 {
+    persist score: int = 0
+    persist checkpoint: vec3 = vec3.new(0,0,0)
+    state save_action: int = 0
+
+    // Pure conversion: no World, Actor state, tasks or Host effects.
+    function migrate(from: int, data: table): table {
+        if from == 1 { return {score=data["points"], checkpoint={x=0,y=0,z=0}} }
+        return data
+    }
+    function on_action(action_id: int, pressed: bool) {
+        if pressed && action_id == save_action {
+            if !save.write("player", storage.snapshot()) { log.error(save.error()) }
+        }
+    }
+    function bind_runtime() { event.subscribe("device_action",on_action) }
+    on_start() {
+        var data: string = save.read("player")
+        if data != "" {
+            if !storage.restore(data) { log.error(storage.error()) bind_runtime() }
+        } else { bind_runtime() }
+    }
+    on_reload() { bind_runtime() }
+    on_restore() { bind_runtime() ui.set_text("hud/status","Save restored") }
+}

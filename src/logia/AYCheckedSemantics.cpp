@@ -23,6 +23,15 @@ std::string canonical(std::string t)
         return "string";
     return t;
 }
+bool durableType(const std::string& type, unsigned depth = 0)
+{
+    if (depth > 8) return false;
+    if (type.starts_with("array<") && type.ends_with(">"))
+        return durableType(type.substr(6, type.size() - 7), depth + 1);
+    const auto value = canonical(type);
+    return value == "int" || value == "float" || value == "bool" || value == "string" ||
+           value == "vec2" || value == "vec3" || value == "quat";
+}
 bool numeric(const std::string &t)
 {
     return t == "int" || t == "float";
@@ -434,6 +443,8 @@ struct Checker
                 auto builtin = builtins.find(name);
                 if (builtin != builtins.end())
                 {
+                    if(name.starts_with("storage.") && !ctx.expectSelf)
+                        error(c.sourceLoc,"storage requires a receiver host");
                     checkArgs(builtin->second.first);
                     return builtin->second.second;
                 }
@@ -710,6 +721,8 @@ struct Checker
                 if (auto *entry = symbol(var->name))
                     entry->instanceState = true;
             }
+            if (var->persistent && !durableType(type))
+                error(var->sourceLoc, "persist requires scalar, vector or bounded nested typed array data");
         }
         else if (auto *expression = dynamic_cast<ExprStmt *>(&s))
         {
@@ -843,6 +856,46 @@ struct Checker
                          fn->returnType.empty() ? "void" : canonical(fn->returnType),
                          fn->sourceLoc);
                 inHelper = false;
+                if(fn->name == "migrate") {
+                    if(fn->params.size()!=2 || canonical(fn->params[0].typeName)!="int" ||
+                       canonical(fn->params[1].typeName)!="table" || canonical(fn->returnType)!="table")
+                        error(fn->sourceLoc,"migrate must have (from:int,data:table):table signature");
+                    std::function<void(Expr*)> pure;
+                    pure=[&](Expr* value) {
+                        if(!value) return;
+                        if(auto* id=dynamic_cast<IdentifierExpr*>(value); id &&
+                           (id->name=="self" || id->name=="time" || id->resolvedInstanceState ||
+                            (symbol(id->name) && symbol(id->name)->decl==id->resolvedDecl)))
+                            error(id->sourceLoc,"migration cannot access self or module state");
+                        if(auto* call=dynamic_cast<CallExpr*>(value)) {
+                            auto* member=dynamic_cast<MemberExpr*>(call->callee.get());
+                            auto* root=member ? dynamic_cast<IdentifierExpr*>(member->object.get()) : nullptr;
+                            if(!root || (root->name!="vec2" && root->name!="vec3" && root->name!="quat" && root->name!="array"))
+                                error(call->sourceLoc,"migration calls must be pure math/array operations");
+                            for(auto& arg:call->args) pure(arg.get());
+                        }
+                        if(auto* binary=dynamic_cast<BinaryExpr*>(value)){pure(binary->left.get());pure(binary->right.get());}
+                        if(auto* unary=dynamic_cast<UnaryExpr*>(value))pure(unary->operand.get());
+                        if(auto* member=dynamic_cast<MemberExpr*>(value))pure(member->object.get());
+                        if(auto* index=dynamic_cast<IndexExpr*>(value)){pure(index->object.get());pure(index->index.get());}
+                        if(auto* table=dynamic_cast<TableExpr*>(value))for(auto& entry:table->entries){
+                            if(!dynamic_cast<IdentifierExpr*>(entry.key.get()))pure(entry.key.get());
+                            pure(entry.value.get());
+                        }
+                    };
+                    std::function<void(const std::vector<StmtPtr>&)> visit;
+                    visit=[&](const auto& body) { for(const auto& statement:body) {
+                        if(auto* var=dynamic_cast<VarDeclStmt*>(statement.get()))pure(var->initializer.get());
+                        if(auto* expression=dynamic_cast<ExprStmt*>(statement.get()))pure(expression->expr.get());
+                        if(auto* result=dynamic_cast<ReturnStmt*>(statement.get()))pure(result->value.get());
+                        if(auto* branch=dynamic_cast<IfStmt*>(statement.get())){pure(branch->condition.get());visit(branch->thenBranch);visit(branch->elseBranch);}
+                        if(auto* loop=dynamic_cast<WhileStmt*>(statement.get())){pure(loop->condition.get());visit(loop->body);}
+                        if(auto* loop=dynamic_cast<ForStmt*>(statement.get())){pure(loop->start.get());pure(loop->bound.get());pure(loop->step.get());visit(loop->body);}
+                        if(auto* block=dynamic_cast<BlockStmt*>(statement.get()))visit(block->body);
+                        if(dynamic_cast<AwaitStmt*>(statement.get()))error(statement->sourceLoc,"migration cannot await");
+                    }};
+                    visit(fn->body);
+                }
             }
             if (auto *fn = dynamic_cast<LifecycleFuncDecl *>(item.get()))
             {
@@ -857,7 +910,7 @@ struct Checker
                      (!fn->params.empty() && fn->params[0].typeName != "float")))
                     error(fn->sourceLoc, "on_update takes at most one float parameter");
                 if ((fn->kind == LifecycleKind::Run || fn->kind == LifecycleKind::OnDestroy ||
-                     fn->kind == LifecycleKind::OnReload) &&
+                     fn->kind == LifecycleKind::OnReload || fn->kind == LifecycleKind::OnRestore) &&
                     !fn->params.empty())
                     error(fn->sourceLoc, "lifecycle takes no parameters");
                 if (fn->kind == LifecycleKind::OnStart &&
@@ -912,7 +965,11 @@ const BuiltinFunctionCatalog &checkedBuiltinFunctions()
         {"entity.get_number", {{"int", "string", "string"}, "float"}},
         {"entity.set_number", {{"int", "string", "string", "float"}, "bool"}},
         {"tasks.cancel", {{"int"}, "bool"}},
-        {"tasks.pending", {{"int"}, "bool"}}};
+        {"tasks.pending", {{"int"}, "bool"}},
+        {"storage.snapshot", {{}, "string"}},
+        {"storage.restore", {{"string"}, "bool"}},
+        {"storage.version", {{}, "int"}},
+        {"storage.error", {{}, "string"}}};
     return builtins;
 }
 const std::unordered_map<std::string, std::vector<std::string>> &checkedEventPayloads()

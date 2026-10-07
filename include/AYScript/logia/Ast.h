@@ -29,6 +29,7 @@ enum class LifecycleKind {
     OnUpdate,
     OnDestroy,
     OnReload,
+    OnRestore,
     Run,            // S3.8b: Tool host entry point (no receiver / no self).
 };
 
@@ -234,6 +235,7 @@ public:
     std::string typeName;
     ExprPtr initializer;
     bool instanceState = false;
+    bool persistent = false;
 
     // ---- S2: SemanticAnalyzer resolves `typeName` to a registered type. ----
     // nullptr when unresolved (built-in or unregistered — analyzer reports
@@ -458,6 +460,7 @@ public:
         : name(std::move(name)), members(std::move(members)) {}
     std::string name;
     std::vector<StmtPtr> members;
+    std::uint32_t persistenceVersion = 1;
 
     // S5 ED-02 (2026-07-14): source location of the `script` keyword
     // (set by the parser). Used by analyzer-side diagnostics

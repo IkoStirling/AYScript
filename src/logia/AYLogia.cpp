@@ -93,7 +93,7 @@ CompileResult Compiler::compile(const std::string& source,
             for (const auto& item : statements) {
                 bool checkedOnly=dynamic_cast<AwaitStmt*>(item.get())!=nullptr;
                 if(auto* function=dynamic_cast<FunctionDeclStmt*>(item.get())){checkedOnly|=!function->returnType.empty();checkedSyntax(function->body);}
-                if(auto* lifecycle=dynamic_cast<LifecycleFuncDecl*>(item.get())){checkedOnly|=lifecycle->kind==LifecycleKind::OnReload;checkedSyntax(lifecycle->body);}
+                if(auto* lifecycle=dynamic_cast<LifecycleFuncDecl*>(item.get())){checkedOnly|=lifecycle->kind==LifecycleKind::OnReload || lifecycle->kind==LifecycleKind::OnRestore;checkedSyntax(lifecycle->body);}
                 if(auto* branch=dynamic_cast<IfStmt*>(item.get())){checkedSyntax(branch->thenBranch);checkedSyntax(branch->elseBranch);}
                 if(auto* loop=dynamic_cast<WhileStmt*>(item.get()))checkedSyntax(loop->body);
                 if(auto* loop=dynamic_cast<ForStmt*>(item.get()))checkedSyntax(loop->body);

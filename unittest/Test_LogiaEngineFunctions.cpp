@@ -20,7 +20,7 @@ TEST_SUITE(LogiaEngineFunctionsTests)
 TEST_CASE(shared_engine_metadata_checks_arguments_without_granting_runtime_access)
 {
     auto ctx = logia::engineLogiaHostContext(context());
-    CHECK(logia::engineLogiaFunctions().size() == 37u);
+    CHECK(logia::engineLogiaFunctions().size() == 42u);
     CHECK(logia::compileLogiaToLua("script A { on_start() { audio.play(\"a.audio\",1.0,false) "
                                    "physics.raycast(vec3.new(0,0,0),vec3.new(1,0,0),10.0,1) "
                                    "ui.set_text(\"hud/hp\",\"7\") ui.emit_signal(\"start\") "

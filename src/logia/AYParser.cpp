@@ -40,6 +40,16 @@ std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
 {
     const Token scriptTok = consume(TokenType::Script, "Expected 'script'");
     const Token name = consumeIdentifier("Expected script name");
+    std::uint32_t persistenceVersion = 1;
+    if (check(TokenType::Identifier) && current().lexeme == "version") {
+        advance();
+        auto version = consume(TokenType::IntLiteral, "Expected positive persistence version");
+        try {
+            auto value = std::stoull(version.lexeme);
+            if (value == 0 || value > UINT32_MAX) throw std::out_of_range("version");
+            persistenceVersion = static_cast<std::uint32_t>(value);
+        } catch (...) { error("Persistence version must be in [1,4294967295]"); }
+    }
     consume(TokenType::LeftBrace, "Expected '{' before script body");
 
     std::vector<StmtPtr> members;
@@ -58,6 +68,7 @@ std::unique_ptr<ScriptDecl> Parser::parseScriptDecl()
     consume(TokenType::RightBrace, "Expected '}' after script body");
     // S5 ED-02 (2026-07-14): stamp at the `script` keyword position.
     auto s = std::make_unique<ScriptDecl>(name.lexeme, std::move(members));
+    s->persistenceVersion = persistenceVersion;
     s->sourceLoc.line = scriptTok.line;
     s->sourceLoc.column = scriptTok.column;
     return s;
@@ -73,9 +84,13 @@ std::unique_ptr<Stmt> Parser::parseMember()
         match(TokenType::Semicolon);
         return statement;
     }
-    if (check(TokenType::State)) {
+    if (check(TokenType::State) || check(TokenType::Persist)) {
+        const bool persistent = check(TokenType::Persist);
         auto statement = parseVarDecl();
-        if (auto* var = dynamic_cast<VarDeclStmt*>(statement.get())) var->instanceState = true;
+        if (auto* var = dynamic_cast<VarDeclStmt*>(statement.get())) {
+            var->instanceState = true;
+            var->persistent = persistent;
+        }
         return statement;
     }
     // S2.5: `export var` is gone — `var` is always a pure local.
@@ -92,6 +107,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
         return parseLifecycleFunc(LifecycleKind::OnDestroy, previous());
     }
     if (match(TokenType::OnReload)) return parseLifecycleFunc(LifecycleKind::OnReload,previous());
+    if (match(TokenType::OnRestore)) return parseLifecycleFunc(LifecycleKind::OnRestore,previous());
     // S3.8b: `run` is the Tool host's run-only entry point. The
     // parser accepts it unconditionally as a member; the semantic
     // analyzer decides whether the host kind allows it (Tool only —
@@ -128,7 +144,7 @@ std::unique_ptr<Stmt> Parser::parseMember()
 
 std::unique_ptr<Stmt> Parser::parseVarDecl()
 {
-    const Token varTok = check(TokenType::State) ? advance() : consume(TokenType::Var, "Expected 'var'");
+    const Token varTok = (check(TokenType::State) || check(TokenType::Persist)) ? advance() : consume(TokenType::Var, "Expected 'var'");
     const Token name = consumeIdentifier("Expected variable name");
     consume(TokenType::Colon, "Expected ':' after variable name");
     const auto typeName = parseTypeName();
@@ -1023,6 +1039,8 @@ void Parser::synchronize()
         case TokenType::OnUpdate:
         case TokenType::OnDestroy:
         case TokenType::OnReload:
+        case TokenType::OnRestore:
+        case TokenType::Persist:
         case TokenType::Run:
         case TokenType::Function:  // 2026-07-11 audit fix: script-block helper.
         case TokenType::Signal:    // S4.1 (2026-07-15): per-component signal decl.
