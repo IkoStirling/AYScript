@@ -181,3 +181,7 @@ Lua state pointer and is unsafe after GC. Both event paths now use fresh roots.
 
 The standalone syntax diagnostics header includes cstdint and names std::uint8_t
 explicitly; native GCC/Clang builds do not rely on MSVC's transitive integer aliases.
+
+Native run 37653449840 passed GCC13.3/Clang18.1 on x64/ARM64: actual Logia Session
+10000 ticks and 5000 checkpoint replay, golden 9f427001d6f95e05, type/identity/budget
+and fault restore checks. Standard Host/Scene execution is separately verified on Windows.

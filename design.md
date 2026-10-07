@@ -3247,3 +3247,8 @@ fresh roots, covered by the existing collectgarbage/nested-budget regression.
 
 Native syntax builds require CompilerError.h to be self-contained: include cstdint
 and use std::uint8_t for diagnostic enums, without platform transitive aliases.
+
+Run 37653449840 executed profile1 on native GCC13.3/Clang18.1 x64/ARM64, all four
+jobs passed the same 10000-tick hash 9f427001d6f95e05 and 5000 checkpoint replay.
+Ordinary Lua/native providers are not covered by this deterministic profile;
+Windows ordinary fast/integration/AsyncStress regressions also passed after GC fix.
