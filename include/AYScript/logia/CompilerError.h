@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 // AYShader\CompilerError.h - Compiler error definitions for Logia
 
 #include <string>
@@ -7,7 +8,7 @@
 namespace ayt::script::logia
 {
 
-enum class ErrorCode : uint8_t {
+enum class ErrorCode : std::uint8_t {
     UnexpectedToken,
     InvalidExpression,
     InvalidStatement,
@@ -23,7 +24,7 @@ enum class ErrorCode : uint8_t {
                            // flips compile success.
 };
 
-enum class DiagnosticSeverity : uint8_t {
+enum class DiagnosticSeverity : std::uint8_t {
     Error,
     Warning,
     Info,

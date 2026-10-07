@@ -3244,3 +3244,6 @@ async/debug subscriptions. sol::reference move/copy assignment between movable
 states preserves the destination Lua state; reassigning the coroutine reference
 therefore fails after coroutine collection. Project and native event paths use
 fresh roots, covered by the existing collectgarbage/nested-budget regression.
+
+Native syntax builds require CompilerError.h to be self-contained: include cstdint
+and use std::uint8_t for diagnostic enums, without platform transitive aliases.

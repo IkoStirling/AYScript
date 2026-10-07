@@ -178,3 +178,6 @@ The ordinary project/native event subscription regression also verifies callback
 survival after a task coroutine is collected. Construct fresh main-state sol
 references; assigning to the original movable coroutine reference retains its
 Lua state pointer and is unsafe after GC. Both event paths now use fresh roots.
+
+The standalone syntax diagnostics header includes cstdint and names std::uint8_t
+explicitly; native GCC/Clang builds do not rely on MSVC's transitive integer aliases.
