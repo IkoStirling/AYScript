@@ -141,6 +141,8 @@ public:
     using Value = std::variant<std::monostate, bool, float, int, std::string>;
     explicit LiteralExpr(Value value) : value(std::move(value)) {}
     Value value;
+    /// Software-number parsing retains the original token without native float conversion.
+    std::string numericLexeme;
 };
 
 class MemberExpr : public Expr {

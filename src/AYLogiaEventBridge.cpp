@@ -363,9 +363,11 @@ void installLogiaEventAmbient(sol::state& lua,
 
         // A callback registered from an async/debug coroutine must anchor its
         // registry reference on the main state before that coroutine retires.
-        fn.push(main);fn=sol::protected_function(main,-1);lua_pop(main,1);
+        fn.push(main);
         auto holder = std::make_shared<OwnedEventHandler>();
-        holder->function = std::move(fn);
+        // A fresh destination is required: sol reference assignment otherwise
+        // preserves a movable coroutine state, which can be collected later.
+        holder->function = sol::protected_function(main,-1);lua_pop(main,1);
         holder->owner = hooks.currentOwner ? hooks.currentOwner() : std::string{};
         holder->hooks = hooks;
 

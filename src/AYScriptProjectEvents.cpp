@@ -84,9 +84,11 @@ void ScriptProjectEvents::install(sol::state& state,LogiaEventHooks eventHooks) 
         if(!schemas.contains(alias)) { lua_State* L=current;originalSubscribe.push(L);sol::protected_function local(L,-1);lua_pop(L,1);auto result=local(alias,fn);
             if(!result.valid()){sol::error failure=result;throw failure;}return result.get<lua_Integer>(); }
         if(!fn.valid())return 0;
-        auto* main=lua->lua_state();fn.push(main);fn=sol::protected_function(main,-1);lua_pop(main,1);
+        // Assignment between movable Lua states preserves the destination state
+        // in sol::reference. Construct a fresh main-state reference instead.
+        auto* main=lua->lua_state();fn.push(main);sol::protected_function rooted(main,-1);lua_pop(main,1);
         const auto owner=hooks.currentOwner?hooks.currentOwner():std::string{};
-        auto connection=ayt::event::EventBus::instance().subscribe<ProjectEvent>([this,alias,fn,owner](const ProjectEvent& value) {
+        auto connection=ayt::event::EventBus::instance().subscribe<ProjectEvent>([this,alias,fn=std::move(rooted),owner](const ProjectEvent& value) {
             if(value.scope!=this || value.alias!=alias || (hooks.isRuntimeThread && !hooks.isRuntimeThread()))return;
             if(hooks.resetExecutionBudget)hooks.resetExecutionBudget();if(hooks.enterOwner)hooks.enterOwner(owner);
             struct Guard { ScriptProjectEvents* events;~Guard(){if(events->hooks.leaveOwner)events->hooks.leaveOwner();} } guard{this};

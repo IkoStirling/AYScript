@@ -3218,3 +3218,29 @@ Declare scalar payload contracts with `project_event progress(value:int,label:st
 Schemas permit 128 custom aliases, 16 scalar fields, 64 KiB per string and 256 KiB total strings per delivery. Runtime validation rejects wrong payloads and reports `projectEventError()` / `event.error()`. Callback failures propagate to the emitter; nested callbacks share the instruction budget. Subscriptions created by tasks or debugger coroutines are rooted on the main Lua state. See `examples/async_coordination.logia` and `Test_LogiaAsyncContracts.cpp`.
 
 Task terminal notification invokes its protected emitter through a C++ owner guard, including explicit cancellation inside a coroutine. A failed completion handler cannot leave a stale execution owner that blocks later loads; Test_LogiaAsyncContracts covers a budget-failing handler followed by a healthy reload.
+# Deterministic System profile1
+
+AYScriptLogiaSyntax shares the existing Lexer/Parser/diagnostics; optional software
+number parsing retains numericLexeme and bypasses stof/stol. Default mode remains
+ordinary Logia. AYScript::Determinism directly interprets a type-checked immutable
+AST with software Float32/Vec3 and checked int64/bool, without Lua or native providers.
+Locals are tick-local; all persistence is through registered Session state.
+Allowed Sim/Det calls, bounded exact-rational decimal conversion and deterministic
+operation/call limits are defined in the stage13 project document. Runtime faults
+require explicit checkpoint restore; earlier writes are not implicitly rolled back.
+
+Program identity hashes exact source plus LE profile/options. Installation registers
+stable logic ID/version/hash in manifest4 then installs the callback; partial install
+failure invalidates the configuration. Whitespace/options/code changes deliberately
+change compatibility. No arbitrary C++ callback sandbox, automatic hot reload,
+native Host provider conversion or general deterministic script asset pipeline.
+Portable tests run the same actual Session and interpreter source at fast-math,
+compare 10000-tick golden bytes and checkpoint replay, and reject unsafe capability,
+type, arithmetic, index and budget cases. Standard Host test compares owned kernel
+and World execution/restore through normal Entity FixedPrePhysics dispatch.
+
+Ordinary event bridges construct a fresh main-state protected_function for
+async/debug subscriptions. sol::reference move/copy assignment between movable
+states preserves the destination Lua state; reassigning the coroutine reference
+therefore fails after coroutine collection. Project and native event paths use
+fresh roots, covered by the existing collectgarbage/nested-budget regression.

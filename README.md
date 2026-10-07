@@ -155,3 +155,26 @@ Declare scalar payload contracts with `project_event progress(value:int,label:st
 `await join(id,1.0) into(done:bool,ok:bool)` returns true and the completion result, or false/false on timeout. Invalid IDs and cyclic joins fail the task. `tasks.status(id)` reports pending/running/completed/failed/cancelled/expired/unknown. The latest 1024 terminal outcomes are retained; an expired outcome joins as true/false. Explicit completion, failure and cancellation emit `logia_task_complete(int,bool)`; teardown remains quiet. This differs from the native `task_complete` alias.
 
 Schemas permit 128 custom aliases, 16 scalar fields, 64 KiB per string and 256 KiB total strings per delivery. Runtime validation rejects wrong payloads and reports `projectEventError()` / `event.error()`. Callback failures propagate to the emitter; nested callbacks share the instruction budget. Subscriptions created by tasks or debugger coroutines are rooted on the main Lua state. See `examples/async_coordination.logia` and `Test_LogiaAsyncContracts.cpp`.
+# Restricted deterministic Logia System
+
+Link `AYScript::Determinism`, compileDeterministicLogia(source,options,error), then
+installDeterministicLogia(session,stableSystemId,priority,program) during Session
+configuration. One on_update(dt:float) uses software Float32/Vec3, checked int64,
+bool, local helpers/control flow and a fixed Sim facade for registered state,
+pose, RNG and events. Each tick recreates locals; no Lua/native providers,
+shared/persistent variables, IO/time/import/async or arbitrary self reflection.
+Compile/type checks happen before callbacks. Failed multi-step installation
+requires abandoning that configuration. Execution errors fault until explicit restore.
+
+Source/options fingerprint enters Session manifest4. Operation/call budgets are
+deterministic; decimals use exact bounded rational operands and software division,
+out-of-profile literals use det.bits. Ordinary Logia uses its existing parser mode
+and Lua semantics. Standalone native checks are at unittest/portable; engine tests
+AYScript_DeterministicChecks and AYScript_DeterministicHostChecks exercise actual
+Session and standard Host. Full contract/limits/golden evidence:
+[stage13](../../AYDocs/DETERMINISTIC-COMPLETION-STAGE13.md).
+
+The ordinary project/native event subscription regression also verifies callback
+survival after a task coroutine is collected. Construct fresh main-state sol
+references; assigning to the original movable coroutine reference retains its
+Lua state pointer and is unsafe after GC. Both event paths now use fresh roots.

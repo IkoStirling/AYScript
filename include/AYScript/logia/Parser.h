@@ -13,7 +13,7 @@ namespace ayt::script::logia
 
 class Parser {
 public:
-    explicit Parser(const std::vector<Token>& tokens);
+    explicit Parser(const std::vector<Token>& tokens, bool softwareNumbers = false);
 
     std::unique_ptr<Program> parse();
 
@@ -77,6 +77,7 @@ private:
 
     std::vector<Token> _tokens;
     int _current = 0;
+    bool _softwareNumbers = false;
     CompilerErrorReporter _reporter;
 };
 

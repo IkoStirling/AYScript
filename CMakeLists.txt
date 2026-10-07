@@ -27,7 +27,26 @@ file(GLOB AYSCRIPT_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
+set(AYSCRIPT_SYNTAX_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/logia/AYLexer.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/logia/AYParser.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/logia/AYCompilerError.cpp")
+list(REMOVE_ITEM AYSCRIPT_SOURCES ${AYSCRIPT_SYNTAX_SOURCES})
+add_library(AYScriptLogiaSyntax STATIC ${AYSCRIPT_SYNTAX_SOURCES})
+target_include_directories(AYScriptLogiaSyntax PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 add_library(AYScript STATIC ${AYSCRIPT_SOURCES})
+if(TARGET AYEntityDeterminismKernel)
+    add_library(AYScriptDeterminism STATIC determinism/DeterministicLogia.cpp)
+    add_library(AYScript::Determinism ALIAS AYScriptDeterminism)
+    target_include_directories(AYScriptDeterminism PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AYScriptDeterminism PUBLIC AYScriptLogiaSyntax AYEntityDeterminismKernel)
+    if(BUILD_TESTING)
+        add_executable(AYScript_DeterministicChecks unittest/portable/main.cpp)
+        target_link_libraries(AYScript_DeterministicChecks PRIVATE AYScriptDeterminism)
+        add_test(NAME AYScript_DeterministicChecks COMMAND AYScript_DeterministicChecks)
+        set_tests_properties(AYScript_DeterministicChecks PROPERTIES TIMEOUT 120)
+    endif()
+endif()
 
 if(AY_SCRIPT_USE_COMPILE_TIME_TYPES)
     target_compile_definitions(AYScript PUBLIC AY_SCRIPT_USE_COMPILE_TIME_TYPES=1)
@@ -48,7 +67,7 @@ target_include_directories(AYScript PUBLIC
 # PUBLIC link so INT-04 (AYScript/LogiaEventBridge.h → AYEventSystem/EventBus.h) stays
 # reachable even if GameLoop's dep surface changes.
 target_link_libraries(AYScript
-    PUBLIC  AY::Module AYLog AYGameLoop AYEntityCore AYReflect AYEventSystem
+    PUBLIC  AY::Module AYLog AYGameLoop AYEntityCore AYReflect AYEventSystem AYScriptLogiaSyntax
     PRIVATE sol2::sol2 ${LUA_LIBRARIES} AYIO AYTime AYMath
 )
 
@@ -78,3 +97,14 @@ endif()
 add_subdirectory(unittest)
 
 message(STATUS "AYScript v0.2.0 (Logia case-based regression + S4.1 signal/connect/disconnect) — see ${CMAKE_CURRENT_SOURCE_DIR}/design.md")
+
+function(ay_script_add_determinism_host_checks)
+    if(BUILD_TESTING AND TARGET AYScriptDeterminism AND TARGET AYEntityDeterminismHost)
+        set(_root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+        add_executable(AYScript_DeterministicHostChecks "${_root}/unittest/determinism/host.cpp")
+        target_include_directories(AYScript_DeterministicHostChecks PRIVATE "${_root}/../AYEntity/unittest")
+        target_link_libraries(AYScript_DeterministicHostChecks PRIVATE AYScriptDeterminism AYEntityDeterminismHost)
+        add_test(NAME AYScript_DeterministicHostChecks COMMAND AYScript_DeterministicHostChecks)
+        set_tests_properties(AYScript_DeterministicHostChecks PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+    endif()
+endfunction()

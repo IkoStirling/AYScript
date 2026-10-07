@@ -11,8 +11,8 @@
 namespace ayt::script::logia
 {
 
-Parser::Parser(const std::vector<Token>& tokens)
-    : _tokens(tokens), _current(0) {}
+Parser::Parser(const std::vector<Token>& tokens, bool softwareNumbers)
+    : _tokens(tokens), _current(0), _softwareNumbers(softwareNumbers) {}
 
 std::unique_ptr<Program> Parser::parse()
 {
@@ -799,6 +799,11 @@ std::unique_ptr<Expr> Parser::parsePrimary()
 {
     if (match(TokenType::FloatLiteral)) {
         const Token token = previous();
+        if (_softwareNumbers) {
+            auto e = std::make_unique<LiteralExpr>(0.0f);
+            e->numericLexeme = token.lexeme; e->sourceLoc = {"",token.line,token.column};
+            return e;
+        }
         try {
             auto e = std::make_unique<LiteralExpr>(std::stof(token.lexeme));
             e->sourceLoc.line = token.line;
@@ -813,6 +818,11 @@ std::unique_ptr<Expr> Parser::parsePrimary()
     }
     if (match(TokenType::IntLiteral)) {
         const Token token = previous();
+        if (_softwareNumbers) {
+            auto e = std::make_unique<LiteralExpr>(0);
+            e->numericLexeme = token.lexeme; e->sourceLoc = {"",token.line,token.column};
+            return e;
+        }
         try {
             auto e = std::make_unique<LiteralExpr>(static_cast<int>(std::stol(token.lexeme)));
             e->sourceLoc.line = token.line;
