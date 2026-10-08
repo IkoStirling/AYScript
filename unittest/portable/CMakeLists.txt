@@ -11,6 +11,7 @@ add_executable(AYScript_DeterministicChecks main.cpp
     "${SCRIPT_ROOT}/src/logia/AYLexer.cpp" "${SCRIPT_ROOT}/src/logia/AYParser.cpp"
     "${SCRIPT_ROOT}/src/logia/AYCompilerError.cpp"
     "${ENTITY_ROOT}/src/AYDeterministicSession.cpp"
+    "${ENTITY_ROOT}/src/AYDeterministicRollback.cpp"
     "${ENTITY_ROOT}/src/AYDeterministicSessionWire.cpp" "${ENTITY_ROOT}/src/AYDeterministicState.cpp"
     "${MATH_ROOT}/src/DetFloat.cpp" "${MATH_ROOT}/src/DetMath.cpp"
     $<TARGET_OBJECTS:ScriptBackend>)

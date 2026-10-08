@@ -1,4 +1,5 @@
 #include <AYScript/DeterministicLogia.h>
+#include <AYEntity/DeterministicRollback.h>
 #include <iostream>
 #include <cfenv>
 #if defined(_M_X64) || defined(__x86_64__)
@@ -27,6 +28,36 @@ bool configure(DeterministicSession& s,std::shared_ptr<const DeterministicLogiaP
     return (reverse?s.addEntity(100)&&s.addEntity(2):s.addEntity(2)&&s.addEntity(100)) && s.seal();
 }
 std::string wrap(const std::string& body){return "script Test { on_update(dt:float) {"+body+"} }";}
+void rollbackChecks() {
+    const auto program=compile(wrap(R"(
+        var speed:int=0
+        for(var i:0,sim.input_count()) { speed+=sim.input_byte(i,0) }
+        sim.translate(2,det.vec3(det.from_int(speed)*dt,0,0))
+        sim.write_i32(0,2,1,sim.read_i32(0,2,1)+1)
+        sim.write_u32(0,2,2,sim.random_u32(7))
+        sim.emit_byte(1,sim.tick()%256)
+    )"));
+    DeterministicSession s({1,1,1,64,0}),baseline({1,1,1,64,0});
+    require(configure(s,program)&&configure(baseline,program,true),"Logia rollback config");
+    DetRollbackConfig cfg;cfg.members={1,2};cfg.historyTicks=16;cfg.maxPredictionTicks=4;
+    cfg.prediction={{1,DetPredictionMode::Hold}};DeterministicRollback owner(s,cfg);
+    std::uint64_t eventCount=0;auto oracle=ayt::math::make_pcg32_state(42);std::uint32_t distance=0;
+    auto input=[](std::uint64_t tick){return DetTickInput{tick,1,{{1,0,1,{3}},{2,0,1,{static_cast<std::uint8_t>(tick%7)}}}};};
+    for(std::uint64_t tick=0;tick<10000;++tick) {
+        const auto in=input(tick);require(baseline.advance(in),baseline.error());
+        require(owner.submit(1,{tick,1,{in.commands[0]}}),owner.error());
+        if(tick>=2){const auto past=input(tick-2);require(owner.submit(2,{tick-2,1,{past.commands[1]}}),owner.error());}
+        require(owner.advance(),owner.error());
+        eventCount+=owner.takeConfirmedEvents().size();distance+=3+static_cast<std::uint32_t>(tick%7);
+        const auto cp=baseline.checkpoint();require(cp->globals.at(2)[1]==ayt::math::pcg32(oracle),"rollback script independent RNG");
+    }
+    for(std::uint64_t tick=9998;tick<10000;++tick){const auto in=input(tick);require(owner.submit(2,{tick,1,{in.commands[1]}}),owner.error());}
+    eventCount+=owner.takeConfirmedEvents().size();
+    const auto cp=s.checkpoint();require(owner.confirmedNextTick()==10000&&eventCount==10000&&owner.rollbackCount()>100,"Logia corrections and effect count");
+    require(cp->actors.at(2).pose.position[0]==(D::fromUInt(distance)/D::fromUInt(64)).bits(),"Logia rollback independent pose");
+    require(encodeDetCheckpoint(*cp)==encodeDetCheckpoint(*baseline.checkpoint()),"Logia rollback full state/RNG/counter bytes");
+    std::cout<<"PASS actual Logia rollback 10000 delayed-input ticks, independent pose/RNG and exactly 10000 confirmed effects\n";
+}
 void fault(const std::string& body,const std::string& diagnostic,DetLogiaOptions options={}){
     DeterministicSession s({1,1,1,64,0});require(configure(s,compile(wrap(body),options)),"fault configure");
     const auto before=*s.checkpoint();require(!s.advance({0,1,{}})&&s.faulted(),"must fault");
@@ -82,4 +113,5 @@ int main(){try{
     DeterministicSession c;require(configure(c,controls)&&c.advance({0,1,{}}),"control flow: "+c.error());
     require(c.checkpoint()->globals.at(2)[0]==8 && c.checkpoint()->globals.at(2)[2]==0x3fd00000u,"loop/lazy/decimal golden");
     std::cout<<"PASS code/options manifest4, type rejection, loop/lazy control flow, checked arithmetic, budgets and fault restore\n";
+    rollbackChecks();
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}}

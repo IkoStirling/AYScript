@@ -3252,3 +3252,10 @@ Run 37653449840 executed profile1 on native GCC13.3/Clang18.1 x64/ARM64, all fou
 jobs passed the same 10000-tick hash 9f427001d6f95e05 and 5000 checkpoint replay.
 Ordinary Lua/native providers are not covered by this deterministic profile;
 Windows ordinary fast/integration/AsyncStress regressions also passed after GC fix.
+
+Stage14 adds actual deterministic Logia rollback coverage to the same portable
+AYScript_DeterministicChecks: 10000 delayed-input ticks, software pose from input
+bytes, registered RNG/counter restoration, full baseline bytes and exactly 10000
+confirmed presentation events. No interpreter semantics changed; callbacks run
+again through the same Session under AYEntity's bounded rollback owner. See
+[Stage14](../../AYDocs/DETERMINISTIC-ROLLBACK-STAGE14.md).
